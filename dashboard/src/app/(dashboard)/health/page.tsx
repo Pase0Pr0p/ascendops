@@ -37,8 +37,8 @@ export default async function HealthPage({
 
   const [heartbeats, allTasks, eventCounts] = await Promise.all([
     getAllHeartbeats(),
-    Promise.resolve(getTasks({ org })),
-    Promise.resolve(getEventCountsByAgent(org)),
+    getTasks({ org }),
+    getEventCountsByAgent(org),
   ]);
 
   const filteredHeartbeats = org
