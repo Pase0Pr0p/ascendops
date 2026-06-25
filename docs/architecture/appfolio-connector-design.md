@@ -1,68 +1,71 @@
 # AppFolio Connector — Design Document
 
-**Status:** Draft  
+**Status:** Ready for implementation (one TODO pending)  
 **Author:** claudia  
 **Branch:** feat/appfolio-connector-design  
 **Created:** 2026-06-25  
-**Decision pending:** Rob confirms access path at 9am PT 2026-06-25
+**Last revised:** 2026-06-25 (rev 2 — Stack API confirmed, self-serve provisioning documented)
 
 ---
 
 ## 1. Purpose
 
-This document defines the design for the AppFolio data connector — the layer that gives Paseo's automation workflows access to portfolio data (leases, maintenance, rent roll, owner financials, tenants). The design is **path-agnostic**: a single abstract interface is defined once; the two candidate implementations (Stack API and Skywalk) slot in behind it. Callers never reference the access path.
+This document defines the design for the AppFolio data connector — the layer that gives Paseo's automation workflows access to portfolio data (leases, maintenance, rent roll, owner financials, tenants). The connector uses the **AppFolio Stack Database API** as its confirmed access path. A single abstract interface is defined once; the mock implementation and the live Stack API implementation slot in behind it. Callers never reference the access path directly.
 
-Goal: when Rob confirms the path at 9am, implementation begins from a finished interface + fixtures, not a blank page.
+**One open TODO:** read-only vs read/write scope depends on Rob's subscription tier (Plus vs Max). Everything else is settled. See §10.
 
 ---
 
-## 2. Access Path Comparison
+## 2. Access Path — AppFolio Stack Database API
 
-### 2.1 Stack API — AppFolio First-Party REST
+### 2.1 What it is
 
-AppFolio's native REST API, maintained by AppFolio Inc.
+The Stack Database API is AppFolio's first-party REST API. It is the confirmed and sole primary access path for this connector.
+
+**Confirmed:** self-provisioned by the property manager. Rob generates credentials directly via the AppFolio Developer Portal — no partner approval, no marketplace process, no AppFolio support ticket. Lead time is minutes to days, not months. The final click-through happens when Rob logs into the Developer Portal to generate credentials; the path itself is settled.
+
+### 2.2 Auth model
+
+OAuth 2.0 client credentials flow:
+
+1. Rob logs into the AppFolio Developer Portal and creates an application → receives `client_id` + `client_secret`
+2. Connector POSTs to the token endpoint with `grant_type=client_credentials`
+3. Bearer token returned with expiry (typically 1 hour)
+4. Connector handles token refresh transparently — callers never manage tokens
+
+Credentials live in org `secrets.env` as `APPFOLIO_CLIENT_ID`, `APPFOLIO_CLIENT_SECRET`, `APPFOLIO_ACCOUNT_ID`. Never committed to the repo.
+
+### 2.3 Data access
 
 | Dimension | Detail |
 |---|---|
-| **Auth** | OAuth 2.0 client credentials flow. `client_id` + `client_secret` → bearer token. Tokens expire (typically 1h); connector handles refresh transparently. Credentials issued per AppFolio account by AppFolio support. |
 | **Base URL** | `https://api.appfolio.com/api/v1/` (account-scoped) |
-| **Data shape** | RESTful JSON. Resources: `properties`, `leases`, `tenants`, `work_orders`, `owner_statements`, `journal_entries`, `rent_roll`. Pagination via `page` + `per_page`. |
-| **Rate limits** | AppFolio-imposed; typically 60 req/min per credential set. Connector must implement retry with exponential backoff. |
-| **Coverage** | Full — all core PM entities. This is the source of truth. |
-| **Latency** | Real-time reads. No bulk export endpoint; must paginate for large data sets. |
-| **Credential complexity** | Low. Single OAuth credential set from AppFolio. |
-| **Risk** | AppFolio can deprecate/version endpoints. We own the integration — our responsibility to track API changes. |
+| **Data shape** | RESTful JSON. Pagination via `page` + `per_page`. |
+| **Rate limits** | AppFolio-imposed (~60 req/min per credential set). Connector implements retry with exponential backoff on 429. |
+| **Coverage** | Full — properties, leases, tenants, work orders, owner statements, journal entries, rent roll. |
+| **Latency** | Real-time reads. No bulk export; paginate for large datasets. |
+| **Write-back** | See §10 — depends on subscription tier. |
 
-### 2.2 Skywalk — Third-Party Data Integration Layer
+### 2.4 Subscription tier — the one open question
 
-Skywalk is a middleware platform that aggregates property management data across multiple PM software providers, including AppFolio. Relevant when direct API access is unavailable or when multi-source normalization is needed.
+AppFolio offers two tiers relevant to API access:
 
-| Dimension | Detail |
+| Tier | API Scope |
 |---|---|
-| **Auth** | API key (static, issued by Skywalk). Passed as `X-API-Key` header or equivalent. Simpler credential lifecycle than OAuth. |
-| **Base URL** | Skywalk-issued endpoint (varies by account tier). |
-| **Data shape** | Skywalk normalizes data into its own schema — not AppFolio's native shape. Fields map to PM industry standard but require translation to Paseo's internal model. |
-| **Rate limits** | Skywalk-imposed per subscription tier. Generally more generous than direct API due to Skywalk's own caching layer. |
-| **Coverage** | Depends on Skywalk's AppFolio adapter. Core entities (leases, rent roll, work orders) covered. Owner financials coverage varies by tier. |
-| **Latency** | Skywalk caches AppFolio data; reads may be up to 15 min stale. Not suitable for real-time write-back. |
-| **Credential complexity** | Low (static key), but adds Skywalk as a vendor dependency. |
-| **Risk** | Double dependency (AppFolio + Skywalk). Skywalk schema changes break our translation layer. Vendor lock-in to Skywalk's pricing. |
+| **Plus** | Read-only — monitoring, reporting, dashboard population |
+| **Max** | Read + write — full automation (update work order status, post journal entries, trigger workflows from our system back into AppFolio) |
 
-### 2.3 Path Recommendation (for Rob's decision)
-
-Stack API is the primary recommendation:
-- Direct, real-time, full-coverage
-- No vendor intermediary
-- Lower ongoing cost at scale
-- Aligns with AppFolio's own support path
-
-Skywalk is the fallback if AppFolio credential issuance is blocked or takes too long. Once Stack API credentials land, migrating from Skywalk to Stack API requires only swapping the concrete implementation — callers are unchanged.
+> **TODO (pending Rob's answer):** Which tier does Paseo currently have?
+> - **Plus → read-only connector.** Disable all write methods; throw `NotSupportedError` with a clear message. Sufficient for maintenance monitoring, leasing pipeline visibility, and financial reporting.
+> - **Max → full read/write connector.** Enable write methods. Unlocks: closing work orders from our system, posting owner statement adjustments, automating rent roll updates.
+>
+> The interface is designed for both. When Rob's answer lands, set `APPFOLIO_WRITE_ENABLED=true|false` in secrets.env and implement the write methods (or leave them as stubs that throw `NotSupportedError`).
 
 ---
 
 ## 3. Connector Interface
 
-The entire application codes against this interface. The concrete implementation (Stack API or Skywalk) is injected at startup.
+The entire application codes against this interface. The implementation (live Stack API or mock) is injected at startup via the factory (§5).
 
 ```typescript
 // src/connectors/appfolio/types.ts
@@ -173,25 +176,37 @@ export interface AppFolioConnector {
   // Owner financials
   getOwnerStatement(ownerId: string, periodStart: string, periodEnd: string): Promise<OwnerStatement>;
   listOwnerStatements(ownerId: string, opts?: ListOptions): Promise<OwnerStatement[]>;
+
+  // Write methods — available on Max tier only.
+  // On Plus tier: throw NotSupportedError('Requires AppFolio Max subscription').
+  // TODO: implement once Rob confirms tier.
+  updateWorkOrderStatus?(id: string, status: WorkOrderStatus, note?: string): Promise<WorkOrder>;
+}
+
+export class NotSupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotSupportedError';
+  }
 }
 ```
 
 ---
 
-## 4. Concrete Implementations (stubs — fill in when path confirmed)
-
-### 4.1 Stack API Implementation
+## 4. Stack API Implementation (stub — fill in when credentials land)
 
 ```typescript
 // src/connectors/appfolio/stack-api.connector.ts
 
 import type { AppFolioConnector, WorkOrder, Lease, Tenant, RentRollEntry, OwnerStatement, ListOptions } from './types';
+import { NotSupportedError } from './types';
 
 interface StackApiConfig {
   clientId: string;
   clientSecret: string;
-  accountId: string;            // AppFolio account subdomain
-  baseUrl?: string;             // defaults to https://api.appfolio.com/api/v1
+  accountId: string;
+  baseUrl?: string;
+  writeEnabled?: boolean;       // true = Max tier, false/absent = Plus tier
 }
 
 export class StackApiConnector implements AppFolioConnector {
@@ -207,53 +222,26 @@ export class StackApiConnector implements AppFolioConnector {
     if (this.token && Date.now() < this.tokenExpiresAt - 60_000) return this.token;
     // TODO: POST /oauth/token with client_credentials grant
     // Store token + expiry. Throw on auth failure.
-    throw new Error('StackApiConnector.getToken: not yet implemented');
+    throw new Error('StackApiConnector.getToken: not yet implemented — awaiting credentials');
   }
 
   private async get<T>(path: string, params?: Record<string, string | number>): Promise<T> {
     const token = await this.getToken();
-    // TODO: fetch with Authorization: Bearer, handle rate limit (429 + retry), pagination
+    // TODO: fetch with Authorization: Bearer, handle 429 (retry w/ backoff), pagination
     void token; void path; void params;
     throw new Error('StackApiConnector.get: not yet implemented');
   }
 
-  async ping() { return { ok: false, latencyMs: 0 }; }
-  async listWorkOrders(_opts?: ListOptions): Promise<WorkOrder[]> { throw new Error('not implemented'); }
-  async getWorkOrder(_id: string): Promise<WorkOrder> { throw new Error('not implemented'); }
-  async listLeases(_opts?: ListOptions): Promise<Lease[]> { throw new Error('not implemented'); }
-  async getLease(_id: string): Promise<Lease> { throw new Error('not implemented'); }
-  async listTenants(_opts?: ListOptions): Promise<Tenant[]> { throw new Error('not implemented'); }
-  async getTenant(_id: string): Promise<Tenant> { throw new Error('not implemented'); }
-  async getRentRoll(_opts?: { propertyId?: string }): Promise<RentRollEntry[]> { throw new Error('not implemented'); }
-  async getOwnerStatement(_ownerId: string, _start: string, _end: string): Promise<OwnerStatement> { throw new Error('not implemented'); }
-  async listOwnerStatements(_ownerId: string, _opts?: ListOptions): Promise<OwnerStatement[]> { throw new Error('not implemented'); }
-}
-```
-
-### 4.2 Skywalk Implementation
-
-```typescript
-// src/connectors/appfolio/skywalk.connector.ts
-
-import type { AppFolioConnector, WorkOrder, Lease, Tenant, RentRollEntry, OwnerStatement, ListOptions } from './types';
-
-interface SkywalkConfig {
-  apiKey: string;
-  baseUrl: string;              // Skywalk-issued, account-specific
-}
-
-export class SkywalkConnector implements AppFolioConnector {
-  constructor(private readonly config: SkywalkConfig) {}
-
-  private async get<T>(path: string, params?: Record<string, string | number>): Promise<T> {
-    // TODO: fetch with X-API-Key header, map Skywalk schema to internal types
-    void path; void params;
-    throw new Error('SkywalkConnector.get: not yet implemented');
+  private async patch<T>(path: string, body: unknown): Promise<T> {
+    if (!this.config.writeEnabled) {
+      throw new NotSupportedError('Requires AppFolio Max subscription (write-back not enabled)');
+    }
+    const token = await this.getToken();
+    // TODO: PATCH with Authorization: Bearer
+    void token; void path; void body;
+    throw new Error('StackApiConnector.patch: not yet implemented');
   }
 
-  // Same method stubs as StackApiConnector — Skywalk schema translation happens here.
-  // The translation layer is the only difference from the caller's perspective.
-
   async ping() { return { ok: false, latencyMs: 0 }; }
   async listWorkOrders(_opts?: ListOptions): Promise<WorkOrder[]> { throw new Error('not implemented'); }
   async getWorkOrder(_id: string): Promise<WorkOrder> { throw new Error('not implemented'); }
@@ -262,9 +250,16 @@ export class SkywalkConnector implements AppFolioConnector {
   async listTenants(_opts?: ListOptions): Promise<Tenant[]> { throw new Error('not implemented'); }
   async getTenant(_id: string): Promise<Tenant> { throw new Error('not implemented'); }
   async getRentRoll(_opts?: { propertyId?: string }): Promise<RentRollEntry[]> { throw new Error('not implemented'); }
-  async getOwnerStatement(_ownerId: string, _start: string, _end: string): Promise<OwnerStatement> { throw new Error('not implemented'); }
-  async listOwnerStatements(_ownerId: string, _opts?: ListOptions): Promise<OwnerStatement[]> { throw new Error('not implemented'); }
+  async getOwnerStatement(_o: string, _s: string, _e: string): Promise<OwnerStatement> { throw new Error('not implemented'); }
+  async listOwnerStatements(_o: string, _opts?: ListOptions): Promise<OwnerStatement[]> { throw new Error('not implemented'); }
+
+  async updateWorkOrderStatus(id: string, status: WorkOrderStatus, note?: string): Promise<WorkOrder> {
+    return this.patch(`/work_orders/${id}`, { status, note });
+  }
 }
+
+// Import at call site to satisfy TS — remove when method is implemented
+import type { WorkOrderStatus } from './types';
 ```
 
 ---
@@ -276,23 +271,18 @@ export class SkywalkConnector implements AppFolioConnector {
 
 import type { AppFolioConnector } from './types';
 import { StackApiConnector } from './stack-api.connector';
-import { SkywalkConnector } from './skywalk.connector';
 import { MockConnector } from './mock.connector';
 
-export type ConnectorPath = 'stack-api' | 'skywalk' | 'mock';
+export type ConnectorPath = 'stack-api' | 'mock';
 
-export function createAppFolioConnector(path: ConnectorPath): AppFolioConnector {
+export function createAppFolioConnector(path: ConnectorPath = 'mock'): AppFolioConnector {
   switch (path) {
     case 'stack-api':
       return new StackApiConnector({
         clientId: requireEnv('APPFOLIO_CLIENT_ID'),
         clientSecret: requireEnv('APPFOLIO_CLIENT_SECRET'),
         accountId: requireEnv('APPFOLIO_ACCOUNT_ID'),
-      });
-    case 'skywalk':
-      return new SkywalkConnector({
-        apiKey: requireEnv('SKYWALK_API_KEY'),
-        baseUrl: requireEnv('SKYWALK_BASE_URL'),
+        writeEnabled: process.env.APPFOLIO_WRITE_ENABLED === 'true',
       });
     case 'mock':
       return new MockConnector();
@@ -308,18 +298,18 @@ function requireEnv(key: string): string {
 export type { AppFolioConnector } from './types';
 ```
 
-Env var to control path: `APPFOLIO_CONNECTOR_PATH=stack-api|skywalk|mock` (default: `mock` in dev/test).
+`APPFOLIO_CONNECTOR_PATH=stack-api` in staging/prod. Default (`mock`) requires no env vars — works out of the box in dev and CI.
 
 ---
 
 ## 6. Mock / Fixture Layer
 
-The mock connector ships representative fixture data for every entity. Zero credentials, zero network. Used in dev and all unit/integration tests.
+Zero credentials, zero network. Used in dev and all unit/integration tests.
 
 ```typescript
 // src/connectors/appfolio/mock.connector.ts
 
-import type { AppFolioConnector, WorkOrder, Lease, Tenant, RentRollEntry, OwnerStatement, ListOptions } from './types';
+import type { AppFolioConnector, WorkOrder, Lease, Tenant, RentRollEntry, OwnerStatement, ListOptions, WorkOrderStatus } from './types';
 import { FIXTURE_WORK_ORDERS, FIXTURE_LEASES, FIXTURE_TENANTS, FIXTURE_RENT_ROLL, FIXTURE_OWNER_STATEMENTS } from './fixtures';
 
 export class MockConnector implements AppFolioConnector {
@@ -355,6 +345,10 @@ export class MockConnector implements AppFolioConnector {
   async listOwnerStatements(ownerId: string, _opts?: ListOptions): Promise<OwnerStatement[]> {
     return FIXTURE_OWNER_STATEMENTS.filter(s => s.ownerId === ownerId);
   }
+  async updateWorkOrderStatus(id: string, status: WorkOrderStatus, _note?: string): Promise<WorkOrder> {
+    const wo = await this.getWorkOrder(id);
+    return { ...wo, status, updatedAt: new Date().toISOString() };
+  }
 }
 
 function filter<T extends { propertyId?: string; updatedAt?: string }>(items: T[], opts?: ListOptions): T[] {
@@ -379,7 +373,7 @@ function findOrThrow<T extends { id: string }>(items: T[], id: string): T {
 
 ### 6.1 Fixture Data
 
-Representative data for a 550-door SF portfolio. Enough coverage to exercise all workflows.
+Representative SF portfolio data covering all five entity types.
 
 ```typescript
 // src/connectors/appfolio/fixtures.ts
@@ -398,7 +392,7 @@ export const FIXTURE_WORK_ORDERS: WorkOrder[] = [
     priority: 'normal',
     createdAt: '2026-06-20T14:00:00Z',
     updatedAt: '2026-06-20T14:00:00Z',
-    estimatedCost: 15000,       // $150.00
+    estimatedCost: 15000,
   },
   {
     id: 'wo-002',
@@ -412,7 +406,7 @@ export const FIXTURE_WORK_ORDERS: WorkOrder[] = [
     createdAt: '2026-06-22T09:00:00Z',
     updatedAt: '2026-06-23T11:30:00Z',
     vendorId: 'vendor-cooltech',
-    estimatedCost: 45000,       // $450.00
+    estimatedCost: 45000,
   },
   {
     id: 'wo-003',
@@ -425,7 +419,7 @@ export const FIXTURE_WORK_ORDERS: WorkOrder[] = [
     createdAt: '2026-06-18T10:00:00Z',
     updatedAt: '2026-06-19T16:00:00Z',
     completedAt: '2026-06-19T16:00:00Z',
-    actualCost: 8500,           // $85.00
+    actualCost: 8500,
   },
 ];
 
@@ -471,7 +465,7 @@ export const FIXTURE_LEASES: Lease[] = [
     tenantIds: ['tenant-001'],
     startDate: '2025-09-01',
     endDate: '2026-08-31',
-    monthlyRent: 285000,        // $2,850.00
+    monthlyRent: 285000,
     securityDeposit: 285000,
     moveInDate: '2025-09-01',
   },
@@ -483,7 +477,7 @@ export const FIXTURE_LEASES: Lease[] = [
     tenantIds: ['tenant-002'],
     startDate: '2024-07-01',
     endDate: '2026-06-30',
-    monthlyRent: 320000,        // $3,200.00
+    monthlyRent: 320000,
     securityDeposit: 320000,
     moveInDate: '2024-07-01',
     moveOutDate: '2026-06-30',
@@ -495,7 +489,7 @@ export const FIXTURE_LEASES: Lease[] = [
     status: 'month_to_month',
     tenantIds: ['tenant-003'],
     startDate: '2023-03-01',
-    monthlyRent: 195000,        // $1,950.00
+    monthlyRent: 195000,
     securityDeposit: 195000,
     moveInDate: '2023-03-01',
   },
@@ -542,9 +536,9 @@ export const FIXTURE_OWNER_STATEMENTS: OwnerStatement[] = [
     propertyId: 'prop-mission-101',
     periodStart: '2026-06-01',
     periodEnd: '2026-06-30',
-    grossIncome: 605000,        // $6,050.00 (two units paid)
-    totalExpenses: 68500,       // $685.00 (wo-001 estimate + common area)
-    managementFee: 60500,       // 10% of gross
+    grossIncome: 605000,
+    totalExpenses: 68500,
+    managementFee: 60500,
     netOwnerDistribution: 476000,
     lineItems: [
       { date: '2026-06-01', description: 'Rent — Unit 3B (Gonzalez)', amount: 285000, category: 'income' },
@@ -565,56 +559,65 @@ export const FIXTURE_OWNER_STATEMENTS: OwnerStatement[] = [
 ```
 src/connectors/appfolio/
   index.ts              — factory + re-exports (createAppFolioConnector)
-  types.ts              — AppFolioConnector interface + all entity types
+  types.ts              — AppFolioConnector interface, entity types, NotSupportedError
   mock.connector.ts     — MockConnector (always available, no creds)
-  fixtures.ts           — fixture data for mock
-  stack-api.connector.ts — StackApiConnector (implement when path confirmed)
-  skywalk.connector.ts   — SkywalkConnector (implement if Stack API blocked)
+  fixtures.ts           — fixture data for mock + tests
+  stack-api.connector.ts — StackApiConnector (implement when credentials land)
 ```
 
 ---
 
 ## 8. Environment Variables
 
-| Variable | Used by | Required when |
+| Variable | Required when | Notes |
 |---|---|---|
-| `APPFOLIO_CONNECTOR_PATH` | Factory | Always (defaults to `mock`) |
-| `APPFOLIO_CLIENT_ID` | StackApiConnector | `path=stack-api` |
-| `APPFOLIO_CLIENT_SECRET` | StackApiConnector | `path=stack-api` |
-| `APPFOLIO_ACCOUNT_ID` | StackApiConnector | `path=stack-api` |
-| `SKYWALK_API_KEY` | SkywalkConnector | `path=skywalk` |
-| `SKYWALK_BASE_URL` | SkywalkConnector | `path=skywalk` |
+| `APPFOLIO_CONNECTOR_PATH` | Always | `stack-api` or `mock` (default: `mock`) |
+| `APPFOLIO_CLIENT_ID` | `path=stack-api` | From Developer Portal |
+| `APPFOLIO_CLIENT_SECRET` | `path=stack-api` | From Developer Portal |
+| `APPFOLIO_ACCOUNT_ID` | `path=stack-api` | AppFolio account subdomain |
+| `APPFOLIO_WRITE_ENABLED` | `path=stack-api`, Max tier only | `true` enables write methods; omit or `false` for Plus/read-only |
 
-In dev/test: set `APPFOLIO_CONNECTOR_PATH=mock`. No other env vars needed.
+In dev/CI: no env vars needed. `APPFOLIO_CONNECTOR_PATH` defaults to `mock`.
+
+### 8.1 Credential provisioning (self-serve)
+
+Rob provisions credentials directly:
+1. Log into the AppFolio Developer Portal (login-gated — requires Rob's AppFolio credentials)
+2. Create a new application → receive `client_id` + `client_secret`
+3. Add to `orgs/paseo-pm/secrets.env` as `APPFOLIO_CLIENT_ID` and `APPFOLIO_CLIENT_SECRET`
+4. Set `APPFOLIO_CONNECTOR_PATH=stack-api` and `APPFOLIO_WRITE_ENABLED=true|false` per tier
+5. Restart the connector service
+
+No partner approval, no AppFolio support ticket, no marketplace review.
 
 ---
 
 ## 9. Testing Strategy
 
-- **Unit tests:** mock connector + fixtures cover all workflow logic. 100% of business logic is testable without credentials.
-- **Integration tests:** tagged `@integration`, skipped in CI unless `APPFOLIO_CONNECTOR_PATH` is set to a live path. Run manually before release.
-- **Contract tests:** once a live path is confirmed, add a thin suite that calls `ping()`, `listWorkOrders({ limit: 1 })`, `getRentRoll()` and asserts shape — catches API changes early.
+- **Unit tests:** mock connector + fixtures. All workflow logic is testable today, zero credentials.
+- **Integration tests:** tagged `@integration`, skipped in CI unless `APPFOLIO_CONNECTOR_PATH=stack-api` is set. Run manually before live release.
+- **Contract tests:** once credentials land, a thin suite calling `ping()`, `listWorkOrders({ limit: 1 })`, `getRentRoll()` asserts response shape — catches API changes early.
 
 ---
 
-## 10. Open Questions (for Rob, 9am PT)
+## 10. Open Questions
 
-| # | Question | Impact |
-|---|---|---|
-| 1 | Stack API or Skywalk? | Determines which concrete class to implement first |
-| 2 | Does AppFolio support already have Stack API credentials for Paseo's account? | If yes, Stack API path can start immediately |
-| 3 | Is Skywalk already contracted/paid for? | Changes cost calculus on fallback path |
-| 4 | Write-back required? (e.g. update work order status from our system into AppFolio) | Both paths support reads; write-back scope affects interface |
-| 5 | Which entities are highest priority? (maintenance? leasing? financials?) | Determines implementation order within the chosen path |
+| # | Question | Impact | Status |
+|---|---|---|---|
+| 1 | ~~Stack API or Skywalk?~~ | ~~Path selection~~ | **Resolved:** Stack Database API confirmed |
+| 2 | ~~Does AppFolio support need to issue credentials?~~ | ~~Timeline~~ | **Resolved:** Self-serve via Developer Portal, no approval needed |
+| 3 | Which subscription tier — Plus or Max? | Determines whether `APPFOLIO_WRITE_ENABLED=true`. Plus = read-only monitoring. Max = full read/write automation. | **OPEN — pending Rob's answer** |
+| 4 | Which entities are highest priority? | Implementation order within the connector | Suggested default: work orders → leases/tenants → rent roll → owner financials |
 
 ---
 
-## 11. Implementation Order (once path confirmed)
+## 11. Implementation Order (when credentials land)
 
-1. Implement `ping()` + auth on chosen connector — verify credentials work
-2. `listWorkOrders` + `getWorkOrder` — maintenance workflow unblocked
-3. `listLeases` + `getLease` + `listTenants` — leasing pipeline unblocked
-4. `getRentRoll` — delinquency visibility
-5. `getOwnerStatement` + `listOwnerStatements` — owner comms unblocked
-6. Swap `APPFOLIO_CONNECTOR_PATH` from `mock` to live path in staging env
-7. Run contract tests, confirm shape matches, ship
+1. Implement `ping()` + auth on `StackApiConnector` — verify credentials work end-to-end
+2. `listWorkOrders` + `getWorkOrder` — unblocks maintenance coordination workflow
+3. `listLeases` + `getLease` + `listTenants` — unblocks leasing pipeline
+4. `getRentRoll` — unblocks delinquency visibility
+5. `getOwnerStatement` + `listOwnerStatements` — unblocks owner comms automation
+6. If Max tier: implement `updateWorkOrderStatus` and other write methods
+7. Set `APPFOLIO_CONNECTOR_PATH=stack-api` in staging, run contract tests, confirm shape
+8. Ship
