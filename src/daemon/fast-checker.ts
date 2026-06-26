@@ -857,10 +857,17 @@ export class FastChecker {
     } catch { /* non-critical */ }
 
     // Signal 1: session-survey prompt → immediate hard restart
+    // Cap the scan to SURVEY_SCAN_MAX_BYTES from the tail. Without this cap,
+    // when stdoutHighWater resets to 0 after a log rotation the read is
+    // size-bytes = the full file, which blocks the event loop beyond
+    // STALL_THRESHOLD_MS and self-triggers pollCycleWatchdog → restart loop.
+    // The survey prompt always appears near the end of stdout (context exhaust
+    // is a terminal event), so scanning only the tail is sufficient.
+    const SURVEY_SCAN_MAX_BYTES = 20_000;
     if (size > stdoutHighWater) {
       let surveyTail = '';
       try {
-        const start = stdoutHighWater;
+        const start = Math.max(stdoutHighWater, size - SURVEY_SCAN_MAX_BYTES);
         const bytes = size - start;
         if (bytes > 0) {
           const fd = openSync(stdoutPath, 'r');
