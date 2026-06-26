@@ -11,7 +11,7 @@ async function loadStripAnsi() {
   return stripAnsi;
 }
 
-const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB — rotate before OS file-cache pressure builds
+const MAX_LOG_BYTES = 5 * 1024 * 1024; // 5 MB — rotate well before the ~8MB watchdog stall point
 
 /**
  * Ring buffer for PTY output. Replaces tmux capture-pane.

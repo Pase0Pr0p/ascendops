@@ -1872,11 +1872,14 @@ describe('FastChecker', () => {
       }
     });
 
-    it('detects a new survey even when more than 20KB of output follows it', () => {
+    it('detects a new survey when it falls within the 20KB tail-scan window', () => {
+      // Survey + trailing output together fit within SURVEY_SCAN_MAX_BYTES (20KB),
+      // so start = Math.max(stdoutHighWater, size-20000) = stdoutHighWater and the
+      // survey is captured. This exercises the normal (non-buggy) path.
       const stdoutPath = join(paths.logDir, 'stdout.log');
       const priorOutput = 'handled survey from previous session';
       const survey = 'How is Claude doing this session?';
-      const trailingOutput = 'x'.repeat(21000);
+      const trailingOutput = 'x'.repeat(19000); // survey+trailing < 20KB → within scan cap
       writeFileSync(
         join(paths.stateDir, '.watchdog-restart-at'),
         JSON.stringify({
@@ -1896,6 +1899,29 @@ describe('FastChecker', () => {
       expect(agent.hardRestartSelf).toHaveBeenCalledTimes(1);
       const marker = JSON.parse(readFileSync(join(paths.stateDir, '.watchdog-restart-at'), 'utf-8'));
       expect(marker.stdoutHighWater).toBe(statSync(stdoutPath).size);
+    });
+
+    it('detects survey in large file when stdoutHighWater was reset to 0 (regression: restart-loop bug)', () => {
+      // Bug scenario: stdoutHighWater resets to 0 after a log rotation. Without the
+      // SURVEY_SCAN_MAX_BYTES cap the read was bytes=size (full file), blocking the
+      // event loop >90s and triggering pollCycleWatchdog → self-sustaining restart loop.
+      // Fix: start = Math.max(0, size - 20000), so only the last 20KB is read.
+      // The survey prompt always appears near the tail (context exhaust is terminal),
+      // so this is sufficient for detection.
+      const stdoutPath = join(paths.logDir, 'stdout.log');
+      const bulkOutput = 'y'.repeat(25000); // simulates a large log that grew before context exhausted
+      const survey = 'How is Claude doing this session?';
+      // No restart marker: stdoutHighWater = 0 (default when marker is absent/reset)
+      writeFileSync(stdoutPath, `${bulkOutput}${survey}`, 'utf-8');
+
+      const agent = makeAgentWithDir(join(testDir, 'agent-zero-highwater'));
+      const checker = new FastChecker(agent, paths, '/framework') as any;
+      checker.bootstrappedAt = Date.now() - checker.BOOTSTRAP_GRACE_MS - 1;
+
+      checker.watchdogCheck();
+
+      // Survey is in the last 33 bytes of a 25033-byte file — within the 20KB cap.
+      expect(agent.hardRestartSelf).toHaveBeenCalledTimes(1);
     });
 
     it('does not persist marker or notify when hard restart is rejected by stopped status', () => {
