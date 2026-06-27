@@ -1,10 +1,10 @@
 # AppFolio Connector — Design Document
 
-**Status:** Ready for implementation (one TODO pending)  
+**Status:** Ready for implementation (two TODOs pending)  
 **Author:** claudia  
 **Branch:** feat/appfolio-connector-design  
 **Created:** 2026-06-25  
-**Last revised:** 2026-06-25 (rev 2 — Stack API confirmed, self-serve provisioning documented)
+**Last revised:** 2026-06-27 (rev 3 — AP/bills gap documented; Stack API Bills resource + Reporting API v2 confirmed)
 
 ---
 
@@ -12,7 +12,9 @@
 
 This document defines the design for the AppFolio data connector — the layer that gives Paseo's automation workflows access to portfolio data (leases, maintenance, rent roll, owner financials, tenants). The connector uses the **AppFolio Stack Database API** as its confirmed access path. A single abstract interface is defined once; the mock implementation and the live Stack API implementation slot in behind it. Callers never reference the access path directly.
 
-**One open TODO:** read-only vs read/write scope depends on Rob's subscription tier (Plus vs Max). Everything else is settled. See §10.
+**Two open TODOs:**
+1. Read-only vs read/write scope depends on Rob's subscription tier (Plus vs Max). See §10.
+2. AP/bills interface not yet implemented — Stack API Bills resource confirmed, Reporting API v2 aged_payables confirmed. See §3 and §10.
 
 ---
 
@@ -42,7 +44,7 @@ Credentials live in org `secrets.env` as `APPFOLIO_CLIENT_ID`, `APPFOLIO_CLIENT_
 | **Base URL** | `https://api.appfolio.com/api/v1/` (account-scoped) |
 | **Data shape** | RESTful JSON. Pagination via `page` + `per_page`. |
 | **Rate limits** | AppFolio-imposed (~60 req/min per credential set). Connector implements retry with exponential backoff on 429. |
-| **Coverage** | Full — properties, leases, tenants, work orders, owner statements, journal entries, rent roll. |
+| **Coverage** | Properties, leases, tenants, work orders, owner statements, journal entries, rent roll, **bills/AP** (Bills resource — GET/POST/PATCH), vendors. |
 | **Latency** | Real-time reads. No bulk export; paginate for large datasets. |
 | **Write-back** | See §10 — depends on subscription tier. |
 
@@ -146,11 +148,59 @@ export interface OwnerStatementLineItem {
   category: 'income' | 'expense' | 'fee' | 'adjustment';
 }
 
+// Accounts Payable — Stack API Bills resource
+// Source: GET /api/v1/bills (Stack Database API) + /reports/aged_payables_summary.json (Reporting API v2)
+export type BillStatus = 'draft' | 'pending_approval' | 'approved' | 'paid' | 'voided';
+
+export interface BillLineItem {
+  glAccountId: string;
+  amount: number;               // cents
+  description?: string;
+  propertyId?: string;
+  unit?: string;
+  serviceStartDate?: string;    // YYYY-MM-DD
+  serviceEndDate?: string;
+  workOrderId?: string;
+}
+
+export interface Bill {
+  id: string;
+  vendorId: string;
+  propertyId?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;         // YYYY-MM-DD
+  dueDate?: string;             // YYYY-MM-DD
+  totalAmount: number;          // cents
+  status: BillStatus;
+  approvalStatus?: string;
+  lineItems: BillLineItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgedPayablesEntry {
+  vendorId: string;
+  vendorName: string;
+  current: number;              // cents — not yet due
+  days1to30: number;            // cents
+  days31to60: number;           // cents
+  days61to90: number;           // cents
+  over90: number;               // cents
+  total: number;                // cents
+}
+
 export interface ListOptions {
   propertyId?: string;
   since?: string;               // ISO 8601 — filter by updatedAt
   limit?: number;
   offset?: number;
+}
+
+export interface ListBillsOptions extends ListOptions {
+  vendorId?: string;
+  status?: BillStatus;
+  dueBefore?: string;           // YYYY-MM-DD
+  dueAfter?: string;            // YYYY-MM-DD
 }
 
 // The single interface callers use. Never import a concrete class directly.
@@ -177,10 +227,19 @@ export interface AppFolioConnector {
   getOwnerStatement(ownerId: string, periodStart: string, periodEnd: string): Promise<OwnerStatement>;
   listOwnerStatements(ownerId: string, opts?: ListOptions): Promise<OwnerStatement[]>;
 
+  // Accounts Payable — bills + aged payables
+  // Source: Stack API Bills resource (GET /api/v1/bills) + Reporting API v2 (/reports/aged_payables_summary.json)
+  // Read (GET bills, aged payables): available on Plus+add-on and Max.
+  // Write (create/update bill): write-gate tier not yet confirmed — likely Max only. TODO: verify at credential-gen.
+  listBills(opts?: ListBillsOptions): Promise<Bill[]>;
+  getBill(id: string): Promise<Bill>;
+  getAgedPayables(asOf?: string): Promise<AgedPayablesEntry[]>;  // asOf = YYYY-MM-DD, defaults to today
+
   // Write methods — available on Max tier only.
   // On Plus tier: throw NotSupportedError('Requires AppFolio Max subscription').
   // TODO: implement once Rob confirms tier.
   updateWorkOrderStatus?(id: string, status: WorkOrderStatus, note?: string): Promise<WorkOrder>;
+  createBill?(bill: Omit<Bill, 'id' | 'createdAt' | 'updatedAt'>): Promise<Bill>;
 }
 
 export class NotSupportedError extends Error {
@@ -607,7 +666,8 @@ No partner approval, no AppFolio support ticket, no marketplace review.
 | 1 | ~~Stack API or Skywalk?~~ | ~~Path selection~~ | **Resolved:** Stack Database API confirmed |
 | 2 | ~~Does AppFolio support need to issue credentials?~~ | ~~Timeline~~ | **Resolved:** Self-serve via Developer Portal, no approval needed |
 | 3 | Which subscription tier — Plus or Max? | Determines whether `APPFOLIO_WRITE_ENABLED=true`. Plus = read-only monitoring. Max = full read/write automation. | **OPEN — pending Rob's answer** |
-| 4 | Which entities are highest priority? | Implementation order within the connector | Suggested default: work orders → leases/tenants → rent roll → owner financials |
+| 4 | Which entities are highest priority? | Implementation order within the connector | Suggested default: work orders → leases/tenants → rent roll → owner financials → AP/bills |
+| 5 | AP write-gate tier for Bills resource? | `createBill` / `updateBill` may require Max. Exact tier matrix not publicly documented — confirm when Rob generates credentials. | **OPEN — confirm at credential-gen** |
 
 ---
 
@@ -618,6 +678,7 @@ No partner approval, no AppFolio support ticket, no marketplace review.
 3. `listLeases` + `getLease` + `listTenants` — unblocks leasing pipeline
 4. `getRentRoll` — unblocks delinquency visibility
 5. `getOwnerStatement` + `listOwnerStatements` — unblocks owner comms automation
-6. If Max tier: implement `updateWorkOrderStatus` and other write methods
-7. Set `APPFOLIO_CONNECTOR_PATH=stack-api` in staging, run contract tests, confirm shape
-8. Ship
+6. `listBills` + `getBill` + `getAgedPayables` — unblocks payables monitoring (utility bills, vendor payments on time). Source: Stack API Bills resource + Reporting API v2 `/aged_payables_summary.json`.
+7. If Max tier: implement `updateWorkOrderStatus`, `createBill`, and other write methods
+8. Set `APPFOLIO_CONNECTOR_PATH=stack-api` in staging, run contract tests, confirm shape
+9. Ship
