@@ -1247,7 +1247,19 @@ export class FastChecker {
     // a later human message arrived — and with limit:50, a run of bot messages
     // could push an older human message out of the window and lose it. The trust
     // gate below already relies on the cursor sitting past dropped messages.
+    // Save pre-batch cursor for deadline-break recovery.
+    // slackLastTs is advanced to batchFinalTs BEFORE the loop as a
+    // poison-pill forward-progress guarantee: if a per-message throw
+    // propagates out, the next poll starts from batchFinalTs and skips
+    // the throwing message rather than re-fetching it forever. On a
+    // deadline break we restore to lastProcessedTs instead, so the
+    // undelivered tail genuinely re-fetches next poll with a fresh budget.
+    const preBatchTs = this.slackLastTs;
     this.slackLastTs = messages[messages.length - 1].ts;
+    let lastProcessedTs = preBatchTs;
+    // 20s budget: bounds sequential getUserInfo calls (up to 50 in a cold
+    // batch, each 10s max) so they cannot stall pollCycle past POLL_CYCLE_TIMEOUT_MS.
+    const CHECK_DEADLINE_MS = Date.now() + 20_000;
 
     // Filter out bot-authored messages to prevent self-wake / self-echo loops.
     // `bot_message` subtype catches classic bot posts; `bot_id` catches messages
@@ -1265,6 +1277,14 @@ export class FastChecker {
     // would be lost. Gating before the cap keeps trusted messages.
     const deliverable: string[] = [];
     for (const msg of messages) {
+      if (Date.now() > CHECK_DEADLINE_MS) {
+        // Reset cursor so the undelivered tail re-fetches next poll.
+        // (Contrast: a per-message throw leaves slackLastTs at batchFinalTs
+        // to skip the throwing message and prevent infinite refetch loops.)
+        this.slackLastTs = lastProcessedTs;
+        this.log(`Slack watch: time budget exceeded after ${deliverable.length}/${messages.length} messages — resetting cursor to re-fetch remaining next poll`);
+        break;
+      }
       let from: string;
       if (msg.user) {
         // Identity + trust gate (P2). Cache hits skip users.info.
@@ -1281,6 +1301,7 @@ export class FastChecker {
         }
         if (!trust.allowed) {
           this.log(`Slack message from untrusted user ${identity.handle ?? msg.user} dropped (not in allowlist)`);
+          lastProcessedTs = msg.ts;
           continue;
         }
         from = formatSlackOriginator(identity);
@@ -1292,6 +1313,7 @@ export class FastChecker {
         // via the username fallback as before.
         if (this.slackTrustedUsers && this.slackTrustedUsers.length > 0) {
           this.log('Slack message with no user id dropped (allowlist configured — sender cannot be verified)');
+          lastProcessedTs = msg.ts;
           continue;
         }
         from = msg.username ?? 'unknown';
@@ -1304,6 +1326,7 @@ export class FastChecker {
         `${msg.text ?? ''}\n` +
         `Reply using: cortextos bus send-slack ${this.slackWatch.channel} "<reply>"`,
       );
+      lastProcessedTs = msg.ts;
     }
 
     if (deliverable.length === 0) return;
