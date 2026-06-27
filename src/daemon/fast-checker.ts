@@ -1231,6 +1231,12 @@ export class FastChecker {
     if (now - this.slackLastCheckedAt < this.slackWatch.intervalMs) return;
     this.slackLastCheckedAt = now;
 
+    // Bound the entire message+identity batch so sequential getUserInfo calls
+    // (one per message, up to 50, each 10s max) cannot stack beyond 20s and
+    // stall pollCycle past POLL_CYCLE_TIMEOUT_MS. slackLastTs is advanced
+    // before the identity loop so any deferred messages are not double-delivered.
+    const CHECK_DEADLINE_MS = Date.now() + 20_000;
+
     let messages: SlackMessage[] = [];
     try {
       messages = await this.slackApi.getHistory(this.slackWatch.channel, this.slackLastTs);
@@ -1265,6 +1271,10 @@ export class FastChecker {
     // would be lost. Gating before the cap keeps trusted messages.
     const deliverable: string[] = [];
     for (const msg of messages) {
+      if (Date.now() > CHECK_DEADLINE_MS) {
+        this.log(`Slack watch: time budget exceeded — ${deliverable.length} messages buffered, rest deferred to next poll`);
+        break;
+      }
       let from: string;
       if (msg.user) {
         // Identity + trust gate (P2). Cache hits skip users.info.
