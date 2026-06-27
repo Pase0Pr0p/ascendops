@@ -1720,6 +1720,48 @@ describe('FastChecker', () => {
       expect((checker as any).slackLastTs).toBe('300.0');
       expect(sendMessage).not.toHaveBeenCalled();
     });
+
+    it('TC-S16: deadline break resets cursor to last processed ts — undelivered tail re-fetches next poll', async () => {
+      // Regression guard for the v2 fix: slackLastTs is advanced to batchFinalTs
+      // BEFORE the identity loop (poison-pill forward-progress). A deadline break
+      // must reset it to lastProcessedTs so the undelivered tail is NOT silently
+      // dropped. Each getUserInfo call advances fake time by 11s; after 2 calls
+      // (22s total) the 20s budget is exceeded and msg3-5 must be deferred.
+      vi.useFakeTimers();
+      try {
+        const messages = [1, 2, 3, 4, 5].map(i => ({
+          ts: `${i}.0`, user: `U${i}`, text: `msg${i}`, type: 'message',
+        }));
+        mockApi.getHistory.mockResolvedValue(messages);
+        mockApi.getUserInfo.mockImplementation(async (id: string) => {
+          vi.advanceTimersByTime(11_000);
+          return { handle: id.toLowerCase(), displayName: `User ${id}` };
+        });
+
+        await (checker as any).checkSlackWatch();
+
+        // Cursor must land at last FULLY PROCESSED message, not batch end.
+        expect((checker as any).slackLastTs).toBe('2.0');
+
+        // Only msgs 1 and 2 delivered — 3-5 deferred to next poll.
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        const text = (sendMessage as any).mock.calls[0][4];
+        expect(text).toContain('msg1');
+        expect(text).toContain('msg2');
+        expect(text).not.toContain('msg3');
+        expect(text).not.toContain('msg4');
+        expect(text).not.toContain('msg5');
+
+        // Next poll re-fetches from '2.0', not '5.0' — verify getHistory called with correct cursor.
+        vi.clearAllMocks();
+        (checker as any).slackLastCheckedAt = 0;
+        mockApi.getHistory.mockResolvedValue([]);
+        await (checker as any).checkSlackWatch();
+        expect(mockApi.getHistory).toHaveBeenCalledWith('C1234567890', '2.0');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('resetWatchdogState — field coverage', () => {
