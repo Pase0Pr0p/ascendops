@@ -13,6 +13,7 @@ const {
   checkUsageApi,
   refreshOAuthToken,
   rotateOAuth,
+  readTokenFromEnvFiles,
   ALERT_5H,
   ALERT_7D,
 } = await import('../../../src/bus/oauth.js');
@@ -337,5 +338,105 @@ describe('alert thresholds', () => {
   });
   it('ALERT_7D is 0.70', () => {
     expect(ALERT_7D).toBe(0.70);
+  });
+});
+
+describe('readTokenFromEnvFiles', () => {
+  let fwRoot: string;
+
+  beforeEach(() => {
+    fwRoot = mkdtempSync(join(tmpdir(), 'cortextos-fw-test-'));
+  });
+
+  afterEach(() => {
+    try { rmSync(fwRoot, { recursive: true }); } catch { /* ignore */ }
+  });
+
+  function writeFile(path: string, content: string) {
+    const { mkdirSync, writeFileSync } = require('fs');
+    mkdirSync(require('path').dirname(path), { recursive: true });
+    writeFileSync(path, content, 'utf-8');
+  }
+
+  it('returns null when frameworkRoot or org is empty', () => {
+    expect(readTokenFromEnvFiles('', 'myorg')).toBeNull();
+    expect(readTokenFromEnvFiles(fwRoot, '')).toBeNull();
+  });
+
+  it('reads token from org secrets.env', () => {
+    writeFile(join(fwRoot, 'orgs', 'myorg', 'secrets.env'), 'CLAUDE_CODE_OAUTH_TOKEN=tok_from_secrets\n');
+    expect(readTokenFromEnvFiles(fwRoot, 'myorg')).toBe('tok_from_secrets');
+  });
+
+  it('falls through to agent .env when secrets.env has no token', () => {
+    writeFile(join(fwRoot, 'orgs', 'myorg', 'secrets.env'), 'OTHER_KEY=value\n');
+    writeFile(join(fwRoot, 'orgs', 'myorg', 'agents', 'myagent', '.env'), 'CLAUDE_CODE_OAUTH_TOKEN=tok_from_agent\n');
+    expect(readTokenFromEnvFiles(fwRoot, 'myorg', 'myagent')).toBe('tok_from_agent');
+  });
+
+  it('prefers secrets.env over agent .env', () => {
+    writeFile(join(fwRoot, 'orgs', 'myorg', 'secrets.env'), 'CLAUDE_CODE_OAUTH_TOKEN=tok_secrets\n');
+    writeFile(join(fwRoot, 'orgs', 'myorg', 'agents', 'myagent', '.env'), 'CLAUDE_CODE_OAUTH_TOKEN=tok_agent\n');
+    expect(readTokenFromEnvFiles(fwRoot, 'myorg', 'myagent')).toBe('tok_secrets');
+  });
+
+  it('returns null when neither file contains the key', () => {
+    writeFile(join(fwRoot, 'orgs', 'myorg', 'secrets.env'), 'OTHER_KEY=value\n');
+    expect(readTokenFromEnvFiles(fwRoot, 'myorg')).toBeNull();
+  });
+
+  it('returns null when files are missing', () => {
+    expect(readTokenFromEnvFiles(fwRoot, 'myorg', 'myagent')).toBeNull();
+  });
+
+  it('handles token surrounded by other keys', () => {
+    writeFile(
+      join(fwRoot, 'orgs', 'myorg', 'secrets.env'),
+      'BOT_TOKEN=botval\nCLAUDE_CODE_OAUTH_TOKEN=tok_middle\nOTHER=x\n',
+    );
+    expect(readTokenFromEnvFiles(fwRoot, 'myorg')).toBe('tok_middle');
+  });
+});
+
+describe('checkUsageApi — env-file fallback', () => {
+  let fwRoot: string;
+
+  beforeEach(() => {
+    fwRoot = mkdtempSync(join(tmpdir(), 'cortextos-fw-test-'));
+    mockFetch.mockReset();
+  });
+
+  afterEach(() => {
+    try { rmSync(fwRoot, { recursive: true }); } catch { /* ignore */ }
+  });
+
+  it('reads token from secrets.env when no accounts.json and env is empty', async () => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    mkdirSync(join(fwRoot, 'orgs', 'testorg'), { recursive: true });
+    writeFileSync(join(fwRoot, 'orgs', 'testorg', 'secrets.env'), 'CLAUDE_CODE_OAUTH_TOKEN=tok_from_secrets\n');
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ five_hour_utilization: 0.3, seven_day_utilization: 0.1 }),
+    });
+
+    // tmpDir has no accounts.json, and we pass frameworkRoot + org via opts
+    const result = await checkUsageApi(tmpDir, {
+      force: true,
+      frameworkRoot: fwRoot,
+      org: 'testorg',
+    });
+
+    expect(result.five_hour_utilization).toBe(0.3);
+    const call = mockFetch.mock.calls[0];
+    expect(call[1].headers.Authorization).toBe('Bearer tok_from_secrets');
+  });
+
+  it('throws when no accounts.json, no env, and no secrets file', async () => {
+    await expect(checkUsageApi(tmpDir, {
+      force: true,
+      frameworkRoot: fwRoot,
+      org: 'testorg',
+    })).rejects.toThrow('No OAuth token available');
   });
 });
