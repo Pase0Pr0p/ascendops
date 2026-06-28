@@ -1,0 +1,175 @@
+// Mock fixture data — representative SF portfolio for dry-run KPI pipeline.
+// These are SAMPLE/DEMO values, not real portfolio data.
+
+import type { WorkOrder, Tenant, Lease, RentRollEntry, OwnerStatement } from './types';
+
+export const FIXTURE_WORK_ORDERS: WorkOrder[] = [
+  {
+    id: 'wo-001',
+    propertyId: 'prop-mission-101',
+    unit: '3B',
+    tenantId: 'tenant-001',
+    category: 'plumbing',
+    description: 'Kitchen faucet dripping — tenant reported 2026-06-20',
+    status: 'open',
+    priority: 'normal',
+    createdAt: '2026-06-20T14:00:00Z',
+    updatedAt: '2026-06-20T14:00:00Z',
+    estimatedCost: 15000,
+  },
+  {
+    id: 'wo-002',
+    propertyId: 'prop-mission-101',
+    unit: '1A',
+    tenantId: 'tenant-002',
+    category: 'hvac',
+    description: 'AC not cooling — unit temp 85F, compressor running',
+    status: 'in_progress',
+    priority: 'urgent',
+    createdAt: '2026-06-22T09:00:00Z',
+    updatedAt: '2026-06-23T11:30:00Z',
+    vendorId: 'vendor-cooltech',
+    estimatedCost: 45000,
+  },
+  {
+    id: 'wo-003',
+    propertyId: 'prop-belvedere-200',
+    unit: '12',
+    category: 'electrical',
+    description: 'Common area lighting — 3 bulbs out in hallway',
+    status: 'completed',
+    priority: 'low',
+    createdAt: '2026-06-18T10:00:00Z',
+    updatedAt: '2026-06-19T16:00:00Z',
+    completedAt: '2026-06-19T16:00:00Z',
+    actualCost: 8500,
+  },
+];
+
+export const FIXTURE_TENANTS: Tenant[] = [
+  {
+    id: 'tenant-001',
+    firstName: 'Maria',
+    lastName: 'Gonzalez',
+    email: 'mgonzalez@example.com',
+    phone: '415-555-0101',
+    leaseId: 'lease-001',
+    propertyId: 'prop-mission-101',
+    unit: '3B',
+  },
+  {
+    id: 'tenant-002',
+    firstName: 'James',
+    lastName: 'Chen',
+    email: 'jchen@example.com',
+    phone: '415-555-0102',
+    leaseId: 'lease-002',
+    propertyId: 'prop-mission-101',
+    unit: '1A',
+  },
+  {
+    id: 'tenant-003',
+    firstName: 'Priya',
+    lastName: 'Sharma',
+    email: 'psharma@example.com',
+    phone: '415-555-0103',
+    leaseId: 'lease-003',
+    propertyId: 'prop-belvedere-200',
+    unit: '12',
+  },
+];
+
+export const FIXTURE_LEASES: Lease[] = [
+  {
+    id: 'lease-001',
+    propertyId: 'prop-mission-101',
+    unit: '3B',
+    status: 'active',
+    tenantIds: ['tenant-001'],
+    startDate: '2025-09-01',
+    endDate: '2026-08-31',
+    monthlyRent: 285000,
+    securityDeposit: 285000,
+    moveInDate: '2025-09-01',
+  },
+  {
+    id: 'lease-002',
+    propertyId: 'prop-mission-101',
+    unit: '1A',
+    status: 'notice_given',
+    tenantIds: ['tenant-002'],
+    startDate: '2024-07-01',
+    endDate: '2026-06-30',
+    monthlyRent: 320000,
+    securityDeposit: 320000,
+    moveInDate: '2024-07-01',
+    moveOutDate: '2026-06-30',
+  },
+  {
+    id: 'lease-003',
+    propertyId: 'prop-belvedere-200',
+    unit: '12',
+    status: 'month_to_month',
+    tenantIds: ['tenant-003'],
+    startDate: '2023-03-01',
+    monthlyRent: 195000,
+    securityDeposit: 195000,
+    moveInDate: '2023-03-01',
+  },
+];
+
+export const FIXTURE_RENT_ROLL: RentRollEntry[] = [
+  {
+    propertyId: 'prop-mission-101',
+    unit: '3B',
+    leaseId: 'lease-001',
+    tenantName: 'Maria Gonzalez',
+    status: 'active',
+    monthlyRent: 285000,
+    balance: 0,
+    lastPaymentDate: '2026-06-01',
+    leaseEnd: '2026-08-31',
+  },
+  {
+    propertyId: 'prop-mission-101',
+    unit: '1A',
+    leaseId: 'lease-002',
+    tenantName: 'James Chen',
+    status: 'notice_given',
+    monthlyRent: 320000,
+    balance: 320000,  // one month outstanding
+    lastPaymentDate: '2026-05-01',
+    leaseEnd: '2026-06-30',
+  },
+  {
+    propertyId: 'prop-belvedere-200',
+    unit: '12',
+    leaseId: 'lease-003',
+    tenantName: 'Priya Sharma',
+    status: 'month_to_month',
+    monthlyRent: 195000,
+    balance: 0,
+    lastPaymentDate: '2026-06-01',
+  },
+];
+
+export const FIXTURE_OWNER_STATEMENTS: OwnerStatement[] = [
+  {
+    ownerId: 'owner-legacy-001',
+    propertyId: 'prop-mission-101',
+    periodStart: '2026-06-01',
+    periodEnd: '2026-06-30',
+    grossIncome: 605000,
+    totalExpenses: 68500,
+    managementFee: 60500,
+    netOwnerDistribution: 476000,
+    lineItems: [
+      { date: '2026-06-01', description: 'Rent — Unit 3B (Gonzalez)', amount: 285000, category: 'income' },
+      { date: '2026-06-01', description: 'Rent — Unit 1A (Chen)', amount: 320000, category: 'income' },
+      { date: '2026-06-20', description: 'Plumbing repair — Unit 3B', amount: -15000, category: 'expense' },
+      { date: '2026-06-19', description: 'Electrical — hallway lighting', amount: -8500, category: 'expense' },
+      { date: '2026-06-30', description: 'Management fee (10%)', amount: -60500, category: 'fee' },
+      { date: '2026-06-30', description: 'HVAC repair — Unit 1A (est.)', amount: -45000, category: 'expense' },
+    ],
+  },
+];

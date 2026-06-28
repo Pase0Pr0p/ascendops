@@ -20,6 +20,7 @@ import {
   IconTarget,
   IconMessages,
   IconNotes,
+  IconBuilding,
 } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
@@ -47,6 +48,9 @@ const navItems: NavItem[] = [
   { label: 'Strategy', href: '/strategy', icon: IconTarget, section: 'ops' },
   { label: 'Analytics', href: '/analytics', icon: IconChartDots3, section: 'ops' },
 
+  // Portfolio
+  { label: 'Portfolio KPIs', href: '/pm-kpi', icon: IconBuilding, section: 'portfolio' },
+
   // Intelligence
   { label: 'Knowledge Base', href: '/knowledge-base', icon: IconBook2, section: 'intel' },
   { label: 'Wiki', href: '/wiki', icon: IconNotes, section: 'intel' },
@@ -57,6 +61,7 @@ const navItems: NavItem[] = [
 const sectionLabels: Record<string, string> = {
   core: '',
   ops: 'Operations',
+  portfolio: 'Portfolio',
   intel: 'Intelligence',
 };
 
@@ -98,7 +103,7 @@ export function Sidebar({
   }
 
   // Group items by section
-  const sections = ['core', 'ops', 'intel'];
+  const sections = ['core', 'ops', 'portfolio', 'intel'];
 
   return (
     <aside className="flex h-screen w-56 shrink-0 flex-col border-r bg-card/50">
