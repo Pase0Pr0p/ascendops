@@ -21,6 +21,7 @@ import {
   deleteRecoveryNote,
   MIN_HEALTHY_SECONDS,
 } from './watchdog.js';
+import { CrashLoopDetector, sendCrashLoopAlert } from './crash-alert.js';
 type LogFn = (msg: string) => void;
 type StartOptions = { partOfFleetStart?: boolean };
 
@@ -72,6 +73,8 @@ export class AgentProcess {
   private onStatusChange: ((status: AgentStatus) => void) | null = null;
   // Watchdog: git repo root for crash-loop detection and rollback
   private repoRoot: string | null = null;
+  // Crash-loop alert: rolling-window detector, independent of crashWindowMs config
+  private crashLoopDetector = new CrashLoopDetector();
   // Watchdog: timer to mark the current commit healthy after MIN_HEALTHY_SECONDS
   private healthTimer: ReturnType<typeof setTimeout> | null = null;
   // Rate-limit recovery: pending restart timer. Stored so it can be cancelled
@@ -729,6 +732,21 @@ export class AgentProcess {
         }
       }, 5000);
       return;
+    }
+
+    // Crash-loop alert: track every real crash (post rate-limit, post image-poison)
+    // and fire a Telegram alert when the rolling threshold is hit. Runs independently
+    // of crashWindowMs config so it works even with no crash_window configured.
+    // Fire-and-forget — alert failure must never interrupt crash recovery.
+    if (this.crashLoopDetector.recordCrash()) {
+      const agentEnvPath = join(this.env.agentDir, '.env');
+      sendCrashLoopAlert({
+        agentEnvPath,
+        agentName: this.name,
+        org: this.env.org,
+        recentCount: this.crashLoopDetector.recentCount(),
+        log: this.log,
+      }).catch(() => {/* non-fatal */});
     }
 
     // CrashLoopPauser (instar-inspired): if a sliding window is configured,
