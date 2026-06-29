@@ -50,7 +50,7 @@ export interface PmKpiSnapshot {
   /** Always 'mock' until APPFOLIO_CONNECTOR_PATH=stack-api */
   connector: string;
   /** FIDUCIARY: true = data is from mock fixtures, not real portfolio */
-  is_demo: true;
+  is_demo: boolean;
   maintenance: MaintenanceKpi;
   occupancy: OccupancyKpi;
   ar: ArKpi;
@@ -88,7 +88,7 @@ export async function computePmKpis(
   return {
     computed_at: new Date().toISOString(),
     connector: opts.connectorLabel ?? (process.env.APPFOLIO_CONNECTOR_PATH ?? 'mock'),
-    is_demo: true,
+    is_demo: connector.isDemo,
     maintenance,
     occupancy,
     ar,

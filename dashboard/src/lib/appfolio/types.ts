@@ -86,6 +86,7 @@ export interface ListOptions {
 }
 
 export interface AppFolioConnector {
+  readonly isDemo: boolean;
   ping(): Promise<{ ok: boolean; latencyMs: number }>;
   listWorkOrders(opts?: ListOptions): Promise<WorkOrder[]>;
   getWorkOrder(id: string): Promise<WorkOrder>;

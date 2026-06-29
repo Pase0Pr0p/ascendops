@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { MockConnector } from '../mock.connector';
 import { computePmKpis, formatDollars } from '../kpi';
+import type { AppFolioConnector, WorkOrder, Lease, Tenant, RentRollEntry, OwnerStatement, ListOptions } from '../types';
 import {
   FIXTURE_WORK_ORDERS,
   FIXTURE_RENT_ROLL,
@@ -9,10 +10,20 @@ import {
 
 const connector = new MockConnector();
 
+// Minimal non-demo stub — delegates to MockConnector for data, isDemo=false
+class LiveStubConnector extends MockConnector {
+  override readonly isDemo = false;
+}
+
 describe('computePmKpis', () => {
-  it('snapshot is always flagged is_demo:true', async () => {
+  it('mock connector => is_demo:true', async () => {
     const kpis = await computePmKpis(connector);
     expect(kpis.is_demo).toBe(true);
+  });
+
+  it('non-demo connector => is_demo:false', async () => {
+    const kpis = await computePmKpis(new LiveStubConnector());
+    expect(kpis.is_demo).toBe(false);
   });
 
   it('has a valid ISO computed_at timestamp', async () => {

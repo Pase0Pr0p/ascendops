@@ -21,6 +21,7 @@ interface StackApiConfig {
 }
 
 export class StackApiConnector implements AppFolioConnector {
+  readonly isDemo = false;
   private readonly baseUrl: string;
   private token: string | null = null;
   private tokenExpiresAt = 0;
