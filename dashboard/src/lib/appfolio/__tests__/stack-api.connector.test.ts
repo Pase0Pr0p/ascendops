@@ -1,9 +1,7 @@
 /**
- * Unit tests for StackApiConnector mapping functions + parseCents.
- * No network calls — all tests are pure function assertions.
- * The mapping functions (mapWorkOrder, mapLease, etc.) are the layer most
- * likely to need tweaks after live-API validation; keeping them separately
- * testable makes reconciliation fast.
+ * Unit tests for StackApiConnector mapping functions.
+ * No network calls — pure function assertions only.
+ * Field names match confirmed live AppFolio API (2026-06-29 probe).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -13,9 +11,9 @@ import {
   mapPriority,
   mapLeaseStatus,
   mapOwnerStatementCategory,
-  mapWorkOrder,
-  mapLease,
-  mapTenant,
+  mapWorkOrderRow,
+  mapRentRollRowToLease,
+  mapTenantRow,
   mapRentRollRow,
 } from '../stack-api.connector';
 
@@ -51,43 +49,55 @@ describe('parseCents', () => {
   it('handles fractional cents via rounding', () => {
     expect(parseCents('1500.005')).toBe(150001);
   });
+
+  it('accepts numeric input directly', () => {
+    expect(parseCents(29.99)).toBe(2999);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// mapWorkOrderStatus
+// mapWorkOrderStatus — live API uses text strings, not numeric codes
 // ---------------------------------------------------------------------------
 
 describe('mapWorkOrderStatus', () => {
-  it('maps code 4 to completed', () => {
-    expect(mapWorkOrderStatus(['4'])).toBe('completed');
+  it('maps "Completed" to completed', () => {
+    expect(mapWorkOrderStatus('Completed')).toBe('completed');
   });
 
-  it('maps code 7 (CompletedNoBill) to completed', () => {
-    expect(mapWorkOrderStatus(['7'])).toBe('completed');
+  it('maps "Ready to Bill" to completed', () => {
+    expect(mapWorkOrderStatus('Ready to Bill')).toBe('completed');
   });
 
-  it('maps code 5 to cancelled', () => {
-    expect(mapWorkOrderStatus(['5'])).toBe('cancelled');
+  it('maps "Canceled" to cancelled', () => {
+    expect(mapWorkOrderStatus('Canceled')).toBe('cancelled');
   });
 
-  it('maps code 9 (Assigned) to in_progress', () => {
-    expect(mapWorkOrderStatus(['9'])).toBe('in_progress');
+  it('maps "Cancelled" (British spelling) to cancelled', () => {
+    expect(mapWorkOrderStatus('Cancelled')).toBe('cancelled');
   });
 
-  it('maps code 3 (Scheduled) to in_progress', () => {
-    expect(mapWorkOrderStatus(['3'])).toBe('in_progress');
+  it('maps "Assigned" to in_progress', () => {
+    expect(mapWorkOrderStatus('Assigned')).toBe('in_progress');
   });
 
-  it('maps code 8 (Work Done) to in_progress', () => {
-    expect(mapWorkOrderStatus(['8'])).toBe('in_progress');
+  it('maps "Scheduled" to in_progress', () => {
+    expect(mapWorkOrderStatus('Scheduled')).toBe('in_progress');
   });
 
-  it('maps code 0 (New) to open', () => {
-    expect(mapWorkOrderStatus(['0'])).toBe('open');
+  it('maps "Work Done" to in_progress', () => {
+    expect(mapWorkOrderStatus('Work Done')).toBe('in_progress');
   });
 
-  it('maps unknown code to open', () => {
-    expect(mapWorkOrderStatus(['99'])).toBe('open');
+  it('maps "Waiting" to in_progress', () => {
+    expect(mapWorkOrderStatus('Waiting')).toBe('in_progress');
+  });
+
+  it('maps "New" to open', () => {
+    expect(mapWorkOrderStatus('New')).toBe('open');
+  });
+
+  it('maps unknown string to open', () => {
+    expect(mapWorkOrderStatus('SomeUnknownStatus')).toBe('open');
   });
 
   it('maps undefined to open', () => {
@@ -100,19 +110,19 @@ describe('mapWorkOrderStatus', () => {
 // ---------------------------------------------------------------------------
 
 describe('mapPriority', () => {
-  it('maps Urgent to urgent', () => {
+  it('maps "Urgent" to urgent', () => {
     expect(mapPriority('Urgent')).toBe('urgent');
   });
 
-  it('maps Emergency to urgent', () => {
+  it('maps "Emergency" to urgent', () => {
     expect(mapPriority('Emergency')).toBe('urgent');
   });
 
-  it('maps Low to low', () => {
+  it('maps "Low" to low', () => {
     expect(mapPriority('Low')).toBe('low');
   });
 
-  it('maps Normal to normal', () => {
+  it('maps "Normal" to normal', () => {
     expect(mapPriority('Normal')).toBe('normal');
   });
 
@@ -122,36 +132,41 @@ describe('mapPriority', () => {
 });
 
 // ---------------------------------------------------------------------------
-// mapLeaseStatus
+// mapLeaseStatus — live API values confirmed: "Current", "Vacating", "Notice", "Past", "Future"
 // ---------------------------------------------------------------------------
 
 describe('mapLeaseStatus', () => {
-  it('maps Active to active', () => {
-    expect(mapLeaseStatus('Active')).toBe('active');
+  it('maps "Current" to active', () => {
+    expect(mapLeaseStatus('Current')).toBe('active');
   });
 
-  it('maps MonthToMonth to month_to_month', () => {
-    expect(mapLeaseStatus('MonthToMonth')).toBe('month_to_month');
+  it('maps "Vacating" to month_to_month', () => {
+    expect(mapLeaseStatus('Vacating')).toBe('month_to_month');
   });
 
-  it('maps NoticeGiven to notice_given', () => {
-    expect(mapLeaseStatus('NoticeGiven')).toBe('notice_given');
+  it('maps "Notice" to notice_given', () => {
+    expect(mapLeaseStatus('Notice')).toBe('notice_given');
   });
 
-  it('maps Past to expired', () => {
+  it('maps "Past" to expired', () => {
     expect(mapLeaseStatus('Past')).toBe('expired');
   });
 
-  it('maps Expired to expired', () => {
+  it('maps "Expired" to expired', () => {
     expect(mapLeaseStatus('Expired')).toBe('expired');
   });
 
-  it('maps Future to pending', () => {
+  it('maps "Future" to pending', () => {
     expect(mapLeaseStatus('Future')).toBe('pending');
   });
 
   it('maps undefined to active (safe default)', () => {
     expect(mapLeaseStatus(undefined)).toBe('active');
+  });
+
+  it('is case-insensitive', () => {
+    expect(mapLeaseStatus('current')).toBe('active');
+    expect(mapLeaseStatus('PAST')).toBe('expired');
   });
 });
 
@@ -164,8 +179,12 @@ describe('mapOwnerStatementCategory', () => {
     expect(mapOwnerStatementCategory('Management Fee (10%)', -6050)).toBe('fee');
   });
 
-  it('categorises negative amounts as expense', () => {
-    expect(mapOwnerStatementCategory('Plumbing repair', -15000)).toBe('expense');
+  it('categorises mgmt fee as fee', () => {
+    expect(mapOwnerStatementCategory('Mgmt Fee', -5000)).toBe('fee');
+  });
+
+  it('categorises negative expense amounts as expense', () => {
+    expect(mapOwnerStatementCategory('Plumbing Repair', -15000)).toBe('expense');
   });
 
   it('categorises positive amounts as income', () => {
@@ -178,107 +197,127 @@ describe('mapOwnerStatementCategory', () => {
 });
 
 // ---------------------------------------------------------------------------
-// mapWorkOrder
+// mapWorkOrderRow — live snake_case fields from work_order.json
 // ---------------------------------------------------------------------------
 
-describe('mapWorkOrder', () => {
+describe('mapWorkOrderRow', () => {
   const raw = {
-    Id: 'wo-af-001',
-    PropertyId: 'prop-101',
-    UnitId: '3B',
-    OccupancyId: 'occ-001',
-    ServiceArea: 'Plumbing',
-    JobDescription: 'Kitchen faucet dripping',
-    Statuses: ['0'],           // New
-    Priority: 'Normal',
-    CreatedAt: '2026-06-20T14:00:00Z',
-    LastUpdatedAt: '2026-06-20T14:00:00Z',
-    EstimatedCost: '150.00',
+    work_order_id: 12345,
+    property_id: 101,
+    unit_id: 202,
+    unit_name: '3B',
+    occupancy_id: 999,
+    job_description: 'Kitchen faucet dripping',
+    vendor_trade: 'Plumbing',
+    status: 'New',
+    priority: 'Normal',
+    created_at: '2026-06-20T14:00:00Z',
+    estimate_amount: '150.00',
   };
 
-  it('maps id, propertyId, unit, description', () => {
-    const wo = mapWorkOrder(raw);
-    expect(wo.id).toBe('wo-af-001');
-    expect(wo.propertyId).toBe('prop-101');
-    expect(wo.unit).toBe('3B');
-    expect(wo.description).toBe('Kitchen faucet dripping');
+  it('maps work_order_id to string id', () => {
+    expect(mapWorkOrderRow(raw).id).toBe('12345');
   });
 
-  it('maps tenantId from OccupancyId', () => {
-    expect(mapWorkOrder(raw).tenantId).toBe('occ-001');
+  it('maps property_id to string propertyId', () => {
+    expect(mapWorkOrderRow(raw).propertyId).toBe('101');
   });
 
-  it('maps category from ServiceArea', () => {
-    expect(mapWorkOrder(raw).category).toBe('Plumbing');
+  it('maps unit_name to unit', () => {
+    expect(mapWorkOrderRow(raw).unit).toBe('3B');
   });
 
-  it('maps status from Statuses array', () => {
-    expect(mapWorkOrder(raw).status).toBe('open');
+  it('maps job_description to description', () => {
+    expect(mapWorkOrderRow(raw).description).toBe('Kitchen faucet dripping');
   });
 
-  it('maps estimatedCost to cents', () => {
-    expect(mapWorkOrder(raw).estimatedCost).toBe(15000);
+  it('maps vendor_trade to category', () => {
+    expect(mapWorkOrderRow(raw).category).toBe('Plumbing');
   });
 
-  it('maps completed work order', () => {
-    const wo = mapWorkOrder({ ...raw, Statuses: ['4'], CompletedAt: '2026-06-21T10:00:00Z' });
+  it('maps occupancy_id to string tenantId', () => {
+    expect(mapWorkOrderRow(raw).tenantId).toBe('999');
+  });
+
+  it('maps "New" status to open', () => {
+    expect(mapWorkOrderRow(raw).status).toBe('open');
+  });
+
+  it('maps "Completed" status to completed', () => {
+    const wo = mapWorkOrderRow({ ...raw, status: 'Completed', completed_on: '2026-06-21T10:00:00Z' });
     expect(wo.status).toBe('completed');
     expect(wo.completedAt).toBe('2026-06-21T10:00:00Z');
   });
 
-  it('uses general as fallback category when ServiceArea absent', () => {
-    const wo = mapWorkOrder({ ...raw, ServiceArea: undefined });
+  it('converts estimate_amount string to integer cents', () => {
+    expect(mapWorkOrderRow(raw).estimatedCost).toBe(15000);
+  });
+
+  it('falls back to work_order_issue when vendor_trade absent', () => {
+    const wo = mapWorkOrderRow({ ...raw, vendor_trade: undefined, work_order_issue: 'HVAC' });
+    expect(wo.category).toBe('HVAC');
+  });
+
+  it('falls back to "general" when both category fields absent', () => {
+    const wo = mapWorkOrderRow({ ...raw, vendor_trade: undefined, work_order_issue: undefined });
     expect(wo.category).toBe('general');
   });
 });
 
 // ---------------------------------------------------------------------------
-// mapLease (from AfOccupancy)
+// mapRentRollRowToLease — live snake_case fields from rent_roll.json
 // ---------------------------------------------------------------------------
 
-describe('mapLease', () => {
+describe('mapRentRollRowToLease', () => {
   const raw = {
-    Id: 'occ-001',
-    PropertyId: 'prop-101',
-    UnitId: '3B',
-    Status: 'Active',
-    LeaseStartDate: '2025-09-01',
-    LeaseEndDate: '2026-08-31',
-    Rent: '2850.00',
-    SecurityDeposit: '2850.00',
-    MoveInDate: '2025-09-01',
-    Tenants: [{ Id: 'tenant-001', FirstName: 'Maria', LastName: 'Gonzalez',
-      OccupancyId: 'occ-001', PropertyId: 'prop-101', UnitId: '3B' }],
+    occupancy_id: 999,
+    unit_id: 202,
+    property_id: 101,
+    unit: '3B',
+    tenant: 'Maria Gonzalez',
+    tenant_id: 500,
+    status: 'Current',
+    rent: '2850.00',
+    deposit: '2850.00',
+    lease_from: '2025-09-01',
+    lease_to: '2026-08-31',
+    move_in: '2025-09-01',
   };
 
-  it('maps occupancy id to lease id', () => {
-    expect(mapLease(raw).id).toBe('occ-001');
+  it('maps occupancy_id to string id', () => {
+    expect(mapRentRollRowToLease(raw).id).toBe('999');
   });
 
-  it('maps status Active to active', () => {
-    expect(mapLease(raw).status).toBe('active');
+  it('maps property_id to string propertyId', () => {
+    expect(mapRentRollRowToLease(raw).propertyId).toBe('101');
   });
 
-  it('collects tenant ids from nested Tenants', () => {
-    expect(mapLease(raw).tenantIds).toEqual(['tenant-001']);
+  it('maps "Current" status to active', () => {
+    expect(mapRentRollRowToLease(raw).status).toBe('active');
   });
 
-  it('maps rent string to monthly rent in cents', () => {
-    expect(mapLease(raw).monthlyRent).toBe(285000);
+  it('maps tenant_id to tenantIds array', () => {
+    expect(mapRentRollRowToLease(raw).tenantIds).toContain('500');
   });
 
-  it('maps security deposit to cents', () => {
-    expect(mapLease(raw).securityDeposit).toBe(285000);
+  it('maps rent string to monthlyRent in cents', () => {
+    expect(mapRentRollRowToLease(raw).monthlyRent).toBe(285000);
   });
 
-  it('maps dates directly', () => {
-    const lease = mapLease(raw);
-    expect(lease.startDate).toBe('2025-09-01');
-    expect(lease.endDate).toBe('2026-08-31');
+  it('maps deposit string to securityDeposit in cents', () => {
+    expect(mapRentRollRowToLease(raw).securityDeposit).toBe(285000);
   });
 
-  it('handles missing optional fields', () => {
-    const lease = mapLease({ Id: 'occ-002', PropertyId: 'prop-102', Tenants: [] });
+  it('maps lease_from to startDate', () => {
+    expect(mapRentRollRowToLease(raw).startDate).toBe('2025-09-01');
+  });
+
+  it('maps lease_to to endDate', () => {
+    expect(mapRentRollRowToLease(raw).endDate).toBe('2026-08-31');
+  });
+
+  it('handles missing optional fields gracefully', () => {
+    const lease = mapRentRollRowToLease({ occupancy_id: 1, unit_id: 2, property_id: 3 });
     expect(lease.tenantIds).toEqual([]);
     expect(lease.monthlyRent).toBe(0);
     expect(lease.securityDeposit).toBeUndefined();
@@ -287,85 +326,95 @@ describe('mapLease', () => {
 });
 
 // ---------------------------------------------------------------------------
-// mapTenant (from AfTenant + parent AfOccupancy)
+// mapTenantRow — live snake_case fields from tenant_directory.json
 // ---------------------------------------------------------------------------
 
-describe('mapTenant', () => {
-  const occ = { Id: 'occ-001', PropertyId: 'prop-101', UnitId: '3B', Tenants: [] };
+describe('mapTenantRow', () => {
   const raw = {
-    Id: 'tenant-001',
-    FirstName: 'Maria',
-    LastName: 'Gonzalez',
-    Email: 'mgonzalez@example.com',
-    PhoneNumber: '415-555-0101',
-    OccupancyId: 'occ-001',
-    PropertyId: 'prop-101',
-    UnitId: '3B',
+    selected_tenant_id: 500,
+    occupancy_id: 999,
+    property_id: 101,
+    unit_id: 202,
+    unit: '3B',
+    tenant: 'Maria Gonzalez',
+    first_name: 'Maria',
+    last_name: 'Gonzalez',
+    emails: 'mgonzalez@example.com',
+    phone_numbers: '415-555-0101',
+    status: 'Current',
   };
 
-  it('maps id, firstName, lastName', () => {
-    const t = mapTenant(raw, occ);
-    expect(t.id).toBe('tenant-001');
+  it('maps selected_tenant_id to string id', () => {
+    expect(mapTenantRow(raw).id).toBe('500');
+  });
+
+  it('maps first_name and last_name', () => {
+    const t = mapTenantRow(raw);
     expect(t.firstName).toBe('Maria');
     expect(t.lastName).toBe('Gonzalez');
   });
 
-  it('maps leaseId from parent occupancy id', () => {
-    expect(mapTenant(raw, occ).leaseId).toBe('occ-001');
+  it('maps occupancy_id to string leaseId', () => {
+    expect(mapTenantRow(raw).leaseId).toBe('999');
   });
 
-  it('maps email and phone', () => {
-    const t = mapTenant(raw, occ);
-    expect(t.email).toBe('mgonzalez@example.com');
-    expect(t.phone).toBe('415-555-0101');
+  it('maps property_id to string propertyId', () => {
+    expect(mapTenantRow(raw).propertyId).toBe('101');
   });
 
-  it('falls back to occupancy propertyId when tenant has no PropertyId', () => {
-    const t = mapTenant({ ...raw, PropertyId: undefined }, occ);
-    expect(t.propertyId).toBe('prop-101');
+  it('maps first email from emails field', () => {
+    expect(mapTenantRow(raw).email).toBe('mgonzalez@example.com');
+  });
+
+  it('maps first phone from phone_numbers field', () => {
+    expect(mapTenantRow(raw).phone).toBe('415-555-0101');
+  });
+
+  it('splits semicolon-separated emails and takes first', () => {
+    const t = mapTenantRow({ ...raw, emails: 'a@b.com; c@d.com' });
+    expect(t.email).toBe('a@b.com');
   });
 });
 
 // ---------------------------------------------------------------------------
-// mapRentRollRow
+// mapRentRollRow — live snake_case fields from rent_roll.json
 // ---------------------------------------------------------------------------
 
 describe('mapRentRollRow', () => {
   const raw = {
-    property_id: 'prop-101',
-    unit_id: '3B',
-    occupancy_id: 'occ-001',
-    tenant_name: 'Maria Gonzalez',
-    lease_status: 'Active',
-    rent_amount: '2850.00',
-    balance: '0.00',
-    last_payment_date: '2026-06-01',
-    lease_end_date: '2026-08-31',
+    property_id: 101,
+    unit_id: 202,
+    occupancy_id: 999,
+    unit: '3B',
+    tenant: 'Maria Gonzalez',
+    status: 'Current',
+    rent: '2850.00',
+    past_due: '0.00',
+    lease_to: '2026-08-31',
   };
 
-  it('maps all fields', () => {
+  it('maps all standard fields', () => {
     const r = mapRentRollRow(raw);
-    expect(r.propertyId).toBe('prop-101');
+    expect(r.propertyId).toBe('101');
     expect(r.unit).toBe('3B');
-    expect(r.leaseId).toBe('occ-001');
+    expect(r.leaseId).toBe('999');
     expect(r.tenantName).toBe('Maria Gonzalez');
     expect(r.status).toBe('active');
     expect(r.monthlyRent).toBe(285000);
     expect(r.balance).toBe(0);
-    expect(r.lastPaymentDate).toBe('2026-06-01');
     expect(r.leaseEnd).toBe('2026-08-31');
   });
 
-  it('maps positive balance (tenant owes) to positive cents', () => {
-    const r = mapRentRollRow({ ...raw, balance: '3200.00' });
+  it('maps positive past_due (tenant owes) to positive cents', () => {
+    const r = mapRentRollRow({ ...raw, past_due: '3200.00' });
     expect(r.balance).toBe(320000);
   });
 
   it('handles missing optional fields', () => {
-    const r = mapRentRollRow({ property_id: 'prop-102' });
-    expect(r.propertyId).toBe('prop-102');
+    const r = mapRentRollRow({ property_id: 102, occupancy_id: 1, unit_id: 1 });
+    expect(r.propertyId).toBe('102');
     expect(r.monthlyRent).toBe(0);
     expect(r.balance).toBe(0);
-    expect(r.leaseId).toBe('');
+    expect(r.leaseId).toBe('1');
   });
 });
