@@ -10,6 +10,8 @@
  * - CLAUDE_CODE_OAUTH_TOKEN is a bare access token string (not JSON blob)
  * - accounts.json lives at state/oauth/accounts.json (per-instance, not per-org)
  * - Usage cache TTL = 3 minutes (API rate limit ~5 req/token)
+ * - CLAUDE_CODE_OAUTH_TOKEN is stripped from Bash tool subshells by Claude Code;
+ *   readTokenFromEnvFiles() reads it from org/agent .env files as a fallback
  */
 
 import { existsSync, readFileSync, chmodSync } from 'fs';
@@ -110,6 +112,49 @@ function usageDailyPath(ctxRoot: string): string {
   return join(usageDir(ctxRoot), `${today}.jsonl`);
 }
 
+// --- Env-file token helpers ---
+
+function readTokenFromFile(filePath: string): string | null {
+  if (!existsSync(filePath)) return null;
+  try {
+    const content = readFileSync(filePath, 'utf-8');
+    for (const line of content.split('\n')) {
+      const stripped = line.trim();
+      if (stripped.startsWith('CLAUDE_CODE_OAUTH_TOKEN=')) {
+        const value = stripped.slice('CLAUDE_CODE_OAUTH_TOKEN='.length).trim();
+        return value || null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read CLAUDE_CODE_OAUTH_TOKEN from org secrets.env then agent .env.
+ *
+ * Claude Code strips CLAUDE_CODE_OAUTH_TOKEN from Bash tool subshells for
+ * security. Bus commands that call this module from a subshell therefore see
+ * an empty env. This function provides the fallback: read the token from the
+ * on-disk env files that the daemon already owns.
+ *
+ * Resolution order: orgs/<org>/secrets.env → orgs/<org>/agents/<agent>/.env
+ */
+export function readTokenFromEnvFiles(
+  frameworkRoot: string,
+  org: string,
+  agentName?: string,
+): string | null {
+  if (!frameworkRoot || !org) return null;
+  const fromSecrets = readTokenFromFile(join(frameworkRoot, 'orgs', org, 'secrets.env'));
+  if (fromSecrets) return fromSecrets;
+  if (agentName) {
+    return readTokenFromFile(join(frameworkRoot, 'orgs', org, 'agents', agentName, '.env'));
+  }
+  return null;
+}
+
 // --- Account store helpers ---
 
 export function loadAccounts(ctxRoot: string): AccountsStore | null {
@@ -174,7 +219,7 @@ function saveCache(ctxRoot: string, snapshot: UsageSnapshot): void {
  */
 export async function checkUsageApi(
   ctxRoot: string,
-  opts: { force?: boolean; account?: string } = {},
+  opts: { force?: boolean; account?: string; frameworkRoot?: string; org?: string; agentName?: string } = {},
 ): Promise<CheckUsageResult> {
   // Check cache first (unless force)
   if (!opts.force) {
@@ -201,9 +246,16 @@ export async function checkUsageApi(
       accessToken = active.account.access_token;
       accountName = active.name;
     } else {
-      accessToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      // CLAUDE_CODE_OAUTH_TOKEN is stripped from Bash subshells by Claude Code.
+      // Fall through to env files before giving up.
+      const frameworkRoot = opts.frameworkRoot ?? process.env.CTX_FRAMEWORK_ROOT ?? '';
+      const org = opts.org ?? process.env.CTX_ORG ?? '';
+      const agentName = opts.agentName ?? process.env.CTX_AGENT_NAME;
+      accessToken = process.env.CLAUDE_CODE_OAUTH_TOKEN
+        ?? readTokenFromEnvFiles(frameworkRoot, org, agentName)
+        ?? undefined;
       accountName = 'env';
-      if (!accessToken) throw new Error('No OAuth token available (no accounts.json and CLAUDE_CODE_OAUTH_TOKEN not set)');
+      if (!accessToken) throw new Error('No OAuth token available (no accounts.json, CLAUDE_CODE_OAUTH_TOKEN not set in env or secrets files)');
     }
   }
 

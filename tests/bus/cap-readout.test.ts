@@ -285,6 +285,66 @@ describe('readDashboardSource', () => {
     });
   });
 
+  it('reads token from org secrets.env when env and accounts.json are absent', async () => {
+    // Write token into a fake framework-root secrets.env
+    const fwRoot = mkdtempSync(join(tmpdir(), 'cap-fw-test-'));
+    try {
+      mkdirSync(join(fwRoot, 'orgs', ORG), { recursive: true });
+      writeFileSync(join(fwRoot, 'orgs', ORG, 'secrets.env'), `CLAUDE_CODE_OAUTH_TOKEN=tok_from_fw_secrets\n`);
+
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ five_hour_utilization: 0.2, weekly_utilization: 0.05 }),
+      });
+
+      const result = await readDashboardSource({
+        ctxRoot: tmpRoot, org: ORG, agent: AGENT,
+        frameworkRoot: fwRoot,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        now: () => BEFORE_BILLING_SPLIT,
+      });
+      expect(result).not.toBeNull();
+      expect(result!.source).toBe('dashboard');
+      const callArgs = fetchImpl.mock.calls[0];
+      expect((callArgs[1] as RequestInit).headers).toMatchObject({
+        Authorization: 'Bearer tok_from_fw_secrets',
+      });
+    } finally {
+      try { rmSync(fwRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  it('falls through to agent .env when secrets.env has no token', async () => {
+    const fwRoot = mkdtempSync(join(tmpdir(), 'cap-fw-test-'));
+    try {
+      mkdirSync(join(fwRoot, 'orgs', ORG), { recursive: true });
+      writeFileSync(join(fwRoot, 'orgs', ORG, 'secrets.env'), 'OTHER_KEY=nope\n');
+      mkdirSync(join(fwRoot, 'orgs', ORG, 'agents', AGENT), { recursive: true });
+      writeFileSync(join(fwRoot, 'orgs', ORG, 'agents', AGENT, '.env'), `CLAUDE_CODE_OAUTH_TOKEN=tok_from_agent_env\n`);
+
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ five_hour_utilization: 0.1 }),
+      });
+
+      const result = await readDashboardSource({
+        ctxRoot: tmpRoot, org: ORG, agent: AGENT,
+        frameworkRoot: fwRoot,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        now: () => BEFORE_BILLING_SPLIT,
+      });
+      expect(result).not.toBeNull();
+      const callArgs = fetchImpl.mock.calls[0];
+      expect((callArgs[1] as RequestInit).headers).toMatchObject({
+        Authorization: 'Bearer tok_from_agent_env',
+      });
+    } finally {
+      try { rmSync(fwRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
   it('returns null when response JSON has no recognised fields', async () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'tok_test';
     const fetchImpl = vi.fn().mockResolvedValue({

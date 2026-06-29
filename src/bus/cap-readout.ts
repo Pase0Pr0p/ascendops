@@ -20,6 +20,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { readTokenFromEnvFiles } from './oauth.js';
 
 // --- Public types (frozen shape — do not change) ---
 
@@ -91,6 +92,7 @@ export interface GetCurrentCapOpts {
   // Test/DI hooks — undocumented in public API.
   ctxRoot?: string;
   org?: string;
+  frameworkRoot?: string;
   fetchImpl?: typeof fetch;
   now?: () => number;
   uptimeSecs?: () => number;
@@ -303,6 +305,17 @@ function resolveAccessToken(opts?: GetCurrentCapOpts): string | null {
   // Prefer env (what agents actually run with) — matches oauth.ts fallback.
   const envToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   if (envToken) return envToken;
+
+  // CLAUDE_CODE_OAUTH_TOKEN is stripped from Bash subshells by Claude Code.
+  // Try org secrets.env → agent .env before falling back to accounts.json.
+  const frameworkRoot = opts?.frameworkRoot ?? process.env.CTX_FRAMEWORK_ROOT ?? '';
+  const org = resolveOrg(opts);
+  const agent = resolveAgent(opts);
+  if (frameworkRoot && org) {
+    const agentName = agent !== 'fleet' ? agent : undefined;
+    const fromFiles = readTokenFromEnvFiles(frameworkRoot, org, agentName);
+    if (fromFiles) return fromFiles;
+  }
 
   // Fall back to accounts.json so server-side callers still work.
   const ctxRoot = resolveCtxRoot(opts);
