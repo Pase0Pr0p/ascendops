@@ -47,6 +47,8 @@ export interface StackApiConfig {
   accountId: string;
   /** Override full host (useful for tests). */
   baseUrl?: string;
+  /** Reserved for future write operations (not yet implemented). */
+  writeEnabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
