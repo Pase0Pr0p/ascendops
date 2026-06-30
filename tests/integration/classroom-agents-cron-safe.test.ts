@@ -24,7 +24,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync, statSync } from 'fs';
-import { join } from 'path';
+import { join, sep } from 'path';
 import { tmpdir } from 'os';
 
 const BUNDLES_DIR = join(process.cwd(), 'community', 'classroom-agents');
@@ -75,18 +75,109 @@ describe('classroom bundles: static cron-safety contract', () => {
         const text = readFileSync(f, 'utf-8');
         // Instructions that would make the agent self-spawn a cron on boot.
         if (/CronCreate|bus add-cron|\/loop\s+\{|set up (your )?(a )?(heartbeat )?cron|create (a )?cron/i.test(text)) {
-          // README documents "add after setup" with bus add-cron — that is guidance to the
-          // human, not a boot-time self-spawn instruction. Exclude the README on that basis.
-          if (!f.endsWith('README.md')) offenders.push(f);
+          // Exempt the docs whose JOB is to add the role crons AFTER the agent is
+          // configured (not on a fresh/un-onboarded boot): the README ("add after
+          // setup") and the ONBOARDING.md / onboarding skill (the interview adds them
+          // as its final step, post-configuration). Ship-time config.crons is still []
+          // and the fresh-boot scheduler still fires nothing (proven dynamically below).
+          const exempt =
+            f.endsWith('README.md') ||
+            f.endsWith('ONBOARDING.md') ||
+            f.includes(`${sep}skills${sep}onboarding${sep}`);
+          if (!exempt) offenders.push(f);
         }
       }
       expect(offenders).toEqual([]);
     });
+
+    it(`${b}: ships the onboarding trigger (IDENTITY marker + ONBOARDING.md + onboarding skill)`, () => {
+      // The first-boot onboarding interview only fires if the daemon does NOT
+      // retro-mark .onboarded. hasCompletedBootstrapContent treats a '<!--' in the
+      // IDENTITY '## Name' as "still a template", so the marker keeps the agent
+      // un-onboarded on first boot -> buildStartupPrompt injects first-boot ->
+      // onboarding skill runs. Guard all three pieces are present.
+      const identity = readFileSync(join(bundleDir(b), 'IDENTITY.md'), 'utf-8');
+      const nameBlock = /^## Name\s*\n([^\n]*)/m.exec(identity);
+      expect(nameBlock?.[1] ?? '').toContain('<!--'); // marker -> not retro-marked onboarded
+      expect(existsSync(join(bundleDir(b), 'ONBOARDING.md'))).toBe(true);
+      expect(existsSync(join(bundleDir(b), '.claude', 'skills', 'onboarding', 'SKILL.md'))).toBe(true);
+    });
+
+    it(`${b}: single .onboarded authority - ONBOARDING.md gates+crons+writes it, onboarding skill defers`, () => {
+      // add-agent only fills {{agent_name}}/{{org}}; every other {{...}} (company,
+      // operator, owner, timezone, sibling-agent names, role criteria) is filled by
+      // the interview, including ones in CLAUDE.md and .claude/skills/**. ONBOARDING.md's
+      // final block is the SINGLE completion authority: a hard placeholder+marker gate,
+      // then the role crons, then .onboarded - so a member can never end up onboarded
+      // with a literal placeholder in Claude's prompt, NOR onboarded-without-crons.
+      const onb = readFileSync(join(bundleDir(b), 'ONBOARDING.md'), 'utf-8');
+      const skill = readFileSync(join(bundleDir(b), '.claude', 'skills', 'onboarding', 'SKILL.md'), 'utf-8');
+
+      // ONBOARDING.md carries the full gate: greps BOTH {{...}} (format-complete: any
+      // placeholder shape) AND the ## Name '<!-- Set during onboarding' marker (every
+      // signal the daemon's hasCompletedBootstrapContent keys on); the touch sits inside
+      // the if/grep ... fi gate; the gate excludes the self-referencing setup docs (else
+      // always-halt).
+      expect(onb).toContain("grep -rlE '\\{\\{[^{}]+\\}\\}|<!-- Set during onboarding'");
+      expect(onb).toMatch(/if grep -rlE[\s\S]*?touch[^\n]*\.onboarded[\s\S]*?fi/);
+      expect(onb).toMatch(/grep -vE '[^']*ONBOARDING\\.md[^']*README\\.md[^']*skills\/onboarding/);
+
+      // SINGLE-AUTHORITY (Codex P2 fix, dual-completion-path): the onboarding skill must
+      // NOT write .onboarded itself. A second completion path (a skill-side gate+touch that
+      // skips the role crons) let the agent reach onboarded-WITHOUT-crons, and .onboarded
+      // suppresses re-onboarding so the crons would never get added. The skill defers to
+      // ONBOARDING.md's final block as the one writer.
+      expect(skill).not.toMatch(/touch[^\n]*\.onboarded/);
+      expect(skill).toContain('ONBOARDING.md');
+
+      // ORDERING (ONBOARDING.md): the add-cron commands live INSIDE the gate's else,
+      // AFTER the gate and BEFORE .onboarded - so crons are persisted only when clean,
+      // never against a still-templated agent (no cron-persist-before-gate).
+      expect(onb).toMatch(/if grep -rlE[\s\S]*?\nelse\n[\s\S]*?add-cron[\s\S]*?touch[^\n]*\.onboarded[\s\S]*?\nfi/);
+      // and there is no add-cron OUTSIDE/BEFORE the gate (all crons are in the else)
+      const beforeGate = onb.slice(0, onb.indexOf('if grep -rlE'));
+      expect(beforeGate).not.toMatch(/cortextos bus add-cron/);
+    });
+
+    it(`${b}: MEMORY.md ships with <!-- and ONBOARDING.md strips it atomically between crons and .onboarded`, () => {
+      // The daemon retro-write (agent-process.ts:1006-1029) marks an agent onboarded when
+      // MEMORY.md is >80 chars AND has no <!--, OR a heartbeat.json exists. The interview
+      // fills IDENTITY ## Name early, so MEMORY.md's <!-- comment is the remaining
+      // content-guard mid-onboarding. SHIP-TIME the comment MUST be present (the bundle is
+      // un-onboarded by content), and it is stripped ONLY in the final &&-chain, AFTER the
+      // role crons register and right BEFORE touch .onboarded, so the
+      // hasCompletedBootstrapContent window stays closed until the crons exist.
+      const memory = readFileSync(join(bundleDir(b), 'MEMORY.md'), 'utf-8');
+      expect(memory).toContain('<!--'); // shipped un-onboarded by content
+
+      const onb = readFileSync(join(bundleDir(b), 'ONBOARDING.md'), 'utf-8');
+      // the strip targets the EXACT committed comment line (no whitespace drift) so it fires
+      const STRIP = "grep -vF '<!-- This memory is written during onboarding and as you work. It starts empty on purpose. -->' MEMORY.md";
+      expect(onb).toContain(STRIP);
+      // ORDERING: crons (list-crons sits after the last add-cron) -> strip -> touch .onboarded
+      expect(onb).toMatch(/list-crons[\s\S]*?grep -vF[^\n]*MEMORY\.md[\s\S]*?touch[^\n]*\.onboarded/);
+      // NEGATIVE-CONTROL guard: the strip must NOT sit before the crons - moving it ahead
+      // of list-crons reopens the content window mid-onboarding and fails this assertion.
+      expect(onb.slice(0, onb.indexOf('list-crons'))).not.toMatch(/grep -vF[^\n]*MEMORY/);
+    });
   }
+
+  it('onboarding hard-gate regex covers all trigger signals + is format-complete', () => {
+    // the gate greps {{[^{}]+}} OR the ## Name marker - it must HALT on (1) any
+    // placeholder format incl future digit/hyphen/uppercase, (2) the unfilled
+    // ## Name '<!-- Set during onboarding' marker (the other signal the daemon keys
+    // on), and PASS clean text. Guards the membership-vs-completeness gap AND the
+    // signal-set-vs-daemon-trigger gap.
+    const gate = /\{\{[^{}]+\}\}|<!-- Set during onboarding/;
+    expect(gate.test('Owner statements go to {{company_name}} monthly.')).toBe(true);    // placeholder -> refuses
+    expect(gate.test('A future placeholder {{Future-Var2}} must be caught too.')).toBe(true); // future format -> refuses
+    expect(gate.test('## Name\n<!-- Set during onboarding: pick a name -->')).toBe(true); // unfilled name marker -> refuses
+    expect(gate.test('## Name\nQuinn\n\nOwner is Acme Property.')).toBe(false);           // all filled -> allows .onboarded
+  });
 });
 
 // ---------------------------------------------------------------------------
-// Dynamic proof — real CronScheduler, bundle runtime state (no crons.json)
+// Dynamic proof - real CronScheduler, bundle runtime state (no crons.json)
 // ---------------------------------------------------------------------------
 
 describe('classroom bundles: real scheduler fires zero crons in bundle runtime state', () => {
