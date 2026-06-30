@@ -221,12 +221,16 @@ export function mapLeaseStatus(afStatus: string | undefined): LeaseStatus {
 
 export function mapOwnerStatementCategory(
   accountName: string | undefined,
-  amount: number,
+  _amount: number,
 ): OwnerStatementLineItem['category'] {
   const n = (accountName ?? '').toLowerCase();
-  if (n.includes('management fee') || n.includes('mgmt fee')) return 'fee';
+  // Fee: management-related accounts (AppFolio shows these as positive in expense section)
+  if (n.includes('management') || n.includes('mgmt')) return 'fee';
   if (n.includes('adjust') || n.includes('correction')) return 'adjustment';
-  return amount >= 0 ? 'income' : 'expense';
+  // Income: name-based — AppFolio income accounts reliably contain these terms
+  if (n.includes('income') || n.includes('rent') || n.includes('revenue')) return 'income';
+  // All other accounts are expenses (positive amounts in AppFolio income statement = expense magnitude)
+  return 'expense';
 }
 
 export function mapWorkOrderRow(raw: AfWorkOrderRow): WorkOrder {
@@ -513,8 +517,10 @@ function buildOwnerStatement(
   periodStart: string,
   periodEnd: string,
 ): OwnerStatement {
+  // AppFolio income_statement_date_range includes "Total Income" / "Total Expense" subtotal rows;
+  // exclude them from line items to avoid double-counting.
   const lineItems: OwnerStatementLineItem[] = rows
-    .filter((r) => r.account_name && r.selected_period)
+    .filter((r) => r.account_name && r.selected_period && !/^total\s/i.test(r.account_name))
     .map((r): OwnerStatementLineItem => {
       const amount = parseCents(r.selected_period);
       return {
@@ -525,13 +531,16 @@ function buildOwnerStatement(
       };
     });
 
-  const grossIncome = lineItems.filter((l) => l.amount > 0).reduce((s, l) => s + l.amount, 0);
-  const totalExpenses = Math.abs(
-    lineItems.filter((l) => l.category === 'expense').reduce((s, l) => s + l.amount, 0),
-  );
-  const managementFee = Math.abs(
-    lineItems.filter((l) => l.category === 'fee').reduce((s, l) => s + l.amount, 0),
-  );
+  // Sum by category; expenses show as positive amounts in AppFolio's income statement
+  const grossIncome = lineItems
+    .filter((l) => l.category === 'income')
+    .reduce((s, l) => s + l.amount, 0);
+  const totalExpenses = lineItems
+    .filter((l) => l.category === 'expense')
+    .reduce((s, l) => s + l.amount, 0);
+  const managementFee = lineItems
+    .filter((l) => l.category === 'fee')
+    .reduce((s, l) => s + l.amount, 0);
   const netOwnerDistribution = grossIncome - totalExpenses - managementFee;
 
   return {

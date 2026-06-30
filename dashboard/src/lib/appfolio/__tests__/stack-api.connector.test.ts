@@ -183,7 +183,7 @@ describe('mapOwnerStatementCategory', () => {
     expect(mapOwnerStatementCategory('Mgmt Fee', -5000)).toBe('fee');
   });
 
-  it('categorises negative expense amounts as expense', () => {
+  it('categorises expense accounts as expense by name, regardless of amount sign', () => {
     expect(mapOwnerStatementCategory('Plumbing Repair', -15000)).toBe('expense');
   });
 
