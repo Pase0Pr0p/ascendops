@@ -4,6 +4,7 @@ import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { initCommand } from './init.js';
 import { addAgentCommand } from './add-agent.js';
+import { materializeOnboardingCommand } from './onboarding-skill.js';
 import { startCommand } from './start.js';
 import { stopCommand } from './stop.js';
 import { restartCommand } from './restart.js';
@@ -41,6 +42,7 @@ program
 program.addCommand(initCommand);
 program.addCommand(installCommand);
 program.addCommand(addAgentCommand);
+program.addCommand(materializeOnboardingCommand);
 program.addCommand(startCommand);
 program.addCommand(stopCommand);
 program.addCommand(restartCommand);

@@ -1,0 +1,27 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "runtime": "claude-code",
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "tier": "sonnet",
+  "working_directory": "",
+  "timezone": "{{timezone}}",
+  "crons": [],
+  "communication_style": "precise-conservative",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "financial",
+      "ledger-adjustment",
+      "trust-transfer",
+      "owner-draw",
+      "vendor-payment",
+      "deposit-return",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  }
+}

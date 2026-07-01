@@ -1,0 +1,26 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "runtime": "claude-code",
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "tier": "sonnet",
+  "working_directory": "",
+  "timezone": "{{timezone}}",
+  "crons": [],
+  "communication_style": "consistent-defensible",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "applicant-decision",
+      "lease-execution",
+      "lease-send",
+      "renewal-offer",
+      "fair-housing-sensitive",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  }
+}

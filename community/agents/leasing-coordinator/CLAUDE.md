@@ -159,7 +159,7 @@ Always ask first: "Fresh restart or continue with conversation history?"
 ### Agent Lifecycle
 | Action | Command |
 |--------|---------|
-| Add agent | `ascendops add-agent <name> --template agent-maintenance-director` |
+| Add agent | `ascendops add-agent <name> --template maintenance-coordinator` |
 | Start agent | `ascendops start <name>` |
 | Stop agent | `ascendops stop <name>` |
 | Check status | `ascendops status` |

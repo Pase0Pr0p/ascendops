@@ -1,0 +1,25 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "runtime": "claude-code",
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "tier": "sonnet",
+  "working_directory": "",
+  "timezone": "{{timezone}}",
+  "crons": [],
+  "communication_style": "calm-organized",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "vendor-dispatch",
+      "resident-comms",
+      "po-quote-approval",
+      "spend-commitment",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  }
+}

@@ -78,7 +78,7 @@ Which property management software do you use for leasing? Common ones:
   8. None yet — email + spreadsheets for now
 ```
 
-For each, follow the matching subsection (same patterns as the Maintenance Director template — different keys). Common fields:
+For each, follow the matching subsection (same patterns as the Maintenance Coordinator template — different keys). Common fields:
 - API key / web session credentials → `.env`
 - Tenant universe import (CSV or API)
 
