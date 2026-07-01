@@ -21,6 +21,7 @@ import {
   IconMessages,
   IconNotes,
   IconBuilding,
+  IconHeartbeat,
 } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
@@ -38,6 +39,7 @@ const navItems: NavItem[] = [
   // Core
   { label: 'Overview', href: '/', icon: IconLayoutDashboard, section: 'core' },
   { label: 'Agents', href: '/agents', icon: IconRobot, section: 'core' },
+  { label: 'Health', href: '/health', icon: IconHeartbeat, section: 'core' },
   { label: 'Tasks', href: '/tasks', icon: IconListCheck, section: 'core' },
   { label: 'Activity', href: '/activity', icon: IconActivity, section: 'core' },
 

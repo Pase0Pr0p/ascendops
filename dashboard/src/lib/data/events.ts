@@ -108,6 +108,42 @@ export function getMilestones(org?: string): Event[] {
   return getRecentEvents(100, org, undefined, 'milestone');
 }
 
+/**
+ * Get event counts per agent for today (UTC). Returns a map of agent -> count.
+ */
+export function getEventCountsByAgent(org?: string): Record<string, number> {
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+  const todayISO = todayStart.toISOString();
+
+  const conditions: string[] = ['timestamp >= ?'];
+  const params: (string | number)[] = [todayISO];
+
+  if (org) {
+    conditions.push('org = ?');
+    params.push(org);
+  }
+
+  const where = `WHERE ${conditions.join(' AND ')}`;
+
+  try {
+    const rows = db
+      .prepare(
+        `SELECT agent, COUNT(*) as count FROM events ${where} GROUP BY agent`
+      )
+      .all(...params) as { agent: string; count: number }[];
+
+    const result: Record<string, number> = {};
+    for (const row of rows) {
+      result[row.agent] = row.count;
+    }
+    return result;
+  } catch (err) {
+    console.error('[data/events] getEventCountsByAgent error:', err);
+    return {};
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Row mapping
 // ---------------------------------------------------------------------------
