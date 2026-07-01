@@ -483,6 +483,18 @@
       "submitted_at": "2026-06-03T00:00:00Z"
     },
     {
+      "name": "renewals-coordinator",
+      "description": "Renewals coordinator agent — specialist for renewal risk scoring, capped rent recommendation, decision briefs, and renewal pipeline QA (recommends, never prices or sends)",
+      "author": "ascendops",
+      "type": "agent",
+      "version": "1.0.0",
+      "tags": ["renewals", "coordinator", "rent", "scoring", "retention"],
+      "review_status": "community",
+      "dependencies": [],
+      "install_path": "community/agents/renewals-coordinator",
+      "submitted_at": "2026-07-01T00:00:00Z"
+    },
+    {
       "name": "maintenance-coordinator",
       "description": "Maintenance coordinator agent for repair work orders, vendor dispatch, and maintenance scheduling",
       "author": "ascendops",

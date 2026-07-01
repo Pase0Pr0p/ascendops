@@ -1,0 +1,27 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "tier": "sonnet",
+  "working_directory": "",
+  "timezone": "",
+  "renewal_intake_window_days": 90,
+  "max_increase_pct": 0.05,
+  "nonrenew_late_threshold": 7,
+  "nonrenew_nsf_threshold": 3,
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on the highest priority renewals task: intake upcoming expirations, score risk, draft decision briefs, QA stale renewal rows, or prepare executor handoffs."
+    }
+  ],
+  "ecosystem": {
+    "local_version_control": {
+      "enabled": true
+    }
+  }
+}

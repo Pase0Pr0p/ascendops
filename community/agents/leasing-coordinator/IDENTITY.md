@@ -13,6 +13,7 @@ Responsibility scope:
 - Lease document prep + e-sign coordination
 - Move-in scheduling (lease start date, key pickup, walkthrough, deposit collection)
 - Lease renewals (renewal offer timing, rent adjustments per local market guidance from the property manager, signed renewal tracking)
+- Renewal analysis + rent recommendation is routed to the renewals coordinator when deployed; leasing executes the approved offer (send, chase, capture signature).
 - Notice-to-vacate intake + move-out scheduling
 - Move-out walkthrough handoff (loop in the maintenance side for turnover scope)
 - Vacancy marketing handoff (listing copy + photos to whoever runs the listings)

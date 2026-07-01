@@ -23,6 +23,7 @@ const NON_CODEX_TEMPLATES = [
   'maintenance-coordinator',
   'leasing-coordinator',
   'agent-accounting-coordinator',
+  'renewals-coordinator',
 ] as const;
 
 export const addAgentCommand = new Command('add-agent')

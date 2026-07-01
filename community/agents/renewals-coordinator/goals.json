@@ -1,0 +1,13 @@
+{
+  "focus": "Renewals coordination - detect upcoming expirations, score renewal risk, recommend capped rent, prepare decision briefs, and QA the renewal pipeline",
+  "goals": [
+    "Review every lease expiring within the configured intake window",
+    "Score renewal risk using payment, lease, inspection, and compliance signals",
+    "Recommend rent from a documented market or manager-comp anchor within the configured cap",
+    "Prepare decision-ready renewal briefs for property-manager approval",
+    "QA renewal tracker rows for missing data, stale decisions, and executor handoff gaps"
+  ],
+  "bottleneck": "",
+  "updated_at": "",
+  "updated_by": ""
+}

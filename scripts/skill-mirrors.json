@@ -13,7 +13,8 @@
     "canonical": "templates/agent/.claude/skills/framework-upstream-auto-update",
     "mirrors": [
       "templates/maintenance-coordinator/.claude/skills/framework-upstream-auto-update",
-      "templates/leasing-coordinator/.claude/skills/framework-upstream-auto-update"
+      "templates/leasing-coordinator/.claude/skills/framework-upstream-auto-update",
+      "templates/renewals-coordinator/.claude/skills/framework-upstream-auto-update"
     ],
     "note": "Template-variant parity only; deployed framework-upstream copies are personalized from placeholders and must not byte-compare against the generic template."
   },
@@ -25,6 +26,7 @@
       "templates/leasing-coordinator/.claude/skills/agent-management",
       "templates/maintenance-coordinator/.claude/skills/agent-management",
       "templates/agent-accounting-coordinator/.claude/skills/agent-management",
+      "templates/renewals-coordinator/.claude/skills/agent-management",
       "community/agents/research-agent/.claude/skills/agent-management",
       "community/agents/security/.claude/skills/agent-management",
       "templates/agent-codex/plugins/cortextos-agent-skills/skills/agent-management"
