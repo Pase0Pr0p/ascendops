@@ -8,6 +8,12 @@ import { db } from './db';
 import { checkRateLimit, resetRateLimit } from './rate-limit';
 import type { User } from './types';
 
+// Tie cookie Secure flag to the actual protocol, not NODE_ENV.
+// Production builds served over LAN HTTP must have secure=false or the browser
+// drops all cookies (including CSRF token), causing MissingCSRF on every login.
+// Set AUTH_URL=http://... for LAN HTTP, https://... for HTTPS deployments.
+const useSecureCookies = (process.env.AUTH_URL ?? '').startsWith('https');
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
   // Force simple cookie names without __Secure- / __Host- prefixes.
@@ -18,27 +24,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   cookies: {
     sessionToken: {
       name: 'authjs.session-token',
-      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: process.env.NODE_ENV === 'production' },
+      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: useSecureCookies },
     },
     csrfToken: {
       name: 'authjs.csrf-token',
-      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: process.env.NODE_ENV === 'production' },
+      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: useSecureCookies },
     },
     callbackUrl: {
       name: 'authjs.callback-url',
-      options: { sameSite: 'lax', path: '/', secure: process.env.NODE_ENV === 'production' },
+      options: { sameSite: 'lax', path: '/', secure: useSecureCookies },
     },
     pkceCodeVerifier: {
       name: 'authjs.pkce.code_verifier',
-      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: process.env.NODE_ENV === 'production' },
+      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: useSecureCookies },
     },
     state: {
       name: 'authjs.state',
-      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: process.env.NODE_ENV === 'production' },
+      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: useSecureCookies },
     },
     nonce: {
       name: 'authjs.nonce',
-      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: process.env.NODE_ENV === 'production' },
+      options: { httpOnly: true, sameSite: 'lax', path: '/', secure: useSecureCookies },
     },
   },
   providers: [
