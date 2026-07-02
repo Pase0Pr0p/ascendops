@@ -417,4 +417,62 @@ describe('mapRentRollRow', () => {
     expect(r.balance).toBe(0);
     expect(r.leaseId).toBe('1');
   });
+
+  it('maps new property fields', () => {
+    const r = mapRentRollRow({
+      ...raw,
+      property_name: 'Sunset Arms',
+      property_address: '123 Main St',
+      property_city: 'Los Angeles',
+      property_state: 'CA',
+      property_zip: '90001',
+    });
+    expect(r.propertyName).toBe('Sunset Arms');
+    expect(r.propertyAddress).toBe('123 Main St');
+    expect(r.propertyCity).toBe('Los Angeles');
+    expect(r.propertyState).toBe('CA');
+    expect(r.propertyZip).toBe('90001');
+  });
+
+  it('maps sqft and bd_ba', () => {
+    const r = mapRentRollRow({ ...raw, sqft: 875, bd_ba: '2/2.00' });
+    expect(r.sqft).toBe(875);
+    expect(r.bdBa).toBe('2/2.00');
+  });
+
+  it('coerces sqft string to number', () => {
+    const r = mapRentRollRow({ ...raw, sqft: '950' });
+    expect(r.sqft).toBe(950);
+  });
+
+  it('maps advertised_rent and market_rent to cents', () => {
+    const r = mapRentRollRow({ ...raw, advertised_rent: '3000.00', market_rent: '3100.00' });
+    expect(r.advertisedRent).toBe(300000);
+    expect(r.marketRent).toBe(310000);
+  });
+
+  it('maps additional_tenants as split array', () => {
+    const r = mapRentRollRow({ ...raw, additional_tenants: 'Jane Doe, John Doe' });
+    expect(r.additionalTenants).toEqual(['Jane Doe', 'John Doe']);
+  });
+
+  it('maps next_rent_increase fields', () => {
+    const r = mapRentRollRow({
+      ...raw,
+      next_rent_increase: '2026-10-01',
+      next_rent_increase_amount: '150.00',
+    });
+    expect(r.nextRentIncreaseDate).toBe('2026-10-01');
+    expect(r.nextRentIncreaseAmount).toBe(15000);
+  });
+
+  it('leaves new optional fields undefined when absent', () => {
+    const r = mapRentRollRow(raw);
+    expect(r.propertyName).toBeUndefined();
+    expect(r.sqft).toBeUndefined();
+    expect(r.bdBa).toBeUndefined();
+    expect(r.advertisedRent).toBeUndefined();
+    expect(r.additionalTenants).toBeUndefined();
+    expect(r.nextRentIncreaseDate).toBeUndefined();
+  });
 });

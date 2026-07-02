@@ -57,6 +57,20 @@ export interface RentRollEntry {
   balance: number;      // cents, positive = tenant owes
   lastPaymentDate?: string;
   leaseEnd?: string;
+  propertyName?: string;
+  propertyAddress?: string;
+  propertyCity?: string;
+  propertyState?: string;
+  propertyZip?: string;
+  /** Square footage — absent for ~33% of units */
+  sqft?: number;
+  /** Beds/baths combined string e.g. "2/2.00" */
+  bdBa?: string;
+  advertisedRent?: number;         // cents
+  marketRent?: number;             // cents; sparsely populated
+  additionalTenants?: string[];
+  nextRentIncreaseDate?: string;   // YYYY-MM-DD
+  nextRentIncreaseAmount?: number; // cents
 }
 
 export interface OwnerStatementLineItem {
