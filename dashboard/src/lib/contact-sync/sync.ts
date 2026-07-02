@@ -32,24 +32,37 @@ export async function runContactSync(opts: SyncOptions): Promise<SyncReport> {
   // 1. Fetch all contacts from Supabase with occupancy context
   const contacts = await fetchAllContacts();
 
-  // 2. Tag breakdown for logging
+  // 2. Deduplicate by appfolioId — multiple Supabase records can share one appfolio_id
+  //    (e.g. co-tenants). Keep the one with the highest-priority occupancy (first in fetch order).
+  const seen = new Set<string>();
+  const deduped = contacts.filter((c) => {
+    if (!c.appfolioId) return true; // no key → keep (will be skipped in people-api)
+    if (seen.has(c.appfolioId)) return false;
+    seen.add(c.appfolioId);
+    return true;
+  });
+  if (deduped.length !== contacts.length) {
+    console.log(`[contact-sync] deduped ${contacts.length} → ${deduped.length} (${contacts.length - deduped.length} duplicates removed)`);
+  }
+
+  // 3. Tag breakdown for logging
   const tagCounts: Record<string, number> = {};
-  for (const c of contacts) {
+  for (const c of deduped) {
     tagCounts[c.tag] = (tagCounts[c.tag] ?? 0) + 1;
   }
-  console.log(`[contact-sync] fetched ${contacts.length} contacts:`, tagCounts);
+  console.log(`[contact-sync] ${deduped.length} contacts to sync:`, tagCounts);
 
-  // 3. Dry-run short-circuit
+  // 4. Dry-run short-circuit
   if (opts.dryRun) {
     console.log('[contact-sync] dry-run: skipping People API writes');
     return {
-      total: contacts.length,
+      total: deduped.length,
       created: 0,
       updated: 0,
       archived: 0,
-      skipped: contacts.length,
+      skipped: deduped.length,
       errors: 0,
-      results: contacts.map((c) => ({
+      results: deduped.map((c) => ({
         appfolioId: c.appfolioId,
         displayName: c.displayName,
         action: 'skipped',
@@ -59,8 +72,8 @@ export async function runContactSync(opts: SyncOptions): Promise<SyncReport> {
     };
   }
 
-  // 4. Upsert to Google Contacts
-  const report = await syncContactsToGoogle(contacts, opts.accessToken, nowIso);
+  // 5. Upsert to Google Contacts
+  const report = await syncContactsToGoogle(deduped, opts.accessToken, nowIso);
 
   console.log(
     `[contact-sync] done — created:${report.created} updated:${report.updated} archived:${report.archived} skipped:${report.skipped} errors:${report.errors}`,
