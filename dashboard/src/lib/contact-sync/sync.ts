@@ -34,11 +34,14 @@ export async function runContactSync(opts: SyncOptions): Promise<SyncReport> {
 
   // 2. Deduplicate by appfolioId — multiple Supabase records can share one appfolio_id
   //    (e.g. co-tenants). Keep the one with the highest-priority occupancy (first in fetch order).
+  // Dedup on composite key "type:id" — bare appfolio_id is not unique across entity types
+  // (same numeric ID can appear in tenant + vendor + owner tables as unrelated people).
   const seen = new Set<string>();
   const deduped = contacts.filter((c) => {
-    if (!c.appfolioId) return true; // no key → keep (will be skipped in people-api)
-    if (seen.has(c.appfolioId)) return false;
-    seen.add(c.appfolioId);
+    const key = c.appfolioId && c.appfolioIdType ? `${c.appfolioIdType}:${c.appfolioId}` : null;
+    if (!key) return true; // no key → keep (will be skipped in people-api)
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
   if (deduped.length !== contacts.length) {

@@ -22,6 +22,13 @@ import { shouldArchive } from './types';
 const PEOPLE_API = 'https://people.googleapis.com/v1';
 const EXTERNAL_ID_TYPE = 'appfolio';
 
+// Composite key: "tenant:123", "vendor:123", "owner:123"
+// Prevents numeric ID collisions across AF entity types (same number can appear in tenant+vendor+owner tables)
+function afExternalId(contact: { appfolioIdType: string | null; appfolioId: string | null }): string | null {
+  if (!contact.appfolioId || !contact.appfolioIdType) return null;
+  return `${contact.appfolioIdType}:${contact.appfolioId}`;
+}
+
 const TAG_GROUP_NAMES: Record<string, string> = {
   'current-prospect': 'AF-Prospect',
   'future-tenant':    'AF-Future-Tenant',
@@ -87,6 +94,7 @@ async function buildExternalIdIndex(token: string): Promise<Map<string, GoogleCo
 
     const body = await res.json() as { connections?: GoogleContactResource[]; nextPageToken?: string };
     for (const c of body.connections ?? []) {
+      // Accept both namespaced ("tenant:123") and legacy bare ("123") keys
       const afId = c.externalIds?.find((e) => e.type === EXTERNAL_ID_TYPE)?.value;
       if (afId) index.set(afId, c);
     }
@@ -124,7 +132,7 @@ function buildBody(contact: DerivedContact, groupResourceName: string): GoogleCo
     names: [{ givenName: contact.firstName ?? undefined, familyName: contact.lastName ?? undefined, displayName: contact.displayName }],
     phoneNumbers: phones.length ? phones : undefined,
     emailAddresses: emails.length ? emails : undefined,
-    externalIds: contact.appfolioId ? [{ type: EXTERNAL_ID_TYPE, value: contact.appfolioId }] : undefined,
+    externalIds: afExternalId(contact) ? [{ type: EXTERNAL_ID_TYPE, value: afExternalId(contact)! }] : undefined,
     biographies: noteLines.length ? [{ value: noteLines.join('\n'), contentType: 'TEXT_PLAIN' }] : undefined,
     memberships: [{ contactGroupMembership: { contactGroupResourceName: groupResourceName } }],
   };
@@ -148,8 +156,9 @@ async function upsertContact(
     error: null,
   };
 
-  if (!contact.appfolioId) {
-    return { ...base, action: 'skipped', error: 'no appfolio_id' };
+  const compositeKey = afExternalId(contact);
+  if (!compositeKey) {
+    return { ...base, action: 'skipped', error: 'no appfolio_id / appfolioIdType' };
   }
 
   const effectiveTag = shouldArchive(contact, nowIso) ? 'inactive' : contact.tag;
@@ -161,7 +170,8 @@ async function upsertContact(
   const body = buildBody({ ...contact, tag: effectiveTag as typeof contact.tag }, groupResourceName);
 
   try {
-    const existing = index.get(contact.appfolioId);
+    // Check namespaced key first, then fall back to bare numeric key (legacy from initial migration)
+    const existing = index.get(compositeKey) ?? index.get(contact.appfolioId!);
 
     if (existing) {
       const updateMask = 'names,phoneNumbers,emailAddresses,externalIds,biographies,memberships';
