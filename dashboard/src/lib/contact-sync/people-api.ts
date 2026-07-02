@@ -147,6 +147,7 @@ async function upsertContact(
   contact: DerivedContact,
   groupMap: ContactGroupMap,
   index: Map<string, GoogleContactResource>,
+  claimedBareIds: Set<string>,   // tracks which bare numeric IDs have been claimed this run
   nowIso: string,
 ): Promise<UpsertResult> {
   const base: Omit<UpsertResult, 'action'> = {
@@ -170,8 +171,19 @@ async function upsertContact(
   const body = buildBody({ ...contact, tag: effectiveTag as typeof contact.tag }, groupResourceName);
 
   try {
-    // Check namespaced key first, then fall back to bare numeric key (legacy from initial migration)
-    const existing = index.get(compositeKey) ?? index.get(contact.appfolioId!);
+    // 1. Namespaced key (normal daily-cron path after migration)
+    let existing = index.get(compositeKey);
+
+    // 2. Bare-key migration fallback — first contact to claim a bare ID wins.
+    //    Subsequent contacts with the same number but different type skip the fallback
+    //    and go to CREATE, producing separate Google Contacts (fixes 20 collision groups).
+    if (!existing && contact.appfolioId) {
+      const bareKey = contact.appfolioId;
+      if (!claimedBareIds.has(bareKey) && index.has(bareKey)) {
+        claimedBareIds.add(bareKey);
+        existing = index.get(bareKey);
+      }
+    }
 
     if (existing) {
       const updateMask = 'names,phoneNumbers,emailAddresses,externalIds,biographies,memberships';
@@ -260,12 +272,17 @@ export async function syncContactsToGoogle(
   const index = await buildExternalIdIndex(accessToken);
   console.log(`[people-api] index built: ${index.size} existing AF-marked contacts`);
 
+  // Tracks which bare numeric IDs have been claimed by a contact this run.
+  // First contact to claim a bare key gets the migrate-in-place path;
+  // subsequent contacts with the same number but different type go to CREATE.
+  const claimedBareIds = new Set<string>();
+
   const report: SyncReport = { total: contacts.length, created: 0, updated: 0, archived: 0, skipped: 0, errors: 0, results: [] };
 
   for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
     const batch = contacts.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(
-      batch.map((c) => upsertContact(accessToken, c, groupMap, index, nowIso)),
+      batch.map((c) => upsertContact(accessToken, c, groupMap, index, claimedBareIds, nowIso)),
     );
     for (const r of results) {
       report.results.push(r);
