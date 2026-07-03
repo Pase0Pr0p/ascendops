@@ -1502,6 +1502,9 @@ export class AgentManager {
       if (!injected) {
         throw new Error(`injectAgent returned false for agent "${agentName}" — agent may not be running`);
       }
+      // Notify Signal 5 (cron-stall watchdog) that a cron was just successfully
+      // injected so it can track whether the agent processes the turn.
+      this.agents.get(agentName)?.checker.notifyCronInjected();
     };
 
     const scheduler = new CronScheduler({
