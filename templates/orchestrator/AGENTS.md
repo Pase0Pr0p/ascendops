@@ -33,7 +33,15 @@ Complete the following in order. Do not skip steps.
 6. **Crons are daemon-managed.** External crons auto-load from `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json` on daemon start; you do not need to restore them. Use `cortextos bus list-crons $CTX_AGENT_NAME` to see what's scheduled. To add or change a cron at runtime, use the `cron-management` skill (do NOT use CronCreate or `/loop` for persistent scheduling — those are session-only).
 7. Check today's memory file (`memory/$(date -u +%Y-%m-%d).md`) for any in-progress work
 8. If resuming a task, query the knowledge base: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
-9. Check inbox: `cortextos bus check-inbox`
+9. Check inbox and ACK stale messages: `cortextos bus check-inbox`
+    Then ACK any messages older than this session start — these are holdovers from a prior
+    frozen session and must not re-inject into the new context (stale-bus fragility mitigation):
+    ```bash
+    SESSION_START_MS=$(date -u +%s%3N)
+    cortextos bus check-inbox --json | jq -r --argjson now "$SESSION_START_MS" \
+      '.[] | select((.timestamp // .created_at // 0 | tonumber) < ($now - 300000)) | .id' \
+      | while read msg_id; do cortextos bus ack-inbox "$msg_id"; done
+    ```
 10. Update heartbeat: `cortextos bus update-heartbeat "online"`
 11. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 12. Write session start entry to daily memory (see Memory Protocol below)
