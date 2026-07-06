@@ -46,7 +46,15 @@ Complete the following in order. Do not skip steps.
    Read these before the daily memory file — they capture granular decisions and outcomes from previous sessions that did not make it into MEMORY.md.
 8. Check today's memory file (`memory/$(date -u +%Y-%m-%d).md`) for any in-progress work
 9. If resuming a task, query the knowledge base: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
-10. Check inbox: `cortextos bus check-inbox`
+10. Check inbox and ACK stale messages: `cortextos bus check-inbox`
+    Then ACK any messages older than this session start — these are holdovers from a prior
+    frozen session and must not re-inject into the new context (stale-bus fragility mitigation):
+    ```bash
+    SESSION_START_MS=$(( $(date -u +%s) * 1000 ))
+    cortextos bus check-inbox --json | jq -r --argjson now "$SESSION_START_MS" \
+      '.[] | select((.timestamp // .created_at // 0 | tonumber) < ($now - 300000)) | .id' \
+      | while read msg_id; do cortextos bus ack-inbox "$msg_id"; done
+    ```
 11. Update heartbeat: `cortextos bus update-heartbeat "online"`
 12. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 13. Write session start entry to daily memory (see Memory Protocol below)
