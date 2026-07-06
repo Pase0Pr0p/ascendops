@@ -32,6 +32,8 @@ function createMockAgent(name = 'test-agent') {
     injectMessage: vi.fn().mockReturnValue(true),
     write: vi.fn(),
     getStatus: vi.fn().mockReturnValue({ status: 'running' }),
+    sessionRefresh: vi.fn().mockResolvedValue(undefined),
+    hardRestartSelf: vi.fn().mockResolvedValue(undefined),
   };
   // Mirrors AgentProcess: detailed result wraps the boolean path so tests that
   // stub injectMessage keep working; tests can also stub injectMessageDetailed
@@ -2155,6 +2157,157 @@ describe('FastChecker', () => {
       // The rewritten doc has a newer mtime than the consumed record, so it is
       // preserved (not skipped).
       expect(readFileSync(join(paths.stateDir, '.handoff-doc-path'), 'utf-8').trim()).toBe(reusedDoc);
+    });
+  });
+
+  // ─── Signal-5 cron-stall watchdog (Fix 2a + Fix 2b) ──────────────────────────
+  describe('Signal-5 cron-stall watchdog — Fix 2a (post-refresh escalation) + Fix 2b (injection-based frozen clock)', () => {
+    // Helpers for manipulating Signal-5 private state directly.
+    function setSignal5State(checker: FastChecker, state: {
+      lastCronInjectedAt?: number;
+      cronStallContinueFired?: boolean;
+      cronStallRefreshFiredAt?: number;
+      stdoutBytesAtInjection?: number;
+      stdoutLastSize?: number;
+      stdoutLastChangeAt?: number;
+    }) {
+      for (const [k, v] of Object.entries(state)) {
+        (checker as any)[k] = v;
+      }
+    }
+
+    it('Fix 2a: cronStallRefreshFiredAt is stamped when Level 1 sessionRefresh fires', async () => {
+      const agent = createMockAgent('signal5-agent');
+      agent.sessionRefresh = vi.fn().mockResolvedValue(undefined);
+      const checker = new FastChecker(agent, paths, '/framework');
+      const now = Date.now();
+      // Set up: cron injected 35min ago, stdout stalled (no output since injection)
+      setSignal5State(checker, {
+        lastCronInjectedAt: now - 35 * 60_000,
+        stdoutBytesAtInjection: 1000,
+        stdoutLastSize: 1000,           // no growth since injection
+        cronStallContinueFired: false,
+        cronStallRefreshFiredAt: 0,
+      });
+      await (checker as any).checkCronStallWatchdog(now);
+      expect(agent.sessionRefresh).toHaveBeenCalled();
+      expect((checker as any).cronStallRefreshFiredAt).toBeGreaterThan(0);
+      expect((checker as any).cronStallContinueFired).toBe(true);
+    });
+
+    it('Fix 2a: post-refresh secondary check fires hardRestartSelf when still frozen after 25min', async () => {
+      const agent = createMockAgent('signal5-agent');
+      agent.hardRestartSelf = vi.fn().mockResolvedValue(undefined);
+      const checker = new FastChecker(agent, paths, '/framework');
+      const now = Date.now();
+      // Simulate: Level 1 already fired 26min ago, session still frozen (no stop-hook flag)
+      setSignal5State(checker, {
+        lastCronInjectedAt: 0,           // zeroed by Level 1
+        cronStallContinueFired: true,
+        cronStallRefreshFiredAt: now - 26 * 60_000,
+        stdoutLastChangeAt: now - 40 * 60_000,  // frozen before refresh
+      });
+      await (checker as any).checkCronStallWatchdog(now);
+      expect(agent.hardRestartSelf).toHaveBeenCalledWith(
+        expect.stringContaining('context-poisoned after --continue restart'),
+      );
+      expect((checker as any).cronStallContinueFired).toBe(false);
+      expect((checker as any).cronStallRefreshFiredAt).toBe(0);
+    });
+
+    it('Fix 2a: post-refresh secondary check does NOT fire if stop-hook flag is newer than refresh', async () => {
+      const agent = createMockAgent('signal5-agent');
+      agent.hardRestartSelf = vi.fn().mockResolvedValue(undefined);
+      const checker = new FastChecker(agent, paths, '/framework');
+      const now = Date.now();
+      const refreshAt = now - 26 * 60_000;
+      // Write a stop-hook flag that is NEWER than the refresh — turn completed post-refresh
+      const flagPath = join(paths.stateDir, 'last_idle.flag');
+      writeFileSync(flagPath, String(Math.floor((refreshAt + 60_000) / 1000)), 'utf-8');
+      setSignal5State(checker, {
+        lastCronInjectedAt: 0,
+        cronStallContinueFired: true,
+        cronStallRefreshFiredAt: refreshAt,
+        stdoutLastChangeAt: now - 5 * 60_000,
+      });
+      await (checker as any).checkCronStallWatchdog(now);
+      expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+      // Escalation state should be cleared since turn completed
+      expect((checker as any).cronStallContinueFired).toBe(false);
+      expect((checker as any).cronStallRefreshFiredAt).toBe(0);
+    });
+
+    it('Fix 2a: post-refresh secondary check does NOT fire before POST_REFRESH_WINDOW_MS elapses', async () => {
+      const agent = createMockAgent('signal5-agent');
+      agent.hardRestartSelf = vi.fn().mockResolvedValue(undefined);
+      const checker = new FastChecker(agent, paths, '/framework');
+      const now = Date.now();
+      // Refresh fired only 10min ago — not yet past the 25min window
+      setSignal5State(checker, {
+        lastCronInjectedAt: 0,
+        cronStallContinueFired: true,
+        cronStallRefreshFiredAt: now - 10 * 60_000,
+        stdoutLastChangeAt: now - 40 * 60_000,
+      });
+      await (checker as any).checkCronStallWatchdog(now);
+      expect(agent.hardRestartSelf).not.toHaveBeenCalled();
+    });
+
+    it('Fix 2b: notifyCronInjected stamps stdoutBytesAtInjection from stdoutLastSize', () => {
+      const agent = createMockAgent('signal5-agent');
+      const checker = new FastChecker(agent, paths, '/framework');
+      (checker as any).stdoutLastSize = 42_000;
+      checker.notifyCronInjected();
+      expect((checker as any).stdoutBytesAtInjection).toBe(42_000);
+      expect((checker as any).lastCronInjectedAt).toBeGreaterThan(0);
+    });
+
+    it('Fix 2b: stall detected when stdout has not grown beyond injection size after STDOUT_FROZEN_MS', async () => {
+      const agent = createMockAgent('signal5-agent');
+      agent.sessionRefresh = vi.fn().mockResolvedValue(undefined);
+      const checker = new FastChecker(agent, paths, '/framework');
+      const now = Date.now();
+      // Injected 35min ago, stdout at exactly injection size (no meaningful output)
+      setSignal5State(checker, {
+        lastCronInjectedAt: now - 35 * 60_000,
+        stdoutBytesAtInjection: 5000,
+        stdoutLastSize: 5100,           // <1KB growth — within tolerance
+        cronStallContinueFired: false,
+        cronStallRefreshFiredAt: 0,
+      });
+      await (checker as any).checkCronStallWatchdog(now);
+      expect(agent.sessionRefresh).toHaveBeenCalled();
+    });
+
+    it('Fix 2b: NO stall when stdout has grown meaningfully since injection (legitimate long task)', async () => {
+      const agent = createMockAgent('signal5-agent');
+      agent.sessionRefresh = vi.fn().mockResolvedValue(undefined);
+      const checker = new FastChecker(agent, paths, '/framework');
+      const now = Date.now();
+      // 100KB output since injection — legitimate long-running task
+      setSignal5State(checker, {
+        lastCronInjectedAt: now - 35 * 60_000,
+        stdoutBytesAtInjection: 5000,
+        stdoutLastSize: 105_000,        // 100KB growth — real output
+        cronStallContinueFired: false,
+        cronStallRefreshFiredAt: 0,
+      });
+      await (checker as any).checkCronStallWatchdog(now);
+      expect(agent.sessionRefresh).not.toHaveBeenCalled();
+    });
+
+    it('Fix 2b: resetWatchdogState clears cronStallRefreshFiredAt and stdoutBytesAtInjection', () => {
+      const agent = createMockAgent('signal5-agent');
+      const checker = new FastChecker(agent, paths, '/framework');
+      setSignal5State(checker, {
+        cronStallRefreshFiredAt: 12345,
+        stdoutBytesAtInjection: 9999,
+        lastCronInjectedAt: 99999,
+      });
+      checker.resetWatchdogState();
+      expect((checker as any).cronStallRefreshFiredAt).toBe(0);
+      expect((checker as any).stdoutBytesAtInjection).toBe(-1);
+      expect((checker as any).lastCronInjectedAt).toBe(0);
     });
   });
 });

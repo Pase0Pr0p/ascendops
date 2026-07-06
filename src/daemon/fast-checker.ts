@@ -153,6 +153,22 @@ export class FastChecker {
   //   --continue restart to work correctly.
   private lastCronInjectedAt: number = 0;
   private cronStallContinueFired: boolean = false;
+  // cronStallRefreshFiredAt: epoch-ms when Level 1 sessionRefresh fired. Enables the
+  // post-refresh secondary check (Fix 2a): if the session is still frozen 25min after
+  // the --continue restart, escalate directly to hardRestartSelf without waiting for
+  // a new cron injection (which would otherwise be required since lastCronInjectedAt
+  // is zeroed at Level 1). Cleared on turn completion or resetWatchdogState().
+  private cronStallRefreshFiredAt: number = 0;
+  // stdoutBytesAtInjection: stdout log size (bytes) recorded when a cron is injected.
+  // Used by Fix 2b: instead of measuring "stdout frozen since last PTY byte" (which
+  // the injection itself resets), we measure "stdout has not advanced beyond injection
+  // time." Closes the sparse-cron blind spot where each 4h injection resets the 30min
+  // frozen window before Signal-5 can accumulate enough silence to fire.
+  private stdoutBytesAtInjection: number = -1;
+  // POST_REFRESH_WINDOW_MS: how long to wait after a sessionRefresh before escalating
+  // to hardRestartSelf if the session is still frozen. 25min absorbs restart noise
+  // (the --continue process emits lines that briefly refresh stdoutLastChangeAt).
+  private readonly POST_REFRESH_WINDOW_MS = 25 * 60 * 1000;
   // Active window for cron-triggered turns (wider than Telegram's 10 min — cron
   // tasks like daily summaries and KB ingests run longer).
   // 90m window - 30m frozen threshold = 60m of actual processing before detection
@@ -960,20 +976,26 @@ export class FastChecker {
       return;
     }
 
-    // Signal 5: cron-stall watchdog — detects an agent whose session is hung
-    // processing a daemon-injected cron turn (live-hang: PTY alive, LLM call stalled).
-    //
-    // A hung LLM call blocks Claude Code on a network read; the process emits no
-    // output (no streaming tokens, no tool results, spinner pauses). Real long-running
-    // cron tasks (research, KB ingests, daily summaries) DO emit tool and thinking
-    // output throughout — a legitimate task producing zero stdout bytes for 30+
-    // consecutive minutes does not exist in practice. The 30-min window already has
-    // margin; widen to 45 if doubt arises rather than risk killing live work.
-    //
+    this.checkCronStallWatchdog(now);
+  }
+
+  /**
+   * Signal 5: cron-stall watchdog — detects an agent whose session is hung
+   * processing a daemon-injected cron turn (live-hang: PTY alive, LLM call stalled).
+   *
+   * Extracted to a named method so unit tests can call it directly without wiring
+   * the full pollCycle machinery.
+   *
+   * Fix 2a: cronStallRefreshFiredAt + post-refresh secondary check closes the Level 2
+   * unreachability gap (Robin Jul 4-5 incidents — context-poisoned --continue restarts).
+   * Fix 2b: injection-based frozen detection closes the sparse-cron blind spot where
+   * each cron injection resets stdoutLastChangeAt before 30min of silence can accumulate.
+   */
+  private checkCronStallWatchdog(now: number): void {
     // Triple-condition correctness guard (must ALL be true to trigger):
     //   1. lastCronInjectedAt within CRON_ACTIVE_WINDOW_MS — a cron was recently
     //      injected so the agent is expected to be responding to it.
-    //   2. stdout frozen for STDOUT_FROZEN_MS — no output at all, not a slow task.
+    //   2. stdout has not advanced since injection (Fix 2b) or frozen 30min (fallback).
     //   3. last_idle.flag (Stop hook) is older than the injection — the agent has not
     //      completed its turn. A healthy agent that just finished a long cron task
     //      updates last_idle.flag; this condition clears Signal 5 immediately.
@@ -983,11 +1005,21 @@ export class FastChecker {
     //   Second detection in same escalation cycle → hard restart (.force-fresh).
     //   cronStallContinueFired persists across the --continue restart and is only
     //   cleared when a cron turn completes normally (see below).
-    if (
-      this.lastCronInjectedAt > 0 &&
-      now - this.lastCronInjectedAt < this.CRON_ACTIVE_WINDOW_MS &&
-      now - this.stdoutLastChangeAt > this.STDOUT_FROZEN_MS
-    ) {
+    const stallDetected = ((): boolean => {
+      if (this.lastCronInjectedAt <= 0) return false;
+      if (now - this.lastCronInjectedAt >= this.CRON_ACTIVE_WINDOW_MS) return false;
+      if (this.stdoutBytesAtInjection >= 0) {
+        // Fix 2b: injection-based check. Turn has not produced output if log size
+        // hasn't grown meaningfully since injection AND the injection was >30min ago.
+        // 1KB tolerance absorbs the injection write itself.
+        const noOutputSinceInjection = this.stdoutLastSize <= this.stdoutBytesAtInjection + 1024;
+        return noOutputSinceInjection && now - this.lastCronInjectedAt > this.STDOUT_FROZEN_MS;
+      }
+      // Fallback for first-cycle where stdoutBytesAtInjection not yet populated.
+      return now - this.stdoutLastChangeAt > this.STDOUT_FROZEN_MS;
+    })();
+
+    if (stallDetected) {
       const flagPath = join(this.paths.stateDir, 'last_idle.flag');
       let cronTurnCompleted = false;
       try {
@@ -1001,11 +1033,13 @@ export class FastChecker {
 
       if (cronTurnCompleted) {
         // Turn completed normally. If we had a prior --continue restart, the new
-        // session proved healthy — clear the escalation flag.
+        // session proved healthy — clear the escalation state.
         if (this.cronStallContinueFired) {
           this.log('CRON-STALL: cron turn completed after --continue restart — escalation state cleared');
           this.cronStallContinueFired = false;
         }
+        this.cronStallRefreshFiredAt = 0;
+        this.stdoutBytesAtInjection = -1;
         this.lastCronInjectedAt = 0;
       } else {
         const frozenSec = Math.round((now - this.stdoutLastChangeAt) / 1000);
@@ -1013,19 +1047,70 @@ export class FastChecker {
         if (status === 'halted' || status === 'stopped') return;
 
         if (!this.cronStallContinueFired) {
-          // Level 1: first stall — try --continue restart
+          // Level 1: first stall — try --continue restart.
+          // Fix 2a: stamp cronStallRefreshFiredAt so the post-refresh secondary check
+          // can fire hardRestartSelf after POST_REFRESH_WINDOW_MS if still frozen.
           this.cronStallContinueFired = true;
+          this.cronStallRefreshFiredAt = now;
           this.lastCronInjectedAt = 0;
-          this.log(`CRON-STALL: stdout frozen ${frozenSec}s after cron injection — triggering --continue restart`);
+          this.log(`CRON-STALL: stdout stalled ${frozenSec}s after cron injection — triggering --continue restart`);
           this.agent.sessionRefresh().catch(err =>
             this.log(`CRON-STALL: --continue restart failed: ${err instanceof Error ? err.message : String(err)}`)
           );
         } else {
-          // Level 2: stalled again after --continue — escalate to hard restart
+          // Level 2: stalled again after --continue — escalate to hard restart.
           this.cronStallContinueFired = false;
+          this.cronStallRefreshFiredAt = 0;
+          this.stdoutBytesAtInjection = -1;
           this.lastCronInjectedAt = 0;
-          this.log(`CRON-STALL: stdout frozen ${frozenSec}s again after --continue restart — triggering hard restart`);
+          this.log(`CRON-STALL: stdout stalled ${frozenSec}s again after --continue restart — triggering hard restart`);
           this.agent.hardRestartSelf('cron-stall-watchdog: repeated stall after --continue restart').catch(err =>
+            this.log(`CRON-STALL: hard restart failed: ${err instanceof Error ? err.message : String(err)}`)
+          );
+        }
+      }
+    }
+
+    // Fix 2a: post-refresh secondary check. After Level 1 sessionRefresh fires,
+    // lastCronInjectedAt is zeroed so the main stallDetected block cannot re-enter.
+    // This secondary check fires hardRestartSelf if the session is still frozen
+    // POST_REFRESH_WINDOW_MS after the --continue restart — without requiring a new
+    // cron injection. Closes the Level 2 unreachability gap from the Robin incidents
+    // (Jul 4-5) where context-poisoned --continue restarts re-froze and only cleared
+    // on manual chief restart after 7h50m.
+    if (
+      this.cronStallContinueFired &&
+      this.cronStallRefreshFiredAt > 0 &&
+      now - this.cronStallRefreshFiredAt > this.POST_REFRESH_WINDOW_MS
+    ) {
+      const flagPath = join(this.paths.stateDir, 'last_idle.flag');
+      let turnCompletedSinceRefresh = false;
+      try {
+        if (existsSync(flagPath)) {
+          const idleTs = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10) * 1000;
+          if (idleTs > this.cronStallRefreshFiredAt) {
+            turnCompletedSinceRefresh = true;
+          }
+        }
+      } catch { /* non-critical */ }
+
+      if (turnCompletedSinceRefresh) {
+        this.log('CRON-STALL: turn completed post-refresh — session recovered, escalation state cleared');
+        this.cronStallContinueFired = false;
+        this.cronStallRefreshFiredAt = 0;
+        this.stdoutBytesAtInjection = -1;
+        this.lastCronInjectedAt = 0;
+      } else {
+        const status = this.agent.getStatus().status;
+        if (status !== 'halted' && status !== 'stopped') {
+          const postRefreshMin = Math.round(this.POST_REFRESH_WINDOW_MS / 60_000);
+          this.log(
+            `CRON-STALL: session still frozen ${postRefreshMin}min after --continue restart — escalating to hard restart`
+          );
+          this.cronStallContinueFired = false;
+          this.cronStallRefreshFiredAt = 0;
+          this.stdoutBytesAtInjection = -1;
+          this.agent.hardRestartSelf('cron-stall-watchdog: context-poisoned after --continue restart').catch(err =>
             this.log(`CRON-STALL: hard restart failed: ${err instanceof Error ? err.message : String(err)}`)
           );
         }
@@ -2375,6 +2460,10 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
    */
   notifyCronInjected(): void {
     this.lastCronInjectedAt = Date.now();
+    // Fix 2b: record stdout size at injection time so Signal-5 can detect when
+    // output has not advanced beyond injection bytes (sparse-cron blind spot).
+    // stdoutLastSize is the running byte count updated each poll cycle.
+    this.stdoutBytesAtInjection = this.stdoutLastSize;
   }
 
   resetWatchdogState(): void {
@@ -2394,7 +2483,11 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // clean window. cronStallContinueFired is intentionally NOT reset here —
     // it must survive the --continue restart so a second stall in the new
     // session triggers Level 2 (hard restart) rather than another --continue.
+    // cronStallRefreshFiredAt IS reset here — it was stamped in the old session
+    // and the post-refresh secondary check will re-stamp it if needed.
     this.lastCronInjectedAt = 0;
+    this.cronStallRefreshFiredAt = 0;
+    this.stdoutBytesAtInjection = -1;
     this.log('Watchdog state reset for new session');
   }
 
