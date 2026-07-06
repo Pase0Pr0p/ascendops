@@ -105,8 +105,32 @@ interface AfRentRollRow {
   move_out?: string;
   /** Amount past due (balance) — dollar string */
   past_due?: string;
-  /** Last payment date */
+  /** Date of last rent increase YYYY-MM-DD */
   last_rent_increase?: string;
+  /** Property display name */
+  property_name?: string;
+  /** Property street address */
+  property_address?: string;
+  property_city?: string;
+  property_state?: string;
+  property_zip?: string;
+  property_type?: string;
+  /** Square footage — absent for ~33% of units */
+  sqft?: number | string;
+  /** Beds/baths combined string e.g. "2/2.00" */
+  bd_ba?: string;
+  /** Advertised (asking) rent — dollar string */
+  advertised_rent?: string;
+  /** Market rent — dollar string; sparsely populated */
+  market_rent?: string;
+  /** Co-tenant names — comma-separated string */
+  additional_tenants?: string;
+  /** Date of next scheduled rent increase YYYY-MM-DD */
+  next_rent_increase?: string;
+  /** Next rent increase amount — dollar string */
+  next_rent_increase_amount?: string;
+  /** Rent adjustment label or amount */
+  next_rent_adjustment?: string;
 }
 
 /** Row from tenant_directory.json report */
@@ -286,6 +310,22 @@ export function mapRentRollRow(raw: AfRentRollRow): RentRollEntry {
     monthlyRent: parseCents(raw.rent),
     balance: parseCents(raw.past_due),
     leaseEnd: raw.lease_to,
+    propertyName: raw.property_name,
+    propertyAddress: raw.property_address,
+    propertyCity: raw.property_city,
+    propertyState: raw.property_state,
+    propertyZip: raw.property_zip,
+    sqft: raw.sqft != null ? Number(raw.sqft) : undefined,
+    bdBa: raw.bd_ba,
+    advertisedRent: raw.advertised_rent ? parseCents(raw.advertised_rent) : undefined,
+    marketRent: raw.market_rent ? parseCents(raw.market_rent) : undefined,
+    additionalTenants: raw.additional_tenants
+      ? raw.additional_tenants.split(',').map((s) => s.trim()).filter(Boolean)
+      : undefined,
+    nextRentIncreaseDate: raw.next_rent_increase,
+    nextRentIncreaseAmount: raw.next_rent_increase_amount
+      ? parseCents(raw.next_rent_increase_amount)
+      : undefined,
   };
 }
 
