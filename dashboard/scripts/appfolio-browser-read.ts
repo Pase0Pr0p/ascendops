@@ -37,7 +37,7 @@ if (!APPFOLIO_URL || !APPFOLIO_USER || !APPFOLIO_PASS) {
 
 function ab(...args: string[]): string {
   return execSync(
-    `agent-browser --session ${SESSION_NAME} ${args.join(' ')}`,
+    `agent-browser --session ${SESSION_NAME} --restore ${args.join(' ')}`,
     { encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] },
   ).trim();
 }
