@@ -50,7 +50,7 @@ Complete the following in order. Do not skip steps.
     Then ACK any messages older than this session start — these are holdovers from a prior
     frozen session and must not re-inject into the new context (stale-bus fragility mitigation):
     ```bash
-    SESSION_START_MS=$(date -u +%s%3N)
+    SESSION_START_MS=$(( $(date -u +%s) * 1000 ))
     cortextos bus check-inbox --json | jq -r --argjson now "$SESSION_START_MS" \
       '.[] | select((.timestamp // .created_at // 0 | tonumber) < ($now - 300000)) | .id' \
       | while read msg_id; do cortextos bus ack-inbox "$msg_id"; done
