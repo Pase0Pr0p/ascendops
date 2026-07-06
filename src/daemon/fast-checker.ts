@@ -388,7 +388,7 @@ export class FastChecker {
       execFile(
         'cortextos',
         ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`],
-        { timeout: 10_000 },
+        { timeout: 10_000, env: { ...process.env, CTX_AGENT_NAME: agentName } },
         (err) => {
           if (!err) return;
           const e = err as NodeJS.ErrnoException & { killed?: boolean };
