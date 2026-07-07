@@ -26,7 +26,7 @@ Fetch Claude Max utilization from the Anthropic usage API. 3-minute TTL cache.
 cortextos bus check-usage-api               # human-readable
 cortextos bus check-usage-api --json        # JSON
 cortextos bus check-usage-api --force       # bypass cache
-cortextos bus check-usage-api --account rob # specific account (needs accounts.json)
+cortextos bus check-usage-api --account <name> # specific account (needs accounts.json)
 ```
 
 The daemon (fast-checker) calls this every 15 minutes automatically. On tier transitions it:
@@ -35,7 +35,7 @@ The daemon (fast-checker) calls this every 15 minutes automatically. On tier tra
 
 Tiers: high ≥ 85% (5h or 7d), critical ≥ 95%.
 
-**Env-var note:** `CLAUDE_CODE_OAUTH_TOKEN` is stripped from Bash subshells by Claude Code for security. The bus command reads the token from `orgs/<org>/secrets.env` as a fallback — this is why it works without accounts.json.
+**Env-var note:** `CLAUDE_CODE_OAUTH_TOKEN` is stripped from Bash subshells by Claude Code for security. The bus command reads the token from `orgs/<org>/secrets.env` as a fallback — this is why `check-usage-api` works without accounts.json.
 
 ### list-oauth-accounts — wired, needs bootstrap
 
@@ -74,11 +74,11 @@ Rotation thresholds: 5h ≥ 85% OR 7d ≥ 80%.
 
 ---
 
-## Bootstrap procedure (supervised window only — needs Rob)
+## Bootstrap procedure (supervised window only — requires operator)
 
 The multi-account rotation commands need `state/oauth/accounts.json`. This is a one-time setup per Claude account you want in the rotation pool.
 
-**What Rob needs to provide:**
+**What the operator needs to provide:**
 - The `refresh_token` for each Claude Max account to add
 - Run `claude setup-token` on an interactive session to get a fresh token pair
 
@@ -86,14 +86,14 @@ The multi-account rotation commands need `state/oauth/accounts.json`. This is a 
 
 ```json
 {
-  "active": "rob-max",
+  "active": "primary",
   "accounts": {
-    "rob-max": {
-      "label": "Rob personal Max",
+    "primary": {
+      "label": "Primary Max account",
       "access_token": "<access_token from claude setup-token>",
       "refresh_token": "<refresh_token>",
       "expires_at": 0,
-      "last_refreshed": "2026-07-07T00:00:00Z",
+      "last_refreshed": "<ISO-8601 timestamp>",
       "five_hour_utilization": 0,
       "seven_day_utilization": 0
     }
@@ -112,10 +112,10 @@ After creating the file, `list-oauth-accounts` will show the account and `check-
 
 **When a PAT expires or is about to expire:**
 
-1. Rob generates a new fine-grained PAT on GitHub (Settings → Developer settings → Fine-grained tokens)
+1. The operator generates a new fine-grained PAT on GitHub (Settings → Developer settings → Fine-grained tokens)
    - Required permissions: Contents (read/write), Pull requests (read/write), Metadata (read)
-   - Target: `Pase0Pr0p/ascendops`
-2. Update `orgs/paseo-pm/secrets.env`:
+   - Target: `<owner>/<repo>`
+2. Update `orgs/<org>/secrets.env`:
    ```
    GH_TOKEN=<new token>
    GITHUB_TOKEN=<new token>
