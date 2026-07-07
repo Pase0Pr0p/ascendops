@@ -61,7 +61,7 @@ Requires `accounts.json` with a `refresh_token` stored for the target account.
 ```bash
 cortextos bus rotate-oauth                         # rotate if thresholds met
 cortextos bus rotate-oauth --force                 # force regardless of utilization
-cortextos bus rotate-oauth --agent claudia         # update only one agent's .env
+cortextos bus rotate-oauth --agent <agent-name>         # update only one agent's .env
 cortextos bus rotate-oauth --reason "manual"       # logged reason
 cortextos bus rotate-oauth --json                  # JSON output
 ```
