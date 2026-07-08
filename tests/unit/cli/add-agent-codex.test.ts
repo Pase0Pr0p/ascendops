@@ -128,7 +128,7 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
     const skills = readdirSync(skillsDir, { withFileTypes: true })
       .filter(d => d.isDirectory())
       .map(d => d.name);
-    expect(skills.length).toBe(26);
+    expect(skills.length).toBe(27);
     // Spot check: comms is the skill that teaches the Telegram reply pattern.
     expect(skills).toContain('comms');
     expect(skills).toContain('onboarding');
@@ -150,7 +150,7 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
     const codexSkillsDir = join(tempHome, '.codex', 'skills');
     expect(existsSync(codexSkillsDir)).toBe(true);
     const links = readdirSync(codexSkillsDir).filter(n => n.startsWith('codex-links__'));
-    expect(links.length).toBe(26);
+    expect(links.length).toBe(27);
     expect(links).toContain('codex-links__study-and-borrow');
     expect(links).toContain('codex-links__trending-repo-scout');
 
