@@ -42,6 +42,15 @@ function ab(...args: string[]): string {
   ).trim();
 }
 
+// Non-destructive variant: restores session state for reading but never auto-saves on close.
+// Use for check-session so a redirect to the OAuth page cannot clobber the known-good cookies.
+function abReadOnly(...args: string[]): string {
+  return execSync(
+    `agent-browser --session ${SESSION_NAME} --restore --restore-save never ${args.join(' ')}`,
+    { encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] },
+  ).trim();
+}
+
 function abSafe(...args: string[]): { ok: boolean; output: string } {
   try {
     const output = ab(...args);
@@ -57,20 +66,25 @@ function abSafe(...args: string[]): { ok: boolean; output: string } {
  * and seeing if we land on a dashboard (not login page).
  */
 async function checkSession(): Promise<{ authenticated: boolean; url: string; title: string }> {
-  const result = abSafe('open', APPFOLIO_URL, '--json');
+  // Use abReadOnly (--restore-save never) so a redirect to the OAuth page cannot
+  // auto-save unauthenticated state over the known-good session cookies.
+  const safe = (...args: string[]) => { try { return { ok: true, output: abReadOnly(...args) }; } catch (e: unknown) { const err = e as { stdout?: string; stderr?: string; message?: string }; return { ok: false, output: err.stdout ?? err.stderr ?? err.message ?? String(e) }; } };
+
+  const result = safe('open', APPFOLIO_URL, '--json');
   if (!result.ok) {
+    abReadOnly('close');
     return { authenticated: false, url: APPFOLIO_URL, title: 'error opening page' };
   }
 
-  const pageInfo = abSafe('get', 'url');
-  const titleInfo = abSafe('get', 'title');
+  const pageInfo = safe('get', 'url');
+  const titleInfo = safe('get', 'title');
   const url = pageInfo.output;
   const title = titleInfo.output;
 
   // AppFolio uses OAuth — redirected to SSO provider means not authenticated.
   // Authenticated state: URL is on paseoproperties.appfolio.com, NOT on account.appfolio.com auth page.
   const onAuthPage = /account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(url);
-  ab('close');
+  abReadOnly('close');
   return { authenticated: !onAuthPage, url, title };
 }
 
