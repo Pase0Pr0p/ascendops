@@ -329,40 +329,73 @@ describe('OutputBuffer.hasAuthFailureSignature', () => {
     return buf;
   }
 
-  // TRUE POSITIVES — actual Claude Code CLI auth-failure output formats.
-  // These match the exact strings observed during the Jun-27 and Jun-30 token incidents.
+  // RECALL TESTS — each of the three confirmed real CLI output formats must return true.
+  // These are the exact strings observed during the Jun-27 account-swap and Jun-30 incidents.
 
-  it('detects "invalid_grant" alone (unambiguous OAuth error code)', () => {
+  it('[recall] detects "invalid_grant" in terminal output (OAuth token-endpoint refresh failure)', () => {
     const buf = bufWith('Error: invalid_grant — token has been revoked\n');
     expect(buf.hasAuthFailureSignature()).toBe(true);
   });
 
-  it('detects "invalid authentication credentials" (the 401 body the CLI surfaces)', () => {
+  it('[recall] detects "invalid authentication credentials" with "API Error:" prefix (API-call 401)', () => {
     const buf = bufWith('API Error: 401 Invalid authentication credentials\n');
     expect(buf.hasAuthFailureSignature()).toBe(true);
   });
 
-  it('detects "Please run /login · API Error: 401" combo (CLI inline error format)', () => {
+  it('[recall] detects "Please run /login · API Error: 401" (CLI full inline error format)', () => {
     const buf = bufWith('Please run /login · API Error: 401 Invalid authentication credentials\n');
     expect(buf.hasAuthFailureSignature()).toBe(true);
   });
 
-  it('is case-insensitive', () => {
+  it('[recall] is case-insensitive', () => {
     const buf = bufWith('INVALID_GRANT\n');
     expect(buf.hasAuthFailureSignature()).toBe(true);
   });
 
-  it('strips ANSI escape codes before matching', () => {
-    const buf = bufWith('\x1b[31minvalid authentication credentials\x1b[0m\n');
+  it('[recall] strips ANSI escape codes before matching', () => {
+    // "invalid authentication credentials" with API Error: prefix, ANSI-wrapped
+    const buf = bufWith('\x1b[31mAPI Error: 401 invalid authentication credentials\x1b[0m\n');
     expect(buf.hasAuthFailureSignature()).toBe(true);
   });
 
-  // FALSE POSITIVES — task data containing auth words that must NOT trigger a halt.
-  // Chief's concern: the PTY buffer includes full conversation output, so general
-  // auth vocabulary appearing in a message being processed is a real risk.
+  // PRECISION TESTS — strings that appear in normal agent data must NOT trigger a halt.
+  // Chief verified that chief MEMORY.md (read every boot) and recent session buffers
+  // contain "invalid_grant" and "invalid authentication credentials" verbatim.
 
-  it('does NOT trigger on "Please run /login" alone in task data', () => {
-    // e.g. agent received a Telegram message discussing the /login command
+  it('[precision] does NOT trigger on "invalid_grant" buried in task/conversation data (> 50 chunks ago)', () => {
+    // Simulate: MEMORY.md was ingested early in the session (many chunks ago),
+    // then the agent crashes for an unrelated reason. The auth string is outside
+    // the 50-chunk terminal window.
+    const early = Array.from({ length: 60 }, (_, i) =>
+      i === 0
+        ? 'MEMORY.md content: ...invalid_grant flow fixed 2026-06-30...\n'
+        : `normal work chunk ${i}\n`,
+    );
+    const buf = bufWith(...early);
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "invalid authentication credentials" in conversation data (> 50 chunks ago)', () => {
+    const early = Array.from({ length: 60 }, (_, i) =>
+      i === 0
+        ? 'User message: the error was "401 Invalid authentication credentials" last week\n'
+        : `tool output chunk ${i}\n`,
+    );
+    const buf = bufWith(...early);
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "invalid authentication credentials" WITHOUT "api error:" in terminal window', () => {
+    // The string appears in recent output but without the CLI "API Error:" framing —
+    // e.g. the agent quoted an error from another system.
+    const buf = bufWith(
+      'The webhook returned: {"error": "invalid authentication credentials"}\n',
+      'Parsing response...\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "Please run /login" alone in task data', () => {
     const buf = bufWith(
       'User message: "When I get the 401 error it says please run /login to fix it."\n',
       'Working on it...\n',
@@ -370,15 +403,14 @@ describe('OutputBuffer.hasAuthFailureSignature', () => {
     expect(buf.hasAuthFailureSignature()).toBe(false);
   });
 
-  it('does NOT trigger on "401" alone in task data (common HTTP status word)', () => {
+  it('[precision] does NOT trigger on "401" alone in task data (common HTTP status word)', () => {
     const buf = bufWith(
       'The AppFolio API returned a 401 on the first request — checking credentials.\n',
     );
     expect(buf.hasAuthFailureSignature()).toBe(false);
   });
 
-  it('does NOT trigger on "login" + "401" in task content without the CLI error format', () => {
-    // A message discussing auth issues should not falsely halt a healthy agent
+  it('[precision] does NOT trigger on "login" + "401" in task content without CLI format', () => {
     const buf = bufWith(
       'Diagnosis: the /login command returns 401 when the keychain token is stale.\n',
       'Recommended fix: delete Claude Code-credentials and restart.\n',
@@ -386,12 +418,12 @@ describe('OutputBuffer.hasAuthFailureSignature', () => {
     expect(buf.hasAuthFailureSignature()).toBe(false);
   });
 
-  it('does NOT trigger on empty buffer', () => {
+  it('[precision] does NOT trigger on empty buffer', () => {
     const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
     expect(buf.hasAuthFailureSignature()).toBe(false);
   });
 
-  it('does NOT trigger on "authentication" without the specific error strings', () => {
+  it('[precision] does NOT trigger on "authentication" without specific error strings', () => {
     const buf = bufWith(
       'Reading AppFolio authentication docs.\n',
       'Found the auth module at src/auth/oauth.ts\n',

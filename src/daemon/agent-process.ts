@@ -221,6 +221,9 @@ export class AgentProcess {
       // permanently lose the recovery context (Bug-1 fix pattern).
       if (recoveryNote) deleteRecoveryNote(stateDir);
       if (hadRateLimit) this.deleteRateLimitMarker(stateDir);
+      // Clear auth-failure marker so a later unrelated HALT doesn't inherit
+      // the stale "token expired" message after the operator fixed the token.
+      try { const m = join(stateDir, '.auth-failure'); if (existsSync(m)) unlinkSync(m); } catch { /* non-critical */ }
 
       // Issue #392: codex-app-server does not reliably execute the inline
       // "Send a Telegram message saying you are back online" instruction the
