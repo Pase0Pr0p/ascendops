@@ -316,3 +316,118 @@ describe('OutputBuffer.close() — held-tail flush at PTY exit (P3 regression)',
     expect(buf.getSize()).toBe('ends with [REDACTED_POSSIBLE_JWT_TAIL]'.length);
   });
 });
+
+// ---------------------------------------------------------------------------
+// hasAuthFailureSignature
+// ---------------------------------------------------------------------------
+
+describe('OutputBuffer.hasAuthFailureSignature', () => {
+  // Helper: push text into a fresh buffer and return the buffer.
+  function bufWith(...chunks: string[]): InstanceType<typeof OutputBuffer> {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    for (const chunk of chunks) buf.push(chunk);
+    return buf;
+  }
+
+  // RECALL TESTS — each of the three confirmed real CLI output formats must return true.
+  // These are the exact strings observed during the Jun-27 account-swap and Jun-30 incidents.
+
+  it('[recall] detects "invalid_grant" in terminal output (OAuth token-endpoint refresh failure)', () => {
+    const buf = bufWith('Error: invalid_grant — token has been revoked\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('[recall] detects "invalid authentication credentials" with "API Error:" prefix (API-call 401)', () => {
+    const buf = bufWith('API Error: 401 Invalid authentication credentials\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('[recall] detects "Please run /login · API Error: 401" (CLI full inline error format)', () => {
+    const buf = bufWith('Please run /login · API Error: 401 Invalid authentication credentials\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('[recall] is case-insensitive', () => {
+    const buf = bufWith('INVALID_GRANT\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('[recall] strips ANSI escape codes before matching', () => {
+    // "invalid authentication credentials" with API Error: prefix, ANSI-wrapped
+    const buf = bufWith('\x1b[31mAPI Error: 401 invalid authentication credentials\x1b[0m\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  // PRECISION TESTS — strings that appear in normal agent data must NOT trigger a halt.
+  // Chief verified that chief MEMORY.md (read every boot) and recent session buffers
+  // contain "invalid_grant" and "invalid authentication credentials" verbatim.
+
+  it('[precision] does NOT trigger on "invalid_grant" buried in task/conversation data (> 50 chunks ago)', () => {
+    // Simulate: MEMORY.md was ingested early in the session (many chunks ago),
+    // then the agent crashes for an unrelated reason. The auth string is outside
+    // the 50-chunk terminal window.
+    const early = Array.from({ length: 60 }, (_, i) =>
+      i === 0
+        ? 'MEMORY.md content: ...invalid_grant flow fixed 2026-06-30...\n'
+        : `normal work chunk ${i}\n`,
+    );
+    const buf = bufWith(...early);
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "invalid authentication credentials" in conversation data (> 50 chunks ago)', () => {
+    const early = Array.from({ length: 60 }, (_, i) =>
+      i === 0
+        ? 'User message: the error was "401 Invalid authentication credentials" last week\n'
+        : `tool output chunk ${i}\n`,
+    );
+    const buf = bufWith(...early);
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "invalid authentication credentials" WITHOUT "api error:" in terminal window', () => {
+    // The string appears in recent output but without the CLI "API Error:" framing —
+    // e.g. the agent quoted an error from another system.
+    const buf = bufWith(
+      'The webhook returned: {"error": "invalid authentication credentials"}\n',
+      'Parsing response...\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "Please run /login" alone in task data', () => {
+    const buf = bufWith(
+      'User message: "When I get the 401 error it says please run /login to fix it."\n',
+      'Working on it...\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "401" alone in task data (common HTTP status word)', () => {
+    const buf = bufWith(
+      'The AppFolio API returned a 401 on the first request — checking credentials.\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "login" + "401" in task content without CLI format', () => {
+    const buf = bufWith(
+      'Diagnosis: the /login command returns 401 when the keychain token is stale.\n',
+      'Recommended fix: delete Claude Code-credentials and restart.\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on empty buffer', () => {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('[precision] does NOT trigger on "authentication" without specific error strings', () => {
+    const buf = bufWith(
+      'Reading AppFolio authentication docs.\n',
+      'Found the auth module at src/auth/oauth.ts\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+});

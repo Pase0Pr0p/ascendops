@@ -212,6 +212,55 @@ export class OutputBuffer {
   }
 
   /**
+   * Check whether the recent PTY output contains signatures of a Claude Code
+   * CLI auth failure (expired/invalid CLAUDE_CODE_OAUTH_TOKEN). Used by the
+   * daemon to classify these exits as auth-failure (halt-fast, no backoff)
+   * rather than real crashes.
+   *
+   * TWO-LAYER false-positive protection (both required):
+   *
+   * Layer 1 — narrow scan window: only the last 50 chunks, not 200.
+   *   A real fatal auth error is the LAST thing the CLI prints before exit.
+   *   Task data mentioning these strings (e.g. MEMORY.md ingested at boot,
+   *   a Telegram message quoting an auth error) is processed earlier in the
+   *   session and falls outside the terminal window.
+   *
+   * Layer 2 — "api error:" co-occurrence required for ALL three signals:
+   *   The CLI always wraps its 401 errors in the "API Error: …" prefix.
+   *   "invalid_grant" or "invalid authentication credentials" appearing alone
+   *   in conversation data do NOT trigger — they need the CLI's structural
+   *   framing to match. (Chief's MEMORY.md and this session both contain these
+   *   strings without the "api error:" prefix, verified pre-merge.)
+   *
+   * Confirmed CLI output format (Jun-27 account-swap + Jun-30 incidents):
+   *   "Please run /login · API Error: 401 Invalid authentication credentials"
+   */
+  hasAuthFailureSignature(): boolean {
+    // Scan only the terminal 50 chunks — a real fatal auth error is the last
+    // thing the CLI prints before exit. Memory reads, quoted messages, and
+    // task data containing these strings appear earlier in the session and
+    // fall outside this terminal window.
+    const text = this.chunks.slice(-50).join('').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').toLowerCase();
+
+    // "invalid_grant" is the OAuth token-endpoint refresh failure code. It may
+    // surface WITHOUT the "API Error:" framing (the token refresh is a separate
+    // code path from an in-flight API call 401). The 50-chunk terminal window
+    // is its primary false-positive guard — data mentions of this string sit
+    // much earlier in the session buffer.
+    if (text.includes('invalid_grant')) return true;
+
+    // The two API-call-401 signals always carry the CLI's "API Error:" prefix
+    // (confirmed format: "Please run /login · API Error: 401 Invalid
+    // authentication credentials"). Require co-occurrence with "api error:" as
+    // a second guard beyond the window narrowing, since these strings are more
+    // likely to appear in conversation data (e.g. chief MEMORY.md at every boot).
+    if (!text.includes('api error:')) return false;
+    if (text.includes('invalid authentication credentials')) return true;
+    if (text.includes('please run /login')) return true;
+    return false;
+  }
+
+  /**
    * Clear the buffer.
    */
   clear(): void {

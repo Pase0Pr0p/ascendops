@@ -21,7 +21,7 @@ import {
   deleteRecoveryNote,
   MIN_HEALTHY_SECONDS,
 } from './watchdog.js';
-import { CrashLoopDetector, sendCrashLoopAlert } from './crash-alert.js';
+import { CrashLoopDetector, sendCrashLoopAlert, sendAuthFailureAlert } from './crash-alert.js';
 type LogFn = (msg: string) => void;
 type StartOptions = { partOfFleetStart?: boolean };
 
@@ -221,6 +221,9 @@ export class AgentProcess {
       // permanently lose the recovery context (Bug-1 fix pattern).
       if (recoveryNote) deleteRecoveryNote(stateDir);
       if (hadRateLimit) this.deleteRateLimitMarker(stateDir);
+      // Clear auth-failure marker so a later unrelated HALT doesn't inherit
+      // the stale "token expired" message after the operator fixed the token.
+      try { const m = join(stateDir, '.auth-failure'); if (existsSync(m)) unlinkSync(m); } catch { /* non-critical */ }
 
       // Issue #392: codex-app-server does not reliably execute the inline
       // "Send a Telegram message saying you are back online" instruction the
@@ -694,6 +697,33 @@ export class AgentProcess {
           this.start().catch(err => this.log(`Rate-limit restart failed: ${err}`));
         }
       }, pauseSeconds * 1000);
+      return;
+    }
+
+    // Auth-failure detection: if the PTY output contains the Claude Code CLI's
+    // exact auth-error signatures (expired/invalid CLAUDE_CODE_OAUTH_TOKEN),
+    // halt immediately — restarting cannot fix a dead token, and burning the
+    // crash budget to HALT via backoff took 20+ silent minutes in the Jun-27
+    // incident. Distinct from rate-limit (time-based, auto-recovers) and crash
+    // (code bug, auto-restarts). Does NOT count toward max_crashes_per_day.
+    if (outputBuffer?.hasAuthFailureSignature()) {
+      this.log('Auth-failure detected (CLAUDE_CODE_OAUTH_TOKEN expired/invalid) — halting fast, no backoff');
+      try {
+        writeFileSync(join(stateDir, '.auth-failure'), new Date().toISOString(), 'utf-8');
+      } catch { /* ignore write errors */ }
+      this.appendCrashToRestartsLog(exitCode, 0, 'AUTH_FAILURE');
+      this.status = 'halted';
+      this.notifyStatusChange();
+      // Fire fleet-wide Telegram alert (debounced — one message even if 7 agents halt).
+      // Fire-and-forget: alert failure must not interrupt the halt path.
+      sendAuthFailureAlert({
+        agentEnvPath: join(this.env.agentDir, '.env'),
+        orgSecretsPath: join(this.env.frameworkRoot, 'orgs', this.env.org, 'secrets.env'),
+        agentsDir: join(this.env.frameworkRoot, 'orgs', this.env.org, 'agents'),
+        instanceStateDir: this.env.ctxRoot,
+        agentName: this.name,
+        log: this.log,
+      }).catch(() => { /* non-fatal */ });
       return;
     }
 
@@ -1285,7 +1315,7 @@ export class AgentProcess {
   private appendCrashToRestartsLog(
     exitCode: number,
     backoffMs: number,
-    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP' | 'IMAGE_POISON_RECOVERY',
+    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP' | 'IMAGE_POISON_RECOVERY' | 'AUTH_FAILURE',
   ): void {
     try {
       const logDir = join(this.env.ctxRoot, 'logs', this.name);

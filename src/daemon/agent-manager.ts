@@ -596,7 +596,12 @@ export class AgentManager {
           const crashNum = status.crashCount ?? '?';
           tgApi.sendMessage(tgChatId, `Agent ${name} crashed (crash #${crashNum}) — auto-restarting`).catch(logSendFail('crash'));
         } else if (status.status === 'halted') {
-          tgApi.sendMessage(tgChatId, `Agent ${name} HALTED — exceeded crash limit. Restart manually with: cortextos start ${name}`).catch(logSendFail('halt'));
+          const authFailureMarker = join(this.ctxRoot, 'state', name, '.auth-failure');
+          const isAuthFailure = existsSync(authFailureMarker);
+          const haltMsg = isAuthFailure
+            ? `Agent ${name} halted — token expired or invalid. Run: claude setup-token, then cortextos start ${name}`
+            : `Agent ${name} HALTED — exceeded crash limit. Restart manually with: cortextos start ${name}`;
+          tgApi.sendMessage(tgChatId, haltMsg).catch(logSendFail('halt'));
         } else if (status.status === 'running' && prevStatusForReset === 'crashed') {
           tgApi.sendMessage(tgChatId, `Agent ${name} recovered and is back online`).then(() => {
             log(`Telegram recovery back-online alert for ${name} sent successfully`);
