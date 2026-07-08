@@ -212,6 +212,41 @@ export class OutputBuffer {
   }
 
   /**
+   * Check whether the recent PTY output contains signatures of a Claude Code
+   * CLI auth failure (expired/invalid CLAUDE_CODE_OAUTH_TOKEN). Used by the
+   * daemon to classify these exits as auth-failure (halt-fast, no backoff)
+   * rather than real crashes.
+   *
+   * IMPORTANT: matches only the EXACT strings the Claude Code binary emits on
+   * a real 401/auth failure — NOT generic English auth words. The PTY buffer
+   * contains full conversation output, so broad terms like "401" or "login"
+   * would false-trigger on task data discussing auth topics.
+   *
+   * Confirmed CLI signatures (from Jun-27 account-swap + Jun-30 401 incidents):
+   *   - "please run /login" combined with "api error: 401"  ← the CLI's exact
+   *     inline error format: "Please run /login · API Error: 401 …"
+   *   - "invalid authentication credentials"  ← the specific 401 body text
+   *   - "invalid_grant"  ← OAuth refresh failure code
+   *
+   * False-positive guard: "please run /login" alone is NOT enough — it must
+   * co-occur with "api error: 401" or "invalid authentication credentials" or
+   * "invalid_grant" in the same tail window to rule out task content that
+   * happens to mention the /login command.
+   */
+  hasAuthFailureSignature(): boolean {
+    // Only scan the last 200 chunks — auth errors appear near session end
+    const text = this.chunks.slice(-200).join('').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').toLowerCase();
+    // "invalid_grant" alone is unambiguous — it is an OAuth protocol error code
+    if (text.includes('invalid_grant')) return true;
+    // "invalid authentication credentials" is the specific 401 body the CLI surfaces
+    if (text.includes('invalid authentication credentials')) return true;
+    // "please run /login" is the CLI's auth-failure prompt; require it to co-occur
+    // with the API error marker so bare mentions of /login in conversation don't match
+    if (text.includes('please run /login') && text.includes('api error: 401')) return true;
+    return false;
+  }
+
+  /**
    * Clear the buffer.
    */
   clear(): void {

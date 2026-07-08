@@ -316,3 +316,86 @@ describe('OutputBuffer.close() — held-tail flush at PTY exit (P3 regression)',
     expect(buf.getSize()).toBe('ends with [REDACTED_POSSIBLE_JWT_TAIL]'.length);
   });
 });
+
+// ---------------------------------------------------------------------------
+// hasAuthFailureSignature
+// ---------------------------------------------------------------------------
+
+describe('OutputBuffer.hasAuthFailureSignature', () => {
+  // Helper: push text into a fresh buffer and return the buffer.
+  function bufWith(...chunks: string[]): InstanceType<typeof OutputBuffer> {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    for (const chunk of chunks) buf.push(chunk);
+    return buf;
+  }
+
+  // TRUE POSITIVES — actual Claude Code CLI auth-failure output formats.
+  // These match the exact strings observed during the Jun-27 and Jun-30 token incidents.
+
+  it('detects "invalid_grant" alone (unambiguous OAuth error code)', () => {
+    const buf = bufWith('Error: invalid_grant — token has been revoked\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('detects "invalid authentication credentials" (the 401 body the CLI surfaces)', () => {
+    const buf = bufWith('API Error: 401 Invalid authentication credentials\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('detects "Please run /login · API Error: 401" combo (CLI inline error format)', () => {
+    const buf = bufWith('Please run /login · API Error: 401 Invalid authentication credentials\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    const buf = bufWith('INVALID_GRANT\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  it('strips ANSI escape codes before matching', () => {
+    const buf = bufWith('\x1b[31minvalid authentication credentials\x1b[0m\n');
+    expect(buf.hasAuthFailureSignature()).toBe(true);
+  });
+
+  // FALSE POSITIVES — task data containing auth words that must NOT trigger a halt.
+  // Chief's concern: the PTY buffer includes full conversation output, so general
+  // auth vocabulary appearing in a message being processed is a real risk.
+
+  it('does NOT trigger on "Please run /login" alone in task data', () => {
+    // e.g. agent received a Telegram message discussing the /login command
+    const buf = bufWith(
+      'User message: "When I get the 401 error it says please run /login to fix it."\n',
+      'Working on it...\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('does NOT trigger on "401" alone in task data (common HTTP status word)', () => {
+    const buf = bufWith(
+      'The AppFolio API returned a 401 on the first request — checking credentials.\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('does NOT trigger on "login" + "401" in task content without the CLI error format', () => {
+    // A message discussing auth issues should not falsely halt a healthy agent
+    const buf = bufWith(
+      'Diagnosis: the /login command returns 401 when the keychain token is stale.\n',
+      'Recommended fix: delete Claude Code-credentials and restart.\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('does NOT trigger on empty buffer', () => {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+
+  it('does NOT trigger on "authentication" without the specific error strings', () => {
+    const buf = bufWith(
+      'Reading AppFolio authentication docs.\n',
+      'Found the auth module at src/auth/oauth.ts\n',
+    );
+    expect(buf.hasAuthFailureSignature()).toBe(false);
+  });
+});

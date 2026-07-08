@@ -8,6 +8,7 @@ let mockHasRateLimitSignature = false;
 
 const mockOutputBuffer = {
   hasRateLimitSignature: vi.fn(() => mockHasRateLimitSignature),
+  hasAuthFailureSignature: vi.fn(() => false),
   isBootstrapped: vi.fn().mockReturnValue(false),
 };
 

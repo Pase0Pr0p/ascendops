@@ -8,7 +8,11 @@ import {
   ALERT_WINDOW_MS,
   ALERT_DEBOUNCE_MS,
   sendCrashLoopAlert,
+  sendAuthFailureAlert,
+  AUTH_ALERT_DEBOUNCE_MS,
+  AUTH_ALERT_MARKER,
 } from '../../../src/daemon/crash-alert.js';
+import { existsSync, readFileSync } from 'fs';
 
 // ---------------------------------------------------------------------------
 // CrashLoopDetector — unit tests (no I/O)
@@ -210,5 +214,171 @@ describe('sendCrashLoopAlert', () => {
     expect(text).toContain('scout');
     expect(text).toContain('4x');
     expect(text).toContain('RECOVERY.md');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sendAuthFailureAlert
+// ---------------------------------------------------------------------------
+
+describe('sendAuthFailureAlert', () => {
+  let tmpDir: string;
+  let agentEnvPath: string;
+  let orgSecretsPath: string;
+  let agentsDir: string;
+  let instanceStateDir: string;
+
+  beforeEach(() => {
+    tmpDir = join(tmpdir(), `auth-alert-test-${process.pid}-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    // Per-agent dirs
+    agentsDir = join(tmpDir, 'agents');
+    mkdirSync(join(agentsDir, 'claudia'), { recursive: true });
+    mkdirSync(join(agentsDir, 'chief'), { recursive: true });
+    agentEnvPath = join(agentsDir, 'claudia', '.env');
+    orgSecretsPath = join(tmpDir, 'secrets.env');
+    instanceStateDir = join(tmpDir, 'instance-state');
+    mkdirSync(instanceStateDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('fallback path: sends via triggering agent creds when FLEET_ALERT_* are absent', async () => {
+    writeFileSync(agentEnvPath, 'BOT_TOKEN=bot:claudia\nCHAT_ID=111\n', 'utf-8');
+    writeFileSync(orgSecretsPath, '# no fleet keys\n', 'utf-8');
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+
+    await sendAuthFailureAlert({
+      agentEnvPath,
+      orgSecretsPath,
+      agentsDir,
+      instanceStateDir,
+      agentName: 'claudia',
+      log: vi.fn(),
+      _telegramPost: mockPost,
+    });
+
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    const [token, chatId] = mockPost.mock.calls[0] as [string, string, string];
+    expect(token).toBe('bot:claudia');
+    expect(chatId).toBe('111');
+  });
+
+  it('fleet path: uses sender agent BOT_TOKEN and all FLEET_ALERT_CHAT_IDS recipients', async () => {
+    // Sender agent (chief) has the bot token
+    writeFileSync(join(agentsDir, 'chief', '.env'), 'BOT_TOKEN=bot:chief\nCHAT_ID=000\n', 'utf-8');
+    writeFileSync(agentEnvPath, 'BOT_TOKEN=bot:claudia\nCHAT_ID=111\n', 'utf-8');
+    writeFileSync(orgSecretsPath,
+      'FLEET_ALERT_SENDER_AGENT=chief\nFLEET_ALERT_CHAT_IDS=222,333\n', 'utf-8');
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+
+    await sendAuthFailureAlert({
+      agentEnvPath,
+      orgSecretsPath,
+      agentsDir,
+      instanceStateDir,
+      agentName: 'claudia',
+      log: vi.fn(),
+      _telegramPost: mockPost,
+    });
+
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    const calls = mockPost.mock.calls as [string, string, string][];
+    // Both sent with chief's bot token
+    expect(calls[0][0]).toBe('bot:chief');
+    expect(calls[1][0]).toBe('bot:chief');
+    // Sent to both operator chat IDs
+    const chatIds = calls.map(c => c[1]).sort();
+    expect(chatIds).toEqual(['222', '333']);
+  });
+
+  it('fleet debounce: second call within window skips Telegram', async () => {
+    writeFileSync(agentEnvPath, 'BOT_TOKEN=bot:claudia\nCHAT_ID=111\n', 'utf-8');
+    writeFileSync(orgSecretsPath, '', 'utf-8');
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+    const baseNow = 1_700_000_000_000;
+
+    await sendAuthFailureAlert({
+      agentEnvPath, orgSecretsPath, agentsDir, instanceStateDir,
+      agentName: 'claudia', log: vi.fn(), _telegramPost: mockPost, _now: baseNow,
+    });
+    expect(mockPost).toHaveBeenCalledTimes(1);
+
+    // Second agent halts 30s later — within 10min debounce window
+    await sendAuthFailureAlert({
+      agentEnvPath, orgSecretsPath, agentsDir, instanceStateDir,
+      agentName: 'scout', log: vi.fn(), _telegramPost: mockPost, _now: baseNow + 30_000,
+    });
+    // Still only 1 Telegram sent fleet-wide
+    expect(mockPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('fleet debounce: call after window expires sends again', async () => {
+    writeFileSync(agentEnvPath, 'BOT_TOKEN=bot:claudia\nCHAT_ID=111\n', 'utf-8');
+    writeFileSync(orgSecretsPath, '', 'utf-8');
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+    const baseNow = 1_700_000_000_000;
+
+    await sendAuthFailureAlert({
+      agentEnvPath, orgSecretsPath, agentsDir, instanceStateDir,
+      agentName: 'claudia', log: vi.fn(), _telegramPost: mockPost, _now: baseNow,
+    });
+
+    // After debounce window (10 min + 1s)
+    await sendAuthFailureAlert({
+      agentEnvPath, orgSecretsPath, agentsDir, instanceStateDir,
+      agentName: 'claudia', log: vi.fn(), _telegramPost: mockPost,
+      _now: baseNow + AUTH_ALERT_DEBOUNCE_MS + 1000,
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+  });
+
+  it('debounce marker is written to instanceStateDir', async () => {
+    writeFileSync(agentEnvPath, 'BOT_TOKEN=bot:claudia\nCHAT_ID=111\n', 'utf-8');
+    writeFileSync(orgSecretsPath, '', 'utf-8');
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+    const now = 1_700_000_000_000;
+
+    await sendAuthFailureAlert({
+      agentEnvPath, orgSecretsPath, agentsDir, instanceStateDir,
+      agentName: 'claudia', log: vi.fn(), _telegramPost: mockPost, _now: now,
+    });
+
+    const markerPath = join(instanceStateDir, AUTH_ALERT_MARKER);
+    expect(existsSync(markerPath)).toBe(true);
+    expect(parseInt(readFileSync(markerPath, 'utf-8').trim(), 10)).toBe(now);
+  });
+
+  it('alert message names the agent and instructs token refresh', async () => {
+    writeFileSync(agentEnvPath, 'BOT_TOKEN=bot:claudia\nCHAT_ID=111\n', 'utf-8');
+    writeFileSync(orgSecretsPath, '', 'utf-8');
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+
+    await sendAuthFailureAlert({
+      agentEnvPath, orgSecretsPath, agentsDir, instanceStateDir,
+      agentName: 'claudia', log: vi.fn(), _telegramPost: mockPost,
+    });
+
+    const [, , text] = mockPost.mock.calls[0] as [string, string, string];
+    expect(text).toContain('claudia');
+    expect(text).toContain('setup-token');
+    expect(text).toContain('cortextos start');
+  });
+
+  it('skips alert when no BOT_TOKEN available anywhere', async () => {
+    writeFileSync(agentEnvPath, 'CHAT_ID=111\n', 'utf-8'); // no BOT_TOKEN
+    writeFileSync(orgSecretsPath, '', 'utf-8');
+    const mockPost = vi.fn().mockResolvedValue(undefined);
+    const log = vi.fn();
+
+    await sendAuthFailureAlert({
+      agentEnvPath, orgSecretsPath, agentsDir, instanceStateDir,
+      agentName: 'claudia', log, _telegramPost: mockPost,
+    });
+
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('skipping Telegram'));
   });
 });

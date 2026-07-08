@@ -14,8 +14,8 @@ const mockPty = {
   // shutdown-handler tests that null out this.pty are unaffected.
   getPid: vi.fn().mockReturnValue(process.pid),
   isAlive: vi.fn().mockReturnValue(true),
-  // Default: no rate-limit signature in output (safe for all existing tests)
-  getOutputBuffer: vi.fn().mockReturnValue({ hasRateLimitSignature: () => false }),
+  // Default: no rate-limit or auth-failure signature in output (safe for all existing tests)
+  getOutputBuffer: vi.fn().mockReturnValue({ hasRateLimitSignature: () => false, hasAuthFailureSignature: () => false }),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
   }),
@@ -106,7 +106,7 @@ beforeEach(() => {
   mockPty.isAlive.mockClear();
   mockPty.isAlive.mockReturnValue(true);
   mockPty.getOutputBuffer.mockClear();
-  mockPty.getOutputBuffer.mockReturnValue({ hasRateLimitSignature: () => false });
+  mockPty.getOutputBuffer.mockReturnValue({ hasRateLimitSignature: () => false, hasAuthFailureSignature: () => false });
   mockPty.onExit.mockClear();
   mockInjectMessage.mockClear();
   fsMocks.existsSync.mockReset().mockReturnValue(false);
