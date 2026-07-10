@@ -21,10 +21,10 @@ import http from 'http';
 import pg from 'pg';
 // Env vars: Railway injects in prod. Dev: source orgs/paseo-pm/secrets.env before running.
 
-const pool = new pg.Pool({
-  connectionString: process.env.VOICE_GATEWAY_DSN,
-  ssl: { rejectUnauthorized: false },
-});
+// pg v8: sslmode=require in DSN overrides the ssl option, causing cert rejection on Supabase pooler.
+// Strip sslmode from the DSN and pass ssl:{rejectUnauthorized:false} explicitly.
+const _dsn = (process.env.VOICE_GATEWAY_DSN ?? '').replace(/[?&]sslmode=[^&]*/g, '');
+const pool = new pg.Pool({ connectionString: _dsn, ssl: { rejectUnauthorized: false } });
 
 async function verifyTelnyxSig(
   sig: string,
