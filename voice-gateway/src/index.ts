@@ -20,6 +20,7 @@
 import http from 'http';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { timingSafeEqual } from 'crypto';
 import pg from 'pg';
 // Env vars: Railway injects in prod. Dev: source orgs/paseo-pm/secrets.env before running.
 
@@ -53,6 +54,54 @@ async function verifyTelnyxSig(
   } catch {
     return false;
   }
+}
+
+// ElevenLabs post-call webhook: HMAC-SHA256
+// Header: elevenlabs-signature: t=<unix_seconds>,v0=<hmac-sha256-hex>
+// Signed message: "${timestamp}.${rawBody}"
+async function verifyElevenLabsSig(
+  sigHeader: string,
+  rawBody: Buffer,
+  secret: string,
+): Promise<boolean> {
+  try {
+    const pairs = sigHeader.split(',');
+    const tPart = pairs.find(p => p.startsWith('t='));
+    const v0Part = pairs.find(p => p.startsWith('v0='));
+    if (!tPart || !v0Part) return false;
+    const timestamp = tPart.substring(2);
+
+    // Reject stale requests (30-minute tolerance, same as ElevenLabs SDK)
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - parseInt(timestamp, 10)) > 1800) return false;
+
+    const key = await crypto.subtle.importKey(
+      'raw',
+      Buffer.from(secret, 'utf8'),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const message = Buffer.from(`${timestamp}.${rawBody.toString('utf8')}`, 'utf8');
+    const sig = await crypto.subtle.sign('HMAC', key, message);
+    const computed = 'v0=' + Buffer.from(sig).toString('hex');
+
+    const a = Buffer.from(computed);
+    const b = Buffer.from(v0Part);
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+// Constant-time bearer token check for ElevenLabs tool calls
+function checkBearerToken(authHeader: string | undefined, expected: string): boolean {
+  if (!authHeader?.startsWith('Bearer ')) return false;
+  const provided = Buffer.from(authHeader.substring(7));
+  const exp = Buffer.from(expected);
+  if (provided.length !== exp.length) return false;
+  return timingSafeEqual(provided, exp);
 }
 
 async function captureEvent(
@@ -185,9 +234,51 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url === '/voice/tools/lookup_record') {
-      // Mid-call lookup — deferred to joint design session
+      // ElevenLabs tool call — bearer token auth required (ELEVENLABS_TOOL_SECRET)
+      const toolSecret = process.env.ELEVENLABS_TOOL_SECRET;
+      if (!toolSecret || !checkBearerToken(req.headers['authorization'] as string | undefined, toolSecret)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+        return;
+      }
+      // Full lookup logic deferred to V1 implementation
       res.writeHead(501, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'not_implemented_v0', note: 'mid-call lookups deferred to joint design session' }));
+      res.end(JSON.stringify({ result: 'Lookup is not yet available. Please hold while I connect you with our team.' }));
+      return;
+    }
+
+    if (url === '/webhook/elevenlabs/post-call') {
+      // ElevenLabs post-call webhook — HMAC-SHA256 via elevenlabs-signature header
+      const webhookSecret = process.env.ELEVENLABS_WEBHOOK_SECRET;
+      if (!webhookSecret) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'ELEVENLABS_WEBHOOK_SECRET not configured' }));
+        return;
+      }
+      const sigHeader = req.headers['elevenlabs-signature'] as string | undefined;
+      if (!sigHeader) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'missing_signature_header' }));
+        return;
+      }
+      const valid = await verifyElevenLabsSig(sigHeader, rawBody, webhookSecret);
+      if (!valid) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'invalid_signature' }));
+        return;
+      }
+      const { payload, sourceEventId } = parseJsonEvent(rawBody);
+      try {
+        await captureEvent('elevenlabs_post_call', sourceEventId, payload);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[voice-gateway] voice_events insert error [elevenlabs_post_call]: ${msg}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'db_error' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
       return;
     }
 
