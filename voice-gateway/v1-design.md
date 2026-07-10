@@ -258,7 +258,26 @@ Before any ElevenLabs tool call or webhook can verify, both secrets must be gene
 | `ELEVENLABS_TOOL_SECRET` | `openssl rand -hex 32` | Agent > Tools > [tool] > Auth > Bearer token | Railway env vars |
 | `ELEVENLABS_WEBHOOK_SECRET` | `openssl rand -hex 32` | Workspace > Webhooks > Signing secret | Railway env vars |
 
-Additionally: Telnyx → ElevenLabs phone connection must be made before first live call (see connection steps — to be added once research lands).
+Additionally: Telnyx → ElevenLabs phone connection must be made before first live call. Steps below.
+
+**Connecting +14154261341 to Alex (one-time setup, both portals):**
+
+*Step 1 — Telnyx Portal (portal.telnyx.com):*
+- Voice → SIP Trunking → Create SIP Connection (type: FQDN). Check first if Albie already created one.
+- Add FQDN: `sip.rtc.elevenlabs.io`
+- Inbound tab: Destination Number Format = `+E.164`, Transport = TCP
+- Set outbound credentials (username + password) — needed for future approval-gate outbound dials
+- Numbers tab: assign `+14154261341` to this connection
+
+*Step 2 — ElevenLabs Dashboard:*
+- Conversational AI → Phone Numbers → Import a phone number from SIP trunk
+- Enter `+14154261341`, Transport TCP
+- After import: select number → Assign Agent → Alex
+- Outbound: Address `sip.telnyx.com`, Digest auth with the Telnyx credentials from Step 1
+
+SIP INVITE path ElevenLabs answers on: `sip:+14154261341@sip.rtc.elevenlabs.io:5060`
+
+**Design flag — resolve before switching:** Moving `+14154261341` from TeXML to SIP routing bypasses the existing Telnyx TeXML webhooks. Call-status events currently flow `Telnyx TeXML → gateway → voice_events`. After the switch, call-status comes from ElevenLabs post-call webhooks only. Decision needed: keep a parallel Telnyx TeXML number for call-status capture, or rely on ElevenLabs post-call webhooks only?
 
 ---
 
