@@ -252,6 +252,60 @@ async function lookupWorkOrder(query: string): Promise<object> {
   return { query, results: rows, count: rows.length };
 }
 
+// ─── Self-heal helpers ───────────────────────────────────────────────────────
+
+function sendAlert(message: string): void {
+  const chatId = process.env.CTX_TELEGRAM_CHAT_ID;
+  if (chatId) {
+    try {
+      execSync(`cortextos bus send-telegram ${chatId} ${JSON.stringify(message)}`, { timeout: 10_000, stdio: 'pipe' });
+    } catch { /* best-effort */ }
+  }
+  // Secondary: Slack ops channel (requires SLACK_BOT_TOKEN in env)
+  try {
+    execSync(`cortextos bus send-slack "#fleet-dispatch" ${JSON.stringify(message)}`, { timeout: 10_000, stdio: 'pipe' });
+  } catch { /* no token or channel unreachable */ }
+}
+
+function logSelfHealEvent(type: string, detail: string): void {
+  try {
+    const meta = JSON.stringify({ event: type, detail, agent: process.env.CTX_AGENT_NAME ?? 'claudia' });
+    execSync(`cortextos bus log-event action appfolio_${type} warn --meta '${meta.replace(/'/g, "'\\''")}'`, { timeout: 10_000, stdio: 'pipe' });
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Check session; attempt one trust-device relogin if expired.
+ * Challenge detection is the live signal for trust-device state — no hardcoded date.
+ * Only logs/alerts on action; ok/no-op path is silent.
+ */
+async function selfHeal(): Promise<{ status: string; action: string; reason?: string }> {
+  const sessionCheck = await checkSession();
+
+  if (sessionCheck.authenticated) {
+    return { status: 'ok', action: 'none' };
+  }
+
+  // Session expired — attempt one login (existing one-attempt guardrail preserved)
+  const loginResult = await login();
+
+  if (loginResult.success) {
+    logSelfHealEvent('session_self_healed', 'Auto-relogin succeeded via trust-device (no 2FA required)');
+    return { status: 'self-healed', action: 'relogin', reason: loginResult.reason };
+  }
+
+  // Login failed — challenge or other failure
+  const isChallenge = /MFA|CAPTCHA|challenge/i.test(loginResult.reason);
+  const alertMsg = isChallenge
+    ? 'AppFolio auto-relogin blocked: 2FA challenge encountered. Trust-device may have expired. Manual attended login + Rob 2FA relay needed.'
+    : `AppFolio auto-relogin failed: ${loginResult.reason}. Manual attended login needed.`;
+
+  sendAlert(alertMsg);
+  logSelfHealEvent(isChallenge ? 'session_relogin_blocked' : 'session_relogin_failed', alertMsg);
+
+  return { status: isChallenge ? 'blocked-challenge' : 'failed', action: 'alerted', reason: loginResult.reason };
+}
+
 // ─── CLI dispatch ────────────────────────────────────────────────────────────
 
 const [,, command, ...cmdArgs] = process.argv;
@@ -268,6 +322,12 @@ async function main() {
       const result = await login();
       console.log(JSON.stringify(result));
       process.exit(result.success ? 0 : 2);
+      break;
+    }
+    case 'self-heal': {
+      const result = await selfHeal();
+      console.log(JSON.stringify(result));
+      process.exit(result.status === 'ok' || result.status === 'self-healed' ? 0 : 2);
       break;
     }
     case 'lookup-tenant': {
@@ -294,6 +354,7 @@ async function main() {
         'Commands:',
         '  check-session                 — check if AppFolio session is active',
         '  login                         — attempt login (one attempt; stops on MFA)',
+        '  self-heal                     — check session; auto-relogin if expired (trust-device); alert Rob on challenge',
         '  lookup-tenant <name>          — search tenants by name',
         '  lookup-unit <address>         — search units by address or ID',
         '  lookup-work-order <id|term>   — search work orders',
