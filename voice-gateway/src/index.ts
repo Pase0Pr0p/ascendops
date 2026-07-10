@@ -17,37 +17,14 @@
  * writes, mid-call lookups, per-call approval ledger, WO writes.
  */
 
-import { fileURLToPath } from 'url';
-import { resolve, dirname } from 'path';
-import { readFileSync } from 'fs';
 import http from 'http';
 import pg from 'pg';
+// Env vars: Railway injects in prod. Dev: source orgs/paseo-pm/secrets.env before running.
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-
-function loadEnv(filePath: string): void {
-  try {
-    const lines = readFileSync(filePath, 'utf8').split('\n');
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eq = trimmed.indexOf('=');
-      if (eq < 1) continue;
-      const key = trimmed.slice(0, eq).trim();
-      let val = trimmed.slice(eq + 1).trim();
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1);
-      }
-      if (key && !(key in process.env)) process.env[key] = val;
-    }
-  } catch { /* missing file is fine — prod injects via Railway env vars */ }
-}
-
-// Dev: load from local secrets files. Prod: env vars provided by Railway.
-loadEnv(resolve(__dir, '../../orgs/paseo-pm/secrets.env'));
-loadEnv(resolve(__dir, '../../orgs/paseo-pm/agents/claudia/.env'));
-
-const pool = new pg.Pool({ connectionString: process.env.VOICE_GATEWAY_DSN });
+const pool = new pg.Pool({
+  connectionString: process.env.VOICE_GATEWAY_DSN,
+  ssl: { rejectUnauthorized: false },
+});
 
 async function verifyTelnyxSig(
   sig: string,
