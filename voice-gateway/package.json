@@ -1,0 +1,21 @@
+{
+  "name": "voice-gateway",
+  "version": "0.0.1",
+  "description": "Telnyx webhook capture gateway v0 — appends raw events to voice_events",
+  "private": true,
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs --out-dir dist --no-splitting",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.10",
+    "tsup": "^8.5.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.3"
+  }
+}
