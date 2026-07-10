@@ -127,15 +127,19 @@ Rob's 4-tier policy (non-negotiable, must be enforced in AI system prompt + gate
 | Tier | Scope | Identity Required | Notes |
 |------|-------|-------------------|-------|
 | 1 | Safe how-to: portal navigation, password reset steps, maintenance reporting instructions, office hours | None | AI handles freely |
-| 2 | Account-specific: balance, payment history, lease dates, deposit amount | **Must verify identity first** | AI asks for verification (unit address + last 4 of DOB, or similar); never reveal Tier 2 data to unverified caller |
+| 2 | Account-specific: balance, payment history, lease dates, deposit amount | **Must verify identity first** | Verified callers hear the balance WITH hedge language (see below). Unverified callers get routed to Anna, never a read-out. |
 | 3 | Human-required: disputes, payment arrangements, credit promises, negotiations | Human handoff | AI takes a message + routes immediately to the right agent |
 | 4 | Prohibited: take a payment, promise a credit, legal/lease interpretation, anything binding | Never | AI declines and routes to human |
 
 **Identity verification flow (Tier 2) — caller-ID-first (see Audit section for field coverage):**
 - **Step 1 — automatic:** Gateway checks if the inbound number matches a phone on file (`caller_sessions` lookup). If yes → verified, no spoken challenge needed.
 - **Step 2 — spoken fallback (unmatched / unknown callers):** AI asks for unit address + DOB. If DOB not on file for this tenant → fall back to move-in month + year. Gateway `/voice/tools/lookup_record` accepts `{ query: "verify_identity", unit: "...", dob: "...", move_in: "..." }` and returns `{ verified: true/false }`.
-- **If verified:** AI does NOT read the balance. Response: "I can see there is a balance on your account — let me connect you with our accounting team." (Routes to Anna.) This avoids the reliability gap: our recorded balance can lag reality (uncollected payments, checks in transit), so a read-out number can be misleading even if technically accurate.
-- **If verification fails:** AI offers to take a message and have someone call back.
+- **If verified — balance read with mandatory hedge:** The gateway result-string builder reads the balance AND includes a false-positive safeguard. Required phrasing (or equivalent): *"Our records show a balance of $X. If you've mailed a payment recently, it may not be reflected yet — please allow a few business days for processing."* Rationale: AppFolio can show a balance as unpaid while a check is in transit. A tenant who paid is told they're delinquent without this hedge — that is a direct harm.
+- **If verification fails:** AI offers to take a message and have someone call back. No balance read, no account data.
+
+**Balance-read safeguard — open decision for Albie session:** Two options for reducing false positives beyond hedge language:
+1. **Hedge-only (default):** Read balance from AppFolio as-is, always append the "may not be reflected" language. Simpler; relies on tenant knowing to push back if they paid.
+2. **Aged-balance gate:** Only read balance if the oldest unpaid charge is ≥ N days old (e.g. 14 days), so in-transit payments have time to clear. More accurate; requires a date field on the charge record. Flag for Albie to confirm whether Supabase schema can support this.
 
 **System prompt additions needed:**
 - The 4-tier policy in full
