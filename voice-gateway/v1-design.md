@@ -9,9 +9,9 @@
 
 ## DECISION ZERO: Platform Choice — RESOLVED (2026-07-10)
 
-**Brain is ElevenLabs Agents Platform (Gemini 2.5 Flash). Telnyx handles call routing only.**
+**LOCKED (2026-07-10): Brain is ElevenLabs Agents Platform (Gemini 2.5 Flash). Telnyx handles call routing only.**
 
-Rob confirmed: the agent "Alex" is being built in ElevenLabs Agents Platform. Telnyx is the telephony layer (PSTN/SIP); ElevenLabs is the brain. The Telnyx-to-ElevenLabs connection has not yet been made — that is the next configuration step (see Deploy Prerequisites).
+Rob and Albie confirmed Model B. Rob built Alex in ElevenLabs Agents Platform. Telnyx is the telephony layer (PSTN/SIP); ElevenLabs is the brain. Gateway commit `1054e68` implements the Model B capture path (HMAC post-call webhook + bearer-token tool auth). Deploy batch: fix branch → Railway, secrets set, ElevenLabs webhook URL configured.
 
 **Wiring resolved:**
 
