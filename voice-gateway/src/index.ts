@@ -18,13 +18,19 @@
  */
 
 import http from 'http';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import pg from 'pg';
 // Env vars: Railway injects in prod. Dev: source orgs/paseo-pm/secrets.env before running.
 
+// Supabase pooler CA cert (staged at voice-gateway/certs/supabase-ca.pem).
+// __dirname in CJS compiled output = <deploy_root>/dist/ → ../certs/ = <deploy_root>/certs/
+const _caCert = readFileSync(resolve(__dirname, '../certs/supabase-ca.pem')).toString();
+
 // pg v8: sslmode=require in DSN overrides the ssl option, causing cert rejection on Supabase pooler.
-// Strip sslmode from the DSN and pass ssl:{rejectUnauthorized:false} explicitly.
+// Strip sslmode from the DSN and pass ssl config explicitly.
 const _dsn = (process.env.VOICE_GATEWAY_DSN ?? '').replace(/[?&]sslmode=[^&]*/g, '');
-const pool = new pg.Pool({ connectionString: _dsn, ssl: { rejectUnauthorized: false } });
+const pool = new pg.Pool({ connectionString: _dsn, ssl: { ca: _caCert, rejectUnauthorized: true } });
 
 async function verifyTelnyxSig(
   sig: string,
@@ -69,31 +75,40 @@ function readBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
-function extractCallControlId(body: unknown): string | null {
-  if (body && typeof body === 'object') {
-    const b = body as Record<string, unknown>;
-    const data = b['data'] as Record<string, unknown> | undefined;
-    const payload = data?.['payload'] as Record<string, unknown> | undefined;
-    const id = payload?.['call_control_id'];
-    if (typeof id === 'string') return id;
-  }
-  return null;
+// call_status webhooks arrive as form-urlencoded TeXML bodies (NOT JSON).
+// Use both CallSid + CallStatus to form a unique source_event_id per event
+// (a single call produces multiple call_status events with the same CallSid).
+function parseCallStatus(rawBody: Buffer): { payload: unknown; sourceEventId: string | null } {
+  const params = new URLSearchParams(rawBody.toString('utf8'));
+  const payload = Object.fromEntries(params.entries());
+  const callSid = params.get('CallSid');
+  const callStatus = params.get('CallStatus');
+  const sourceEventId = callSid && callStatus ? `${callSid}:${callStatus}` : callSid;
+  return { payload, sourceEventId };
 }
 
-function extractSmsId(body: unknown): string | null {
-  if (body && typeof body === 'object') {
-    const b = body as Record<string, unknown>;
-    const data = b['data'] as Record<string, unknown> | undefined;
-    const payload = data?.['payload'] as Record<string, unknown> | undefined;
-    const id = payload?.['id'];
-    if (typeof id === 'string') return id;
+// SMS, conversation_insights, and transcript webhooks arrive as proper JSON.
+// source_event_id = data.id from the Telnyx event envelope.
+function parseJsonEvent(rawBody: Buffer): { payload: unknown; sourceEventId: string | null } {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    payload = rawBody.toString('utf8');
   }
-  return null;
+  let sourceEventId: string | null = null;
+  if (payload && typeof payload === 'object') {
+    const b = payload as Record<string, unknown>;
+    const data = b['data'] as Record<string, unknown> | undefined;
+    const id = data?.['id'];
+    if (typeof id === 'string') sourceEventId = id;
+  }
+  return { payload, sourceEventId };
 }
 
-type ExtractFn = (body: unknown) => string | null;
+type BodyParser = (rawBody: Buffer) => { payload: unknown; sourceEventId: string | null };
 
-function makeTelnyxHandler(eventType: string, extractId: ExtractFn) {
+function makeTelnyxHandler(eventType: string, parseBody: BodyParser) {
   return async (req: http.IncomingMessage, rawBody: Buffer, res: http.ServerResponse) => {
     const pubKey = process.env.TELNYX_PUBLIC_KEY;
     if (!pubKey) {
@@ -117,15 +132,10 @@ function makeTelnyxHandler(eventType: string, extractId: ExtractFn) {
       return;
     }
 
-    let payload: unknown;
-    try {
-      payload = JSON.parse(rawBody.toString('utf8'));
-    } catch {
-      payload = rawBody.toString('utf8');
-    }
+    const { payload, sourceEventId } = parseBody(rawBody);
 
     try {
-      await captureEvent(eventType, extractId(payload), payload);
+      await captureEvent(eventType, sourceEventId, payload);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[voice-gateway] voice_events insert error [${eventType}]: ${msg}`);
@@ -140,10 +150,10 @@ function makeTelnyxHandler(eventType: string, extractId: ExtractFn) {
 }
 
 const HANDLERS = new Map<string, ReturnType<typeof makeTelnyxHandler>>([
-  ['/voice/call-status', makeTelnyxHandler('call_status', extractCallControlId)],
-  ['/voice/conversation-insights', makeTelnyxHandler('conversation_insights', extractCallControlId)],
-  ['/webhook/telnyx/transcript', makeTelnyxHandler('transcript', extractCallControlId)],
-  ['/webhook/telnyx/sms', makeTelnyxHandler('sms', extractSmsId)],
+  ['/voice/call-status', makeTelnyxHandler('call_status', parseCallStatus)],
+  ['/voice/conversation-insights', makeTelnyxHandler('conversation_insights', parseJsonEvent)],
+  ['/webhook/telnyx/transcript', makeTelnyxHandler('transcript', parseJsonEvent)],
+  ['/webhook/telnyx/sms', makeTelnyxHandler('sms', parseJsonEvent)],
 ]);
 
 const PORT = parseInt(process.env.PORT ?? '8788', 10);
