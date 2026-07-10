@@ -3,27 +3,24 @@
 **Status:** Draft for joint session with Albie / laptop-Claude  
 **Author:** claudia  
 **Inputs:** Rob session 2026-07-10 (via chief), v0 live capture data  
-**Last revised:** 2026-07-10 (post-chief review — platform question, identity data, Tier 2 balance, scope guard)
+**Last revised:** 2026-07-10 (Decision Zero resolved — ElevenLabs brain confirmed; ElevenLabs auth delta baked in; AppFolio identity audit complete)
 
 ---
 
-## DECISION ZERO: Platform Choice (First Albie Agenda Item)
+## DECISION ZERO: Platform Choice — RESOLVED (2026-07-10)
 
-**This is unresolved and reshapes Components 1 and 3.**
+**Brain is ElevenLabs Agents Platform (Gemini 2.5 Flash). Telnyx handles call routing only.**
 
-Two configs currently exist:
-- **v0 / Telnyx AI Assistant**: Kimi-K2.5 + Telnyx Ultra voice, wired to the gateway via TeXML. Tool calls hit `/voice/tools/lookup_record` on this gateway. KB is external.
-- **Rob's ElevenLabs config**: ElevenLabs Agents Platform + Gemini 2.5 Flash. ElevenLabs has its own native Tools, Knowledge Base, and webhooks — the wiring for `lookup_record`, KB ingestion, and post-call routing all differ from the Telnyx model.
+Rob confirmed: the agent "Alex" is being built in ElevenLabs Agents Platform. Telnyx is the telephony layer (PSTN/SIP); ElevenLabs is the brain. The Telnyx-to-ElevenLabs connection has not yet been made — that is the next configuration step (see Deploy Prerequisites).
 
-**Impact:** The LOGIC in this doc (tiers, routing map, approval ledger, escalation) is platform-agnostic and carries either way. But the *wiring* changes:
+**Wiring resolved:**
 
-| Component | Telnyx model | ElevenLabs model |
-|-----------|-------------|-----------------|
-| Mid-call lookup | AI calls `/voice/tools/lookup_record` on this gateway | AI calls an ElevenLabs Tool endpoint (may be same URL or different) |
-| Knowledge base | Shared cortextos KB (external HTTP) | ElevenLabs native KB — Albie loads articles there |
-| Post-call webhook | `conversation_insights` → gateway → bus | ElevenLabs post-call webhook → gateway → bus |
-
-**Decision needed from Albie:** Which platform hosts the agent going forward? One or both? This is the session opener.
+| Component | Architecture |
+|-----------|-------------|
+| Mid-call lookup | ElevenLabs agent calls `/voice/tools/lookup_record` on this gateway — bearer-token auth (no Ed25519) |
+| Post-call summary | ElevenLabs post-call webhook → gateway → bus — HMAC-SHA256 `elevenlabs-signature` (no Ed25519) |
+| Call-status events | Telnyx TeXML → gateway `/voice/call-status` — Ed25519 unchanged (Telnyx owns call routing) |
+| Knowledge base | ElevenLabs native KB — Albie loads articles in ElevenLabs workspace |
 
 ---
 
@@ -96,31 +93,30 @@ V1 adds four capabilities on top of v0 capture:
 3. Writes a `caller_lookup` row to `voice_events` with `{ phone, resolved_type, name, unit, property }` before the AI picks up
 4. The AI assistant can then call `/voice/tools/lookup_record` mid-call to get the pre-resolved identity
 
-**`/voice/tools/lookup_record` request shape (from Telnyx AI tool call):**
+**Auth:** ElevenLabs does NOT sign tool-call requests. Auth is a bearer token configured in ElevenLabs workspace secrets and injected as `Authorization: Bearer <token>`. Gateway validates via `crypto.timingSafeEqual` (constant-time) before processing. Add `ELEVENLABS_TOOL_SECRET` env var.
+
+**`/voice/tools/lookup_record` request shape (ElevenLabs sends only the fields in your `request_body_schema`):**
 ```json
 {
-  "call_control_id": "...",
   "caller_number": "+14155551234",
   "query": "caller_info"
 }
 ```
 
-**Response shape:**
+**Response shape — gateway controls the exact string the agent reads verbatim:**
 ```json
-{
-  "found": true,
-  "type": "tenant",
-  "name": "Echo Rock",
-  "unit": "45 Camino Alto - 204",
-  "property": "45 Camino Alto",
-  "verified": false,
-  "tier_2_fields_redacted": true
-}
+{ "result": "I found your account. How can I help you today?" }
 ```
 
-**Unknown callers:** return `{ found: false, type: "unknown" }`. AI greets generically and collects name + unit.
+**CRITICAL — Tier 2 redaction in the result-string builder:** The gateway, not the prompt, enforces what the agent says. The `result` string must never contain account-specific data for an unverified caller. If Tier 2 intent is detected and caller is unverified:
+```json
+{ "result": "I can see there is a balance on your account — let me connect you with our accounting team." }
+```
+This keeps the tier policy enforced at the server layer regardless of what the system prompt says.
 
-**Open decision for Albie:** Do we pre-lookup on `ringing` (fast, but adds latency to every call via AppFolio browser) or lazy-lookup on first tool call from the AI (slower mid-call but only on demand)? Recommendation: pre-lookup async, cache in `voice_events`, serve from cache on tool call.
+**Unknown callers:** `{ "result": "I wasn't able to find an account for this number — could you tell me your name and unit?" }`
+
+**Open decision for Albie:** Do we pre-lookup on `ringing` (fast, but adds latency to every call via AppFolio browser) or lazy-lookup on first tool call from the AI (slower mid-call but only on demand)? Recommendation: pre-lookup async, cache in `caller_sessions`, serve from cache on tool call.
 
 ---
 
@@ -152,7 +148,9 @@ Rob's 4-tier policy (non-negotiable, must be enforced in AI system prompt + gate
 
 ## Component 3: Post-Call Routing
 
-**Trigger:** `conversation_insights` webhook fires after call ends. Contains: transcript summary, detected intents, call outcome.
+**Trigger:** ElevenLabs post-call webhook fires after call ends (replaces Telnyx `conversation_insights` for the brain layer). Contains: transcript summary, detected intents, call outcome.
+
+**Auth:** `elevenlabs-signature: t=<unix_seconds>,v0=<hmac-sha256-hex>` header. Signed message: `"${timestamp}.${rawBody}"`. HMAC-SHA256, hex digest. 30-minute tolerance. Verify on raw body before parse (fail-closed). Add `ELEVENLABS_WEBHOOK_SECRET` env var (set in ElevenLabs workspace webhooks settings).
 
 **Classification → agent routing:**
 
@@ -251,17 +249,29 @@ CREATE TABLE outbound_approvals (
 
 ---
 
+## Deploy Prerequisites (ElevenLabs path)
+
+Before any ElevenLabs tool call or webhook can verify, both secrets must be generated and set in two places each:
+
+| Secret | Generate | Set in ElevenLabs | Set in Railway |
+|--------|----------|-------------------|----------------|
+| `ELEVENLABS_TOOL_SECRET` | `openssl rand -hex 32` | Agent > Tools > [tool] > Auth > Bearer token | Railway env vars |
+| `ELEVENLABS_WEBHOOK_SECRET` | `openssl rand -hex 32` | Workspace > Webhooks > Signing secret | Railway env vars |
+
+Additionally: Telnyx → ElevenLabs phone connection must be made before first live call (see connection steps — to be added once research lands).
+
+---
+
 ## Open Decisions for Albie Session
 
-**Decision Zero (opens the session):**
-- **Platform:** ElevenLabs + Gemini 2.5 Flash vs. Telnyx AI Assistant vs. both? Determines wiring for Components 1 and 3.
+**Decision Zero:** **RESOLVED** — ElevenLabs Agents Platform (Gemini 2.5 Flash) is the brain. Telnyx is telephony only. See wiring table above.
 
-**Decisions 1–6 (once platform is settled):**
+**Decisions 1–6:**
 1. **Caller lookup latency:** pre-lookup on `ringing` vs. lazy on first tool call?
 2. **Post-call routing dispatch:** synchronous in webhook handler vs. async worker?
 3. **Identity verification method:** **RESOLVED** — see Audit section. Caller-ID match is primary (~78% coverage, automatic); DOB spoken fallback for unmatched callers (~65–70% coverage); move-in month/year as final fallback (100%, weaker). No SSN, no email challenge.
 4. **Outbound approval UX:** Telegram inline buttons (recommended) or a web portal?
-5. **Knowledge base ownership:** who loads / maintains the shared KB? Max for maintenance articles; Albie for AppFolio help?
+5. **Knowledge base ownership:** who loads / maintains the ElevenLabs native KB? Albie for AppFolio help articles; Max for maintenance playbook?
 6. **Scope of V1 routing:** route to all 5 agents on day 1, or start with Max (maintenance) + chief escalation only?
 
 ---
