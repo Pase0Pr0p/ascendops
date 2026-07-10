@@ -58,14 +58,21 @@ export class SlackAPI {
     return await response.json() as T;
   }
 
-  async postMessage(channel: string, text: string): Promise<void> {
+  async postMessage(
+    channel: string,
+    text: string,
+    opts?: { thread_ts?: string; reply_broadcast?: boolean },
+  ): Promise<void> {
+    const payload: Record<string, unknown> = { channel, text };
+    if (opts?.thread_ts) payload.thread_ts = opts.thread_ts;
+    if (opts?.reply_broadcast) payload.reply_broadcast = true;
     const data = await this.requestJson<{ ok: boolean; error?: string }>('chat.postMessage', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${this.token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ channel, text }),
+      body: JSON.stringify(payload),
     });
     if (!data.ok) {
       throw new Error(`Slack postMessage failed: ${data.error ?? 'unknown'}`);

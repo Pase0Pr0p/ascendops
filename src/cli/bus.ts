@@ -1331,7 +1331,9 @@ busCommand
   .description('Send a message to a Slack channel')
   .argument('<channel>', 'Slack channel ID (e.g. C1234567890) or name (e.g. #general)')
   .argument('<message>', 'Message text')
-  .action(async (channel: string, message: string) => {
+  .option('--thread-ts <ts>', 'Reply to a thread (pass the parent message ts to chat.postMessage thread_ts)')
+  .option('--reply-broadcast', 'Also send the threaded reply to the channel (Slack reply_broadcast)', false)
+  .action(async (channel: string, message: string, opts: { threadTs?: string; replyBroadcast?: boolean }) => {
     const env = resolveEnv();
     let slackToken = '';
 
@@ -1356,7 +1358,10 @@ busCommand
     const { SlackAPI } = await import('../slack/api.js');
     const api = new SlackAPI(slackToken);
     try {
-      await api.postMessage(channel, message);
+      await api.postMessage(channel, message, {
+        thread_ts: opts.threadTs,
+        reply_broadcast: opts.replyBroadcast,
+      });
       console.log(`Slack message sent to ${channel}`);
     } catch (err) {
       console.error(`Failed to send Slack message: ${err}`);
