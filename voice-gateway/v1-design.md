@@ -27,6 +27,45 @@ Two configs currently exist:
 
 ---
 
+## AppFolio Identity-Field Audit (Completed 2026-07-10)
+
+**Why this matters:** Tier 2 identity verification can only use data we actually hold per tenant. Individual AppFolio tenant records were sampled to establish field coverage before finalizing the verification challenge design.
+
+### Field Coverage
+
+| Field | Coverage | Notes |
+|-------|----------|-------|
+| Caller-ID match (inbound number = phone on file) | ~78% | Primary verification signal — automatic, no spoken challenge |
+| Phone on file | 78% | July 2 inventory, n=302 current tenants. Below 90% sole-challenge threshold |
+| Email | 79% | July 2 inventory, n=302. Below 90% threshold |
+| Date of Birth (DOB) | ~65–70% estimated | Present on 2/3 sampled residential tenants; absent on commercial entities; not universal for residential |
+| Move-in date | ~100% | All active tenants. WEAK SECRET — not suitable as sole challenge |
+| Unit address | ~100% | All active tenants. WEAK SECRET — publicly searchable |
+| Emergency contact | Present (header only) | Content empty on all sampled records; not usable |
+| SSN | Not stored | AppFolio does not hold SSN for property management tenants |
+
+### Verification Design: Caller-ID-First
+
+**Finding:** No single field clears the 90%+ threshold for a sole spoken challenge. Caller-ID match is the strongest signal we have and requires no friction from the caller.
+
+**Recommended approach:**
+
+1. **Primary — Caller-ID match:** If the inbound number matches a phone on file → caller is treated as verified automatically, no spoken challenge. Covers ~78% of tenant calls.
+
+2. **Fallback spoken challenge (remaining ~22% + unmatched):** Unit address (to anchor identity) + DOB. DOB is used because it is the most secret field we hold, even at ~65–70% coverage. If DOB is not on file for this tenant, fall back to move-in month + year (100% coverage, weaker secret, but still a barrier).
+
+3. **Unknown callers (no phone on file match):** AI collects name + unit, asks DOB or move-in month/year. Lower-confidence path — still routes to accounting ("you have a balance, routing to accounting team") rather than reading account data.
+
+**Security note (chief confirmed):** Caller-ID can be spoofed. This is proportionate for V1 because Tier 2 now routes rather than reads — the maximum harm from a spoofed caller-ID is they learn "you have a balance," not the balance amount.
+
+### Closes
+
+- Decision 3 (identity verification method) → **RESOLVED**
+- Eliminates SSN, email-challenge, and emergency-contact from the design
+- DOB gap (~30–35%) handled by move-in date fallback; not a blocking issue for launch
+
+---
+
 ## What V0 Does (Baseline)
 
 - Telnyx AI assistant (Kimi-K2.5 + Ultra voice) answers +14154261341
@@ -96,13 +135,11 @@ Rob's 4-tier policy (non-negotiable, must be enforced in AI system prompt + gate
 | 3 | Human-required: disputes, payment arrangements, credit promises, negotiations | Human handoff | AI takes a message + routes immediately to the right agent |
 | 4 | Prohibited: take a payment, promise a credit, legal/lease interpretation, anything binding | Never | AI declines and routes to human |
 
-**Identity verification flow (Tier 2):**
-- AI asks a challenge built from data we actually hold in AppFolio — likely unit address + move-in month/year (confirmed present) or last 4 of a phone number on file. DOB is NOT assumed to be in AppFolio; a pre-session AppFolio audit is needed to confirm available challenge fields before finalizing this.
-- Gateway `/voice/tools/lookup_record` accepts `{ query: "verify_identity", unit: "...", challenge_answer: "..." }` and returns `{ verified: true/false }`
-- If verified: AI does NOT read a balance number. Instead: "I can see there is a balance on your account — let me connect you with our accounting team." (Routes to Anna.) This avoids the data-reliability risk: our recorded balance can lag real state (uncollected payments, checks in transit), so a read-out number can be misleading even if factually accurate at that moment.
-- If failed: AI offers to take a message instead
-
-**Open pre-work:** Audit AppFolio fields available for challenge — confirm what data is consistently on file for tenants before finalizing verification method.
+**Identity verification flow (Tier 2) — caller-ID-first (see Audit section for field coverage):**
+- **Step 1 — automatic:** Gateway checks if the inbound number matches a phone on file (`caller_sessions` lookup). If yes → verified, no spoken challenge needed.
+- **Step 2 — spoken fallback (unmatched / unknown callers):** AI asks for unit address + DOB. If DOB not on file for this tenant → fall back to move-in month + year. Gateway `/voice/tools/lookup_record` accepts `{ query: "verify_identity", unit: "...", dob: "...", move_in: "..." }` and returns `{ verified: true/false }`.
+- **If verified:** AI does NOT read the balance. Response: "I can see there is a balance on your account — let me connect you with our accounting team." (Routes to Anna.) This avoids the reliability gap: our recorded balance can lag reality (uncollected payments, checks in transit), so a read-out number can be misleading even if technically accurate.
+- **If verification fails:** AI offers to take a message and have someone call back.
 
 **System prompt additions needed:**
 - The 4-tier policy in full
@@ -222,7 +259,7 @@ CREATE TABLE outbound_approvals (
 **Decisions 1–6 (once platform is settled):**
 1. **Caller lookup latency:** pre-lookup on `ringing` vs. lazy on first tool call?
 2. **Post-call routing dispatch:** synchronous in webhook handler vs. async worker?
-3. **Identity verification method:** pending AppFolio audit of available per-tenant fields (phone on file, email, secondary identifiers); challenge must be built from data we actually hold.
+3. **Identity verification method:** **RESOLVED** — see Audit section. Caller-ID match is primary (~78% coverage, automatic); DOB spoken fallback for unmatched callers (~65–70% coverage); move-in month/year as final fallback (100%, weaker). No SSN, no email challenge.
 4. **Outbound approval UX:** Telegram inline buttons (recommended) or a web portal?
 5. **Knowledge base ownership:** who loads / maintains the shared KB? Max for maintenance articles; Albie for AppFolio help?
 6. **Scope of V1 routing:** route to all 5 agents on day 1, or start with Max (maintenance) + chief escalation only?
