@@ -264,16 +264,27 @@ async function handleLookupRecord(
     }
   }
 
-  // Unknown caller — gateway lookup is phone-only; verbal name/unit NEVER unlocks fleet routing.
-  // All unknown paths route to a human, never to the fleet.
+  // Unknown caller (partial DB is by design — prospects, new renters, no-phone tenants all resolve unknown).
+  // ONLY hard gate: account financial data (balance/payment/lease/deposit) requires verified identity.
+  // Everything else: serve by intent. Post-call routing handles Max/Lexi/Anna dispatch from conversation content.
   if (!resolved?.['matched']) {
+    if (query === 'balance') {
+      // Hard gate: financial data needs verified identity regardless of who is calling
+      await pool.query(
+        `INSERT INTO voice_events (event_type, source_event_id, payload) VALUES ('unverified_financial_inquiry', null, $1)`,
+        [JSON.stringify({ caller_number: callerNumber, ts: new Date().toISOString() })],
+      ).catch(() => {});
+      return sendResult("I need to verify your identity to access account information. Let me connect you with our accounting team who can assist you directly.");
+    }
     if (query === 'request_handoff') {
       await pool.query(
         `INSERT INTO voice_events (event_type, source_event_id, payload) VALUES ('handoff_request', null, $1)`,
-        [JSON.stringify({ caller_number: callerNumber, display_name: 'unknown', reason: reason ?? 'unknown caller', callback: callbackNumber, ts: new Date().toISOString() })],
+        [JSON.stringify({ caller_number: callerNumber, display_name: 'unknown', reason, callback: callbackNumber, ts: new Date().toISOString() })],
       ).catch(() => {});
+      return sendResult("I'm connecting you with our team. Could I get your name and best callback number so someone can reach you?");
     }
-    return sendResult("I wasn't able to find an account for this number. Let me connect you with our team — could I get your name and best callback number so someone can reach you?");
+    // caller_info, verify_identity, Tier-1 how-to, leasing inquiry, maintenance report: serve them
+    return sendResult("I wasn't able to find your account in our system, but I can still help. What can I do for you today?");
   }
 
   // Scope guard: BLV/TIB = Amanda scope, not fleet (routing_scope defaults to 'fleet' until DB tweak lands)
