@@ -264,9 +264,16 @@ async function handleLookupRecord(
     }
   }
 
-  // Unknown caller
+  // Unknown caller — gateway lookup is phone-only; verbal name/unit NEVER unlocks fleet routing.
+  // All unknown paths route to a human, never to the fleet.
   if (!resolved?.['matched']) {
-    return sendResult("I wasn't able to find an account for this number. Could you tell me your name and unit number?");
+    if (query === 'request_handoff') {
+      await pool.query(
+        `INSERT INTO voice_events (event_type, source_event_id, payload) VALUES ('handoff_request', null, $1)`,
+        [JSON.stringify({ caller_number: callerNumber, display_name: 'unknown', reason: reason ?? 'unknown caller', callback: callbackNumber, ts: new Date().toISOString() })],
+      ).catch(() => {});
+    }
+    return sendResult("I wasn't able to find an account for this number. Let me connect you with our team — could I get your name and best callback number so someone can reach you?");
   }
 
   // Scope guard: BLV/TIB = Amanda scope, not fleet (routing_scope defaults to 'fleet' until DB tweak lands)
