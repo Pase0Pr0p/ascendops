@@ -514,6 +514,26 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url === '/voice/initiation') {
+      // ElevenLabs conversation_initiation_client_data_webhook
+      // Called at SIP connect BEFORE the agent speaks. Phase 1: log + return empty vars (graceful no-op).
+      // Phase 2: resolve caller, return dynamic_variables + first_message override.
+      const toolSecret = process.env.ELEVENLABS_TOOL_SECRET;
+      if (toolSecret && !checkBearerToken(req.headers['authorization'] as string | undefined, toolSecret)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+        return;
+      }
+      let body: unknown = {};
+      try { body = JSON.parse(rawBody.toString('utf8')); } catch { /* non-JSON — proceed */ }
+      console.log('[voice-gateway] initiation webhook request:', JSON.stringify(body));
+
+      // Phase 1: empty response — proves graceful failure mode, logs field names for Phase 2
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ dynamic_variables: {} }));
+      return;
+    }
+
     if (url === '/webhook/elevenlabs/post-call') {
       // ElevenLabs post-call webhook — HMAC-SHA256 via elevenlabs-signature header
       const webhookSecret = process.env.ELEVENLABS_WEBHOOK_SECRET;
