@@ -217,7 +217,7 @@ async function handleLookupRecord(
   catch { return sendResult("I had trouble understanding that request. How can I help you?"); }
 
   const callerNumber = (body['caller_number'] as string | undefined) ?? '';
-  const query = (body['query'] as string | undefined) ?? 'caller_info';
+  const query = (body['query'] as string | undefined) || 'caller_info';
   const spokenDob = body['dob'] as string | undefined;
   const spokenMoveIn = body['move_in'] as string | undefined;
   const reason = (body['reason'] as string | undefined) ?? 'unspecified';
