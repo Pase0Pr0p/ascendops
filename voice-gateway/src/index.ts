@@ -24,14 +24,24 @@ import { timingSafeEqual } from 'crypto';
 import pg from 'pg';
 // Env vars: Railway injects in prod. Dev: source orgs/paseo-pm/secrets.env before running.
 
-// Supabase pooler CA cert (staged at voice-gateway/certs/supabase-ca.pem).
-// __dirname in CJS compiled output = <deploy_root>/dist/ → ../certs/ = <deploy_root>/certs/
-const _caCert = readFileSync(resolve(__dirname, '../certs/supabase-ca.pem')).toString();
+// Supabase pooler CA cert — env var (Railway) takes priority over file (local dev).
+// Falls back to rejectUnauthorized:false if neither is available, to avoid a cold-boot crash.
+function loadCaCert(): string | undefined {
+  if (process.env.SUPABASE_CA_CERT) return process.env.SUPABASE_CA_CERT;
+  try { return readFileSync(resolve(__dirname, '../certs/supabase-ca.pem')).toString(); } catch { /* not found */ }
+  try { return readFileSync(resolve(process.cwd(), 'certs/supabase-ca.pem')).toString(); } catch { /* not found */ }
+  return undefined;
+}
+const _caCert = loadCaCert();
+if (!_caCert) console.warn('[voice-gateway] WARN: Supabase CA cert not found — using rejectUnauthorized:false');
 
 // pg v8: sslmode=require in DSN overrides the ssl option, causing cert rejection on Supabase pooler.
 // Strip sslmode from the DSN and pass ssl config explicitly.
 const _dsn = (process.env.VOICE_GATEWAY_DSN ?? '').replace(/[?&]sslmode=[^&]*/g, '');
-const pool = new pg.Pool({ connectionString: _dsn, ssl: { ca: _caCert, rejectUnauthorized: true } });
+const pool = new pg.Pool({
+  connectionString: _dsn,
+  ssl: _caCert ? { ca: _caCert, rejectUnauthorized: true } : { rejectUnauthorized: false },
+});
 
 async function verifyTelnyxSig(
   sig: string,
