@@ -518,15 +518,18 @@ const server = http.createServer(async (req, res) => {
       // ElevenLabs conversation_initiation_client_data_webhook
       // Called at SIP connect BEFORE the agent speaks. Phase 1: log + return empty vars (graceful no-op).
       // Phase 2: resolve caller, return dynamic_variables + first_message override.
+      let body: unknown = {};
+      try { body = JSON.parse(rawBody.toString('utf8')); } catch { /* non-JSON — proceed */ }
+      // Log BEFORE auth so we capture the call even if auth format differs
+      const authHdr = req.headers['authorization'] as string | undefined;
+      console.log('[voice-gateway] initiation request | auth:', authHdr ? authHdr.substring(0, 20) + '...' : 'NONE', '| body:', JSON.stringify(body));
       const toolSecret = process.env.ELEVENLABS_TOOL_SECRET;
-      if (toolSecret && !checkBearerToken(req.headers['authorization'] as string | undefined, toolSecret)) {
+      if (toolSecret && !checkBearerToken(authHdr, toolSecret)) {
+        console.log('[voice-gateway] initiation auth FAILED | expected Bearer, got:', authHdr?.substring(0, 30));
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
         return;
       }
-      let body: unknown = {};
-      try { body = JSON.parse(rawBody.toString('utf8')); } catch { /* non-JSON — proceed */ }
-      console.log('[voice-gateway] initiation webhook request:', JSON.stringify(body));
 
       // Phase 1: empty response — proves graceful failure mode, logs field names for Phase 2
       res.writeHead(200, { 'Content-Type': 'application/json' });
