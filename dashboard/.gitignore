@@ -43,3 +43,6 @@ next-env.d.ts
 
 # SQLite database
 .data/
+
+# AppFolio self-heal runtime state (failure counter, backoff timestamps)
+.appfolio-selfheal-state.json
