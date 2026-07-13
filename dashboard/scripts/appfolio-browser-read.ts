@@ -19,6 +19,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { resolve } from 'node:path';
 
@@ -29,6 +30,30 @@ const SESSION_NAME = 'appfolio-ops';
 const APPFOLIO_URL = process.env.APPFOLIO_WEB_URL ?? '';
 const APPFOLIO_USER = process.env.APPFOLIO_WEB_USERNAME ?? '';
 const APPFOLIO_PASS = process.env.APPFOLIO_WEB_PASSWORD ?? '';
+
+const MAX_CONSECUTIVE_FAILURES = 3; // pause after this many consecutive login failures
+const BASE_BACKOFF_HOURS = 4;       // backoff doubles each failure: 4h, 8h, 16h
+
+const FAILURE_STATE_PATH = resolve(process.cwd(), '.appfolio-selfheal-state.json');
+
+interface FailureState {
+  consecutiveFailures: number;
+  lastFailureAt: string | null;
+  backoffUntil: string | null;
+  paused: boolean;
+}
+
+function readFailureState(): FailureState {
+  try {
+    return JSON.parse(readFileSync(FAILURE_STATE_PATH, 'utf-8')) as FailureState;
+  } catch {
+    return { consecutiveFailures: 0, lastFailureAt: null, backoffUntil: null, paused: false };
+  }
+}
+
+function writeFailureState(state: FailureState): void {
+  try { writeFileSync(FAILURE_STATE_PATH, JSON.stringify(state, null, 2)); } catch { /* best-effort */ }
+}
 
 if (!APPFOLIO_URL || !APPFOLIO_USER || !APPFOLIO_PASS) {
   console.error(JSON.stringify({ error: 'Missing APPFOLIO_WEB_URL / APPFOLIO_WEB_USERNAME / APPFOLIO_WEB_PASSWORD in secrets.env' }));
@@ -152,7 +177,9 @@ async function login(): Promise<{ success: boolean; reason: string }> {
     return { success: false, reason: 'Login failed — still on auth page after submit (wrong credentials or lockout)' };
   }
 
-  // Success — keep session open for subsequent commands; close for now
+  // Wait for Keycloak to finish writing persistent SSO cookies before saving.
+  // Saving immediately captures only session-only cookies (race confirmed 2026-07-12).
+  await new Promise(r => setTimeout(r, 5000));
   ab('close', '--save');
   return { success: true, reason: 'login successful' };
 }
@@ -276,34 +303,80 @@ function logSelfHealEvent(type: string, detail: string): void {
 
 /**
  * Check session; attempt one trust-device relogin if expired.
+ * Tracks consecutive failures in a state file; applies exponential backoff and
+ * pauses after MAX_CONSECUTIVE_FAILURES to prevent lockout.
  * Challenge detection is the live signal for trust-device state — no hardcoded date.
  * Only logs/alerts on action; ok/no-op path is silent.
  */
 async function selfHeal(): Promise<{ status: string; action: string; reason?: string }> {
+  const state = readFailureState();
   const sessionCheck = await checkSession();
 
   if (sessionCheck.authenticated) {
+    if (state.consecutiveFailures > 0 || state.paused) {
+      writeFailureState({ consecutiveFailures: 0, lastFailureAt: null, backoffUntil: null, paused: false });
+    }
     return { status: 'ok', action: 'none' };
   }
 
-  // Session expired — attempt one login (existing one-attempt guardrail preserved)
+  // Paused: too many consecutive failures — skip login, send throttled alert
+  if (state.paused) {
+    const lastFailureMs = state.lastFailureAt ? new Date(state.lastFailureAt).getTime() : 0;
+    if (Date.now() - lastFailureMs > BASE_BACKOFF_HOURS * 60 * 60 * 1000) {
+      const msg = `AppFolio session down — auto-relogin paused after ${state.consecutiveFailures} consecutive failures. Manual attended login needed.`;
+      sendAlert(msg);
+      logSelfHealEvent('session_relogin_paused', msg);
+      writeFailureState({ ...state, lastFailureAt: new Date().toISOString() });
+    }
+    return { status: 'paused', action: 'none', reason: `${state.consecutiveFailures} consecutive failures` };
+  }
+
+  // In backoff window: skip login attempt this cycle
+  if (state.backoffUntil && Date.now() < new Date(state.backoffUntil).getTime()) {
+    return { status: 'backoff', action: 'none', reason: `backing off until ${state.backoffUntil}` };
+  }
+
+  // Attempt one login
   const loginResult = await login();
 
   if (loginResult.success) {
+    writeFailureState({ consecutiveFailures: 0, lastFailureAt: null, backoffUntil: null, paused: false });
     logSelfHealEvent('session_self_healed', 'Auto-relogin succeeded via trust-device (no 2FA required)');
     return { status: 'self-healed', action: 'relogin', reason: loginResult.reason };
   }
 
-  // Login failed — challenge or other failure
+  // Login failed — increment counter and compute next backoff
+  const newCount = state.consecutiveFailures + 1;
   const isChallenge = /MFA|CAPTCHA|challenge/i.test(loginResult.reason);
-  const alertMsg = isChallenge
-    ? 'AppFolio auto-relogin blocked: 2FA challenge encountered. Trust-device may have expired. Manual attended login + Rob 2FA relay needed.'
-    : `AppFolio auto-relogin failed: ${loginResult.reason}. Manual attended login needed.`;
+  const nowPaused = newCount >= MAX_CONSECUTIVE_FAILURES;
+  const backoffMs = BASE_BACKOFF_HOURS * 60 * 60 * 1000 * Math.pow(2, newCount - 1);
+  const backoffUntil = nowPaused ? null : new Date(Date.now() + backoffMs).toISOString();
+
+  writeFailureState({
+    consecutiveFailures: newCount,
+    lastFailureAt: new Date().toISOString(),
+    backoffUntil,
+    paused: nowPaused,
+  });
+
+  const backoffHours = Math.round(backoffMs / 3_600_000);
+  const alertMsg = nowPaused
+    ? `AppFolio auto-relogin PAUSED after ${newCount} consecutive failures. Last: ${loginResult.reason}. Manual attended login required (Albie relay).`
+    : isChallenge
+    ? `AppFolio relogin blocked: 2FA challenge (failure ${newCount}/${MAX_CONSECUTIVE_FAILURES}). Next retry in ${backoffHours}h.`
+    : `AppFolio relogin failed (${newCount}/${MAX_CONSECUTIVE_FAILURES}): ${loginResult.reason}. Next retry in ${backoffHours}h.`;
 
   sendAlert(alertMsg);
-  logSelfHealEvent(isChallenge ? 'session_relogin_blocked' : 'session_relogin_failed', alertMsg);
+  logSelfHealEvent(
+    nowPaused ? 'session_relogin_paused' : isChallenge ? 'session_relogin_blocked' : 'session_relogin_failed',
+    alertMsg,
+  );
 
-  return { status: isChallenge ? 'blocked-challenge' : 'failed', action: 'alerted', reason: loginResult.reason };
+  return {
+    status: nowPaused ? 'paused' : isChallenge ? 'blocked-challenge' : 'failed',
+    action: 'alerted',
+    reason: loginResult.reason,
+  };
 }
 
 // ─── CLI dispatch ────────────────────────────────────────────────────────────
@@ -330,6 +403,11 @@ async function main() {
       process.exit(result.status === 'ok' || result.status === 'self-healed' ? 0 : 2);
       break;
     }
+    case 'reset-failures': {
+      writeFailureState({ consecutiveFailures: 0, lastFailureAt: null, backoffUntil: null, paused: false });
+      console.log(JSON.stringify({ reset: true }));
+      break;
+    }
     case 'lookup-tenant': {
       if (!cmdArgs[0]) { console.error('Usage: lookup-tenant <search-term>'); process.exit(1); }
       const result = await lookupTenant(cmdArgs.join(' '));
@@ -354,7 +432,8 @@ async function main() {
         'Commands:',
         '  check-session                 — check if AppFolio session is active',
         '  login                         — attempt login (one attempt; stops on MFA)',
-        '  self-heal                     — check session; auto-relogin if expired (trust-device); alert Rob on challenge',
+        '  self-heal                     — check session; auto-relogin if expired; exponential backoff after failures',
+        '  reset-failures                — clear failure state after manual relogin',
         '  lookup-tenant <name>          — search tenants by name',
         '  lookup-unit <address>         — search units by address or ID',
         '  lookup-work-order <id|term>   — search work orders',
