@@ -488,12 +488,19 @@ async function handleReportEmergency(
     notes, timestamp_utc: timestampUtc, call_id: callId,
   };
 
-  await pool.query(
-    `INSERT INTO voice_events (event_type, source_event_id, payload) VALUES ('emergency_alert', $1, $2)`,
-    [callId, JSON.stringify(emergencyPayload)],
-  ).catch((e: unknown) => {
+  try {
+    await pool.query(
+      `INSERT INTO voice_events (event_type, source_event_id, payload) VALUES ('emergency_alert', $1, $2)`,
+      [callId, JSON.stringify(emergencyPayload)],
+    );
+  } catch (e: unknown) {
     console.error(`[voice-gateway] emergency_alert insert error: ${String(e)}`);
-  });
+    // Do not return 200 — a false "you're notified" on DB failure silently drops the dispatch.
+    // Return 500 so Alex can tell the caller to call 911 directly and retry.
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'db_error' }));
+    return;
+  }
 
   console.log(`[voice-gateway] emergency_alert logged | tier=${tier} scenario=${scenario} property="${property}" unit="${unit ?? 'unknown'}" tenant="${tenantName}" call_id=${callId ?? 'none'}`);
 

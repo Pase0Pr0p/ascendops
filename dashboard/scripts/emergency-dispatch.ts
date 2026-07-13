@@ -13,7 +13,7 @@
  * Usage: npx tsx scripts/emergency-dispatch.ts
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { resolve } from 'node:path';
@@ -57,10 +57,7 @@ function writeState(state: DispatchState): void {
 
 function sendTelegram(chatId: string, message: string): void {
   try {
-    execSync(
-      `cortextos bus send-telegram ${chatId} ${JSON.stringify(message)}`,
-      { timeout: 10_000, stdio: 'pipe' },
-    );
+    execFileSync('cortextos', ['bus', 'send-telegram', chatId, message], { timeout: 10_000, stdio: 'pipe' });
   } catch { /* best-effort */ }
 }
 
@@ -139,10 +136,7 @@ async function main() {
     });
 
     try {
-      execSync(
-        `cortextos bus send-message maintenance-coordinator high ${JSON.stringify(busMsg)}`,
-        { timeout: 15_000, stdio: 'pipe' },
-      );
+      execFileSync('cortextos', ['bus', 'send-message', 'maintenance-coordinator', 'high', busMsg], { timeout: 15_000, stdio: 'pipe' });
       state.dispatched_ids.push(row.id);
       dispatched++;
       console.log(JSON.stringify({ dispatched: true, id: row.id, scenario, tier, tenant: tenantName, age_minutes: ageMin }));
@@ -155,10 +149,7 @@ async function main() {
 
   // Heartbeat: logged every run so scout can detect if this poller goes dark
   try {
-    execSync(
-      `cortextos bus log-event heartbeat emergency_poller_heartbeat info --meta '{"agent":"claudia"}'`,
-      { timeout: 10_000, stdio: 'pipe' },
-    );
+    execFileSync('cortextos', ['bus', 'log-event', 'heartbeat', 'emergency_poller_heartbeat', 'info', '--meta', '{"agent":"claudia"}'], { timeout: 10_000, stdio: 'pipe' });
   } catch { /* best-effort */ }
 
   console.log(JSON.stringify({ status: 'ok', new_emergencies: newRows.length, dispatched }));
