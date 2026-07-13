@@ -43,3 +43,7 @@ next-env.d.ts
 
 # SQLite database
 .data/
+
+# Runtime state files (not tracked)
+.appfolio-selfheal-state.json
+.emergency-dispatch-state.json

@@ -431,6 +431,80 @@ async function handleLookupRecord(
   return sendResult("How can I help you today?");
 }
 
+const VALID_SCENARIOS = new Set([
+  'gas_leak','fire','co_alarm','medical','electrical_hazard',
+  'water_leak','no_heat','no_hot_water','sewage_backup',
+  'power_out','lockout','break_in',
+]);
+
+// /voice/tools/report_emergency — Alex reports a tenant emergency
+// Validates payload, logs to voice_events for async dispatch by claudia cron.
+// Returns immediately (non-blocking for the call).
+async function handleReportEmergency(
+  req: http.IncomingMessage,
+  rawBody: Buffer,
+  res: http.ServerResponse,
+): Promise<void> {
+  const toolSecret = process.env.ELEVENLABS_TOOL_SECRET;
+  if (!toolSecret || !checkBearerToken(req.headers['authorization'] as string | undefined, toolSecret)) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+    return;
+  }
+
+  let body: Record<string, unknown> = {};
+  try { body = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>; }
+  catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
+    return;
+  }
+
+  const scenario = body['scenario'] as string | undefined;
+  const tier = body['tier'] as number | undefined;
+  const property = (body['property'] as string | undefined) ?? '';
+  const unit = (body['unit'] as string | null | undefined) ?? null;
+  const tenantName = (body['tenant_name'] as string | undefined) ?? '';
+  const callbackNumber = (body['callback_number'] as string | undefined) ?? '';
+  const locationDetail = (body['location_detail'] as string | undefined) ?? '';
+  const notes = (body['notes'] as string | undefined) ?? '';
+  const callId = (body['call_id'] as string | undefined) ?? null;
+  const timestampUtc = (body['timestamp_utc'] as string | undefined) ?? new Date().toISOString();
+
+  if (!scenario || !VALID_SCENARIOS.has(scenario)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'invalid_scenario', valid: [...VALID_SCENARIOS] }));
+    return;
+  }
+  if (tier !== 1 && tier !== 2) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'invalid_tier', expected: '1 or 2' }));
+    return;
+  }
+
+  const emergencyPayload = {
+    scenario, tier, property, unit, tenant_name: tenantName,
+    callback_number: callbackNumber, location_detail: locationDetail,
+    notes, timestamp_utc: timestampUtc, call_id: callId,
+  };
+
+  await pool.query(
+    `INSERT INTO voice_events (event_type, source_event_id, payload) VALUES ('emergency_alert', $1, $2)`,
+    [callId, JSON.stringify(emergencyPayload)],
+  ).catch((e: unknown) => {
+    console.error(`[voice-gateway] emergency_alert insert error: ${String(e)}`);
+  });
+
+  console.log(`[voice-gateway] emergency_alert logged | tier=${tier} scenario=${scenario} property="${property}" unit="${unit ?? 'unknown'}" tenant="${tenantName}" call_id=${callId ?? 'none'}`);
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    result: tier === 1
+      ? 'Emergency services have been alerted and property management has been notified immediately. Please call 911 if you have not already.'
+      : 'Your urgent maintenance issue has been logged and the property management team has been notified. Someone will contact you as soon as possible.',
+  }));
+}
+
 type BodyParser = (rawBody: Buffer) => { payload: unknown; sourceEventId: string | null };
 
 function makeTelnyxHandler(eventType: string, parseBody: BodyParser) {
@@ -569,6 +643,11 @@ const server = http.createServer(async (req, res) => {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    if (url === '/voice/tools/report_emergency') {
+      await handleReportEmergency(req, rawBody, res);
       return;
     }
 
