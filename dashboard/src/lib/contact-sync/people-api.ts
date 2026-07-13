@@ -10,6 +10,10 @@
  * between batches keeps us safely under.
  */
 
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type {
   DerivedContact,
   GoogleContactBody,
@@ -20,6 +24,54 @@ import type {
 import { shouldArchive } from './types';
 
 const PEOPLE_API = 'https://people.googleapis.com/v1';
+
+// ---------------------------------------------------------------------------
+// Hash cache — skip unchanged contacts to eliminate 429 pressure
+// ---------------------------------------------------------------------------
+
+const HASH_CACHE_PATH = join(process.cwd(), '.data', 'contact-sync-hash-cache.json');
+
+function loadHashCache(): Map<string, string> {
+  try {
+    if (!existsSync(HASH_CACHE_PATH)) return new Map();
+    const raw = JSON.parse(readFileSync(HASH_CACHE_PATH, 'utf-8')) as Record<string, string>;
+    return new Map(Object.entries(raw));
+  } catch {
+    return new Map();
+  }
+}
+
+function saveHashCache(cache: Map<string, string>): void {
+  try {
+    mkdirSync(join(process.cwd(), '.data'), { recursive: true });
+    const obj: Record<string, string> = {};
+    for (const [k, v] of cache) obj[k] = v;
+    writeFileSync(HASH_CACHE_PATH, JSON.stringify(obj), 'utf-8');
+  } catch (err) {
+    console.warn('[people-api] hash-cache save failed:', err);
+  }
+}
+
+// Hash covers every field that buildBody() reads, plus effectiveTag.
+// Sort arrays for determinism — order in allPhones/allEmails is not meaningful.
+function computeContactHash(contact: DerivedContact, effectiveTag: string): string {
+  const payload = JSON.stringify({
+    firstName: contact.firstName,
+    lastName: contact.lastName,
+    displayName: contact.displayName,
+    phoneE164: contact.phoneE164,
+    allPhones: [...contact.allPhones].sort(),
+    primaryEmail: contact.primaryEmail,
+    allEmails: [...contact.allEmails].sort(),
+    unitName: contact.unitName,
+    propertyName: contact.propertyName,
+    propertyAddress: contact.propertyAddress,
+    appfolioId: contact.appfolioId,
+    appfolioIdType: contact.appfolioIdType,
+    effectiveTag,
+  });
+  return createHash('sha256').update(payload).digest('hex');
+}
 const EXTERNAL_ID_TYPE = 'appfolio';
 
 // Composite key: "tenant:123", "vendor:123", "owner:123"
@@ -148,6 +200,7 @@ async function upsertContact(
   groupMap: ContactGroupMap,
   index: Map<string, GoogleContactResource>,
   claimedBareIds: Set<string>,   // tracks which bare numeric IDs have been claimed this run
+  hashCache: Map<string, string>,
   nowIso: string,
 ): Promise<UpsertResult> {
   const base: Omit<UpsertResult, 'action'> = {
@@ -168,6 +221,7 @@ async function upsertContact(
     return { ...base, action: 'skipped', error: `no group for tag: ${effectiveTag}` };
   }
 
+  const contentHash = computeContactHash(contact, effectiveTag);
   const body = buildBody({ ...contact, tag: effectiveTag as typeof contact.tag }, groupResourceName);
 
   try {
@@ -186,6 +240,11 @@ async function upsertContact(
     }
 
     if (existing) {
+      // Skip PATCH if no fields changed since last successful sync.
+      if (hashCache.get(compositeKey) === contentHash) {
+        return { ...base, action: 'skipped', resourceName: existing.resourceName };
+      }
+
       const updateMask = 'names,phoneNumbers,emailAddresses,externalIds,biographies,memberships';
       let currentEtag = existing.etag;
 
@@ -213,6 +272,7 @@ async function upsertContact(
       if (!attempt.ok) {
         return { ...base, action: 'updated', resourceName: existing.resourceName, error: `update failed: ${attempt.body}` };
       }
+      hashCache.set(compositeKey, contentHash);
       return { ...base, action: 'updated', resourceName: existing.resourceName };
     } else {
       const attempt = await withRetry(async () => {
@@ -227,6 +287,7 @@ async function upsertContact(
         return { ...base, action: 'created', error: `create failed: ${attempt.body}` };
       }
       const created = attempt.body as { resourceName: string };
+      hashCache.set(compositeKey, contentHash);
       return { ...base, action: 'created', resourceName: created.resourceName };
     }
   } catch (err) {
@@ -272,6 +333,10 @@ export async function syncContactsToGoogle(
   const index = await buildExternalIdIndex(accessToken);
   console.log(`[people-api] index built: ${index.size} existing AF-marked contacts`);
 
+  // Load hash cache — contacts with an unchanged hash skip the PATCH entirely.
+  const hashCache = loadHashCache();
+  console.log(`[people-api] hash-cache loaded: ${hashCache.size} entries`);
+
   // Tracks which bare numeric IDs have been claimed by a contact this run.
   // First contact to claim a bare key gets the migrate-in-place path;
   // subsequent contacts with the same number but different type go to CREATE.
@@ -282,7 +347,7 @@ export async function syncContactsToGoogle(
   for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
     const batch = contacts.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(
-      batch.map((c) => upsertContact(accessToken, c, groupMap, index, claimedBareIds, nowIso)),
+      batch.map((c) => upsertContact(accessToken, c, groupMap, index, claimedBareIds, hashCache, nowIso)),
     );
     for (const r of results) {
       report.results.push(r);
@@ -297,6 +362,8 @@ export async function syncContactsToGoogle(
     }
     if (i + BATCH_SIZE < contacts.length) await sleep(BATCH_DELAY_MS);
   }
+
+  saveHashCache(hashCache);
 
   return report;
 }
