@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for utility bill email-intake.
+  Runs every 30 minutes, reads utility-bills@paseoproperties.com,
+  inserts new bills and sends Telegram approval to Albie.
+
+  Install:
+    cp dashboard/scripts/utility-intake.plist ~/Library/LaunchAgents/com.paseo.utility-intake.plist
+    launchctl load ~/Library/LaunchAgents/com.paseo.utility-intake.plist
+
+  Logs: /tmp/paseo-utility-intake.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.paseo.utility-intake</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/paseomini1/ascendops/dashboard/scripts/utility-intake-run.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/paseo-utility-intake.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/paseo-utility-intake.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
