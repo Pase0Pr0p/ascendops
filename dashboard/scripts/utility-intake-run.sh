@@ -24,5 +24,10 @@ if [[ -f "$AGENT_ENV" ]]; then
   set +a
 fi
 
+# Absolutize SA key path so resolve(cwd, path) works after cd into dashboard/
+if [[ -n "${GOOGLE_CONTACTS_SA_KEY_PATH:-}" && ! "${GOOGLE_CONTACTS_SA_KEY_PATH}" = /* ]]; then
+  export GOOGLE_CONTACTS_SA_KEY_PATH="$REPO/$GOOGLE_CONTACTS_SA_KEY_PATH"
+fi
+
 cd "$DASHBOARD"
 exec npx tsx scripts/utility-intake-run.ts
