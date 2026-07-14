@@ -1,0 +1,4 @@
+{
+  "_comment": "David-reviewed known owner-statement reconciliation deltas only. Shape: { owner_id | \"*\", field, amount | max_abs, explanation, added, approved_by }. Entries are visible in the UI and never hide the underlying delta.",
+  "deltas": []
+}
