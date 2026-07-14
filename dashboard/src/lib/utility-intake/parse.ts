@@ -188,3 +188,8 @@ export function computeBillHash(providerSlug: string, accountNumber: string, per
 export function computePdfHash(pdfBuffer: Buffer): string {
   return createHash('sha256').update(pdfBuffer).digest('hex');
 }
+
+// Fallback document hash when no PDF attachment — SHA256 of email body text
+export function computeBodyHash(bodyText: string): string {
+  return createHash('sha256').update(bodyText, 'utf8').digest('hex');
+}

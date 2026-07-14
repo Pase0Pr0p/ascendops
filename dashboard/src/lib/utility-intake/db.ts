@@ -102,8 +102,10 @@ export async function checkDedup(pdfHash: string | null, billHash: string | null
 export interface BillInsertData {
   provider_id: string | null;
   account_number: string | null;
-  pdf_hash: string | null;
+  pdf_hash: string;             // required (NOT NULL) — PDF hash or SHA256 of email body when no PDF
   bill_hash: string | null;
+  statement_date: string | null; // required (NOT NULL) — mapped from period_end ?? period_start
+  original_filename: string;    // required (NOT NULL) — PDF filename or "email-<msgId>" fallback
   period_start: string | null;
   period_end: string | null;
   amount_due: number | null;     // dollar decimal (e.g. 150.25) — matches existing numeric column
@@ -117,8 +119,10 @@ export async function insertBill(data: BillInsertData): Promise<string> {
   const body = {
     ...(data.provider_id ? { provider_id: data.provider_id } : {}),
     ...(data.account_number ? { account_number: data.account_number } : {}),
-    ...(data.pdf_hash ? { pdf_hash: data.pdf_hash } : {}),
+    pdf_hash: data.pdf_hash,
     ...(data.bill_hash ? { bill_hash: data.bill_hash } : {}),
+    ...(data.statement_date ? { statement_date: data.statement_date } : {}),
+    original_filename: data.original_filename,
     ...(data.period_start ? { period_start: data.period_start } : {}),
     ...(data.period_end ? { period_end: data.period_end } : {}),
     ...(data.amount_due != null ? { amount_due: data.amount_due } : {}),

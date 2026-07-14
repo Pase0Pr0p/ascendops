@@ -25,6 +25,7 @@ import {
   parseBillEmail,
   computeBillHash,
   computePdfHash,
+  computeBodyHash,
 } from '../src/lib/utility-intake/parse';
 import {
   lookupProvider,
@@ -50,20 +51,23 @@ async function processMessage(token: string, msgId: string): Promise<void> {
   const provider = await lookupProvider(parsed.providerHint);
   log(`  Provider DB: ${provider?.slug ?? 'not found'}`);
 
-  // Handle PDF attachment
-  let pdfHash: string | null = null;
-  let pdfFilename: string | null = null;
+  // Handle PDF attachment — pdf_hash is NOT NULL; fall back to email body hash when no PDF
   const pdfAttachment = msg.attachments.find(
     (a) => a.mimeType === 'application/pdf' || a.filename.endsWith('.pdf'),
   );
+  let pdfHash: string;
+  let originalFilename: string;
   if (pdfAttachment) {
     log(`  PDF: ${pdfAttachment.filename} (${pdfAttachment.size} bytes)`);
     const pdfBuf = await getAttachmentData(token, msgId, pdfAttachment.attachmentId);
     pdfHash = computePdfHash(pdfBuf);
-    pdfFilename = pdfAttachment.filename;
-    log(`  pdf_hash: ${pdfHash.slice(0, 16)}...`);
+    originalFilename = pdfAttachment.filename;
+    log(`  pdf_hash: ${pdfHash.slice(0, 16)}... (PDF)`);
   } else {
-    log(`  No PDF attachment found`);
+    // No PDF — hash the email body text as the document fingerprint
+    pdfHash = computeBodyHash(msg.bodyText);
+    originalFilename = `email-${msgId}`;
+    log(`  pdf_hash: ${pdfHash.slice(0, 16)}... (body fallback — no PDF attachment)`);
   }
 
   // Compute bill_hash if we have the three required fields
@@ -81,6 +85,9 @@ async function processMessage(token: string, msgId: string): Promise<void> {
     return;
   }
 
+  // statement_date is NOT NULL — map period_end ?? period_start (billing period end ≈ statement date)
+  const statementDate = parsed.periodEnd ?? parsed.periodStart;
+
   // Insert bill — flag PENDING_APPROVAL if parse complete, else PARSE_INCOMPLETE
   const flagType = parsed.parseComplete ? 'PENDING_APPROVAL' : 'PARSE_INCOMPLETE';
   const billId = await insertBill({
@@ -88,6 +95,8 @@ async function processMessage(token: string, msgId: string): Promise<void> {
     account_number: parsed.accountNumber,
     pdf_hash: pdfHash,
     bill_hash: billHash,
+    statement_date: statementDate,
+    original_filename: originalFilename,
     period_start: parsed.periodStart,
     period_end: parsed.periodEnd,
     amount_due: parsed.amountDue,
@@ -107,7 +116,7 @@ async function processMessage(token: string, msgId: string): Promise<void> {
     parseComplete: parsed.parseComplete,
   });
   log(`  Telegram approval sent (msg_id: ${telegramMsgId}) for bill ${billId}`);
-  void pdfFilename; // available to claudia at callback time by re-fetching via source_email_id
+  void originalFilename; // available to claudia at callback time by re-fetching via source_email_id
 
   // Mark email read
   await markRead(token, msgId);
