@@ -20,9 +20,10 @@ interface TopbarProps {
   currentOrg: string;
   onOrgChange: (org: string) => void;
   onMenuClick?: () => void;
+  publicMode?: boolean;
 }
 
-export function Topbar({ orgs, currentOrg, onOrgChange, onMenuClick }: TopbarProps) {
+export function Topbar({ orgs, currentOrg, onOrgChange, onMenuClick, publicMode = false }: TopbarProps) {
   const { theme, setTheme } = useTheme();
   const { data: session } = useSession();
 
@@ -49,12 +50,16 @@ export function Topbar({ orgs, currentOrg, onOrgChange, onMenuClick }: TopbarPro
             <IconMenu2 size={18} />
           </Button>
         )}
-        <OrgSelector orgs={orgs} currentOrg={currentOrg} onOrgChange={onOrgChange} />
+        {publicMode ? (
+          <span className="text-sm font-medium text-muted-foreground">Public Library</span>
+        ) : (
+          <OrgSelector orgs={orgs} currentOrg={currentOrg} onOrgChange={onOrgChange} />
+        )}
       </div>
 
       {/* Right: Quota + Dark mode toggle + User menu */}
       <div className="flex items-center gap-1">
-        <QuotaIndicator />
+        {!publicMode && <QuotaIndicator />}
         <Button
           variant="ghost"
           size="icon"
@@ -66,23 +71,25 @@ export function Topbar({ orgs, currentOrg, onOrgChange, onMenuClick }: TopbarPro
           <IconMoon size={16} className="absolute rotate-90 scale-0 transition-transform dark:rotate-0 dark:scale-100" />
         </Button>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer">
-            <Avatar size="sm">
-              <AvatarFallback className="text-[10px]">{initials}</AvatarFallback>
-            </Avatar>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" sideOffset={8}>
-            <div className="px-2 py-1.5 text-sm">
-              <p className="font-medium">{username}</p>
-            </div>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => signOut({ redirectTo: '/login' })}>
-              <IconLogout size={14} />
-              <span>Logout</span>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {!publicMode && (
+          <DropdownMenu>
+            <DropdownMenuTrigger className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer">
+              <Avatar size="sm">
+                <AvatarFallback className="text-[10px]">{initials}</AvatarFallback>
+              </Avatar>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" sideOffset={8}>
+              <div className="px-2 py-1.5 text-sm">
+                <p className="font-medium">{username}</p>
+              </div>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => signOut({ redirectTo: '/login' })}>
+                <IconLogout size={14} />
+                <span>Logout</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
     </header>
   );

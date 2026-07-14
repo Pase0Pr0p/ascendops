@@ -5,7 +5,7 @@
  * getExecutionLogPage behavior across various filter+pagination combos.
  *
  * Also tests the API route helpers (readExecutionLogPage + entriesToCsv)
- * imported from the dashboard route — no HTTP server needed.
+ * imported from the shared dashboard helper module — no HTTP server needed.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -161,7 +161,7 @@ describe('100-entry log — getExecutionLogPage', () => {
 describe('entriesToCsv — format validation', () => {
   it('produces correct header row', async () => {
     const { entriesToCsv } = await import(
-      '../../dashboard/src/app/api/workflows/crons/[agent]/executions/route.js'
+      '../../dashboard/src/lib/data/cron-executions.js'
     );
     const csv = entriesToCsv([]);
     const firstLine = csv.split('\n')[0];
@@ -170,7 +170,7 @@ describe('entriesToCsv — format validation', () => {
 
   it('produces one data row per entry', async () => {
     const { entriesToCsv } = await import(
-      '../../dashboard/src/app/api/workflows/crons/[agent]/executions/route.js'
+      '../../dashboard/src/lib/data/cron-executions.js'
     );
     const entries: CronExecutionLogEntry[] = [
       { ts: '2026-04-30T00:00:00.000Z', cron: 'heartbeat', status: 'fired', attempt: 1, duration_ms: 42, error: null },
@@ -186,7 +186,7 @@ describe('entriesToCsv — format validation', () => {
 
   it('escapes commas and quotes in error messages', async () => {
     const { entriesToCsv } = await import(
-      '../../dashboard/src/app/api/workflows/crons/[agent]/executions/route.js'
+      '../../dashboard/src/lib/data/cron-executions.js'
     );
     const entries: CronExecutionLogEntry[] = [
       { ts: '2026-04-30T00:00:00.000Z', cron: 'heartbeat', status: 'failed', attempt: 1, duration_ms: 10, error: 'err: "quota", exceeded' },
@@ -199,7 +199,7 @@ describe('entriesToCsv — format validation', () => {
 
   it('null error field produces empty string in CSV', async () => {
     const { entriesToCsv } = await import(
-      '../../dashboard/src/app/api/workflows/crons/[agent]/executions/route.js'
+      '../../dashboard/src/lib/data/cron-executions.js'
     );
     const entries: CronExecutionLogEntry[] = [
       { ts: '2026-04-30T00:00:00.000Z', cron: 'heartbeat', status: 'fired', attempt: 1, duration_ms: 10, error: null },
