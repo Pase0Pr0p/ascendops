@@ -1,0 +1,54 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every value, rent, and range is INVENTED — this is NOT a real RentCast pull and contains no real property valuations (master plan §6.6 / §8.2). property_ids reuse entities.json (101/102 -> owner o_1, 103 -> owner o_2, 104 unowned). 102 (Buckley Ave) is deliberately UNVALUED (feed returned no data for the address) to exercise the unvalued bucket at owner grain. 103 (Cedar Ct) carries a stale as_of (2026-01-01, > 45 days before the 2026-07-05 anchor) to exercise the amber stale badge. Real asset-metrics.json lives in .pulse-data and is gitignored.",
+  "lane": "asset_metrics",
+  "provider": "rentcast",
+  "generated_at": "2026-07-05T07:05:00-04:00",
+  "today": "2026-07-05",
+  "records": [
+    {
+      "property_id": 101,
+      "property_name": "Moss Dr",
+      "value": 285000,
+      "value_range": [270000, 300000],
+      "rent_estimate": 1500,
+      "rent_range": [1400, 1650],
+      "provider": "rentcast",
+      "as_of": "2026-07-05",
+      "granularity": "property"
+    },
+    {
+      "property_id": 103,
+      "property_name": "Cedar Ct",
+      "value": 190000,
+      "value_range": [180000, 205000],
+      "rent_estimate": 1200,
+      "rent_range": [1100, 1300],
+      "provider": "rentcast",
+      "as_of": "2026-01-01",
+      "granularity": "unit"
+    },
+    {
+      "property_id": 104,
+      "property_name": "Willow Park",
+      "value": 205000,
+      "value_range": [195000, 218000],
+      "rent_estimate": 1050,
+      "rent_range": [980, 1120],
+      "provider": "rentcast",
+      "as_of": "2026-07-05",
+      "granularity": "unit"
+    }
+  ],
+  "unvalued": [
+    { "property_id": 102, "reason": "no_data_for_address" }
+  ],
+  "budget": {
+    "month": "2026-07",
+    "monthly_used": 3,
+    "monthly_cap": 50,
+    "run_cap": 8,
+    "estimated_requests": 4,
+    "requests_made": 4,
+    "dry_run": false
+  }
+}

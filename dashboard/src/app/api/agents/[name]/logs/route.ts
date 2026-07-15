@@ -1,7 +1,8 @@
-import { NextRequest } from 'next/server';
+import type { NextRequest } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
 import { getAgentPaths } from '@/lib/data/agents';
+import { redactSSNForDisplay, stripLogControlSequences } from '@/lib/redact-ssn';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,20 +33,20 @@ export async function GET(
 
   try {
     const content = await fs.readFile(logFile, 'utf-8');
-    // Strip ANSI escape codes from log output
-    const stripped = content.replace(
-      // eslint-disable-next-line no-control-regex
-      /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[\?]?[0-9;]*[a-zA-Z]/g,
-      '',
-    );
-    // Clean up control chars and excessive whitespace
-    const cleaned = stripped
-      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '') // remove control chars except \n \r \t
-      .replace(/\r/g, '') // remove carriage returns
-      .replace(/\n{3,}/g, '\n\n'); // collapse 3+ newlines to 2
+    // Strip ANSI escapes + control chars FIRST (a mid-number escape would let a
+    // bare-9 SSN evade the scrub below), then slice the tail.
+    const cleaned = stripLogControlSequences(content);
     const allLines = cleaned.split('\n');
     const tail = allLines.slice(-lines).join('\n');
-    return new Response(tail, {
+    // Redact SSNs from the served content. The PTY Layer-1 holdback leaves two
+    // documented residuals in stdout.log (R1: label-adjacent; R2: label >40
+    // chars away, past the matcher lookback) and this log API is the one path
+    // that surfaces stdout.log OFF-HOST, so it MUST close them — in AGGRESSIVE
+    // mode so R2's distant label is irrelevant. Applied AFTER the strip on the
+    // exact returned bytes. See redact-ssn.ts (canonical =
+    // src/utils/ssn-redaction.ts, drift-guarded by an oracle test).
+    const safe = redactSSNForDisplay(tail);
+    return new Response(safe, {
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
   } catch {

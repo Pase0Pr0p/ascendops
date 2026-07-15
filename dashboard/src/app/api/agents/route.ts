@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
-import { getFrameworkRoot, getCTXRoot, getAllAgents } from '@/lib/config';
+import { getFrameworkRoot, getCTXRoot, getAllAgents, isReservedAgentName } from '@/lib/config';
 import { IPCClient } from '@/lib/ipc-client';
 import { getHeartbeat, getHealthStatus } from '@/lib/data/heartbeats';
 
@@ -74,6 +74,12 @@ export async function POST(request: NextRequest) {
     return Response.json(
       { error: 'name must match /^[a-z0-9_-]+$/' },
       { status: 400 },
+    );
+  }
+  if (isReservedAgentName(name)) {
+    return Response.json(
+      { error: `name "${name}" is reserved for an external service` },
+      { status: 409 },
     );
   }
   if (!org || typeof org !== 'string') {

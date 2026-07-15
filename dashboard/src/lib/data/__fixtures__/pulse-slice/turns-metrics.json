@@ -1,0 +1,59 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every unit, date, and number is invented — no real tenant/property data (§6.6). The `live` block below is HAND-COMPUTED from `records` so the §6.4 invariant test is not circular — EXCEPT avg_turn_days and completed_30d, which are feed-level stats (AppFolio meta.stats / a second filtered call) that records cannot reproduce; they pass through under ALL and go n/a under any scope. Status strings are deliberately varied (incl. 'Vendor Scheduled') to prove the pipeline renders observed strings verbatim with no hardcoded enum. Turn 7006 has property_id null on purpose: the unmapped-turn case.",
+  "lane": "turns",
+  "generated_at": "2026-07-05T06:50:00-04:00",
+  "today": "2026-07-05",
+  "live": {
+    "turnovers": {
+      "open_count": 6,
+      "avg_turn_days": 41.3,
+      "past_target": 3,
+      "completed_30d": 2,
+      "oldest_days": 95,
+      "age_buckets": {
+        "0-14d": 2,
+        "15-30d": 1,
+        "31-60d": 2,
+        "60d+": 1
+      }
+    },
+    "make_ready": {
+      "categories_in_order": [
+        "Maintenance/Repair",
+        "Paint",
+        "Appliances",
+        "Floors/Carpets",
+        "Other",
+        "Housekeeping",
+        "Keys/Locks"
+      ],
+      "category_status_counts": {
+        "Maintenance/Repair": { "In Progress": 1, "Done": 1 },
+        "Paint": { "Not Started": 2, "In Progress": 1 },
+        "Appliances": { "Vendor Scheduled": 1 },
+        "Floors/Carpets": { "Not Started": 1 },
+        "Other": { "Not Started": 1 },
+        "Housekeeping": { "Not Started": 1, "In Progress": 1 },
+        "Keys/Locks": { "Done": 1 }
+      },
+      "stalled_zero_wo": 3,
+      "open_wos_on_turns": 6,
+      "rent_ready_this_week": 2
+    }
+  },
+  "records": [
+    { "kind": "turn", "turn_id": 7001, "property_id": 101, "property_name": "Moss Dr", "unit": "1106 Moss Dr Unit C", "move_out": "2026-06-28", "target": "2026-07-10", "categories": { "Maintenance/Repair": "In Progress", "Paint": "Not Started" }, "wo_count": 2 },
+    { "kind": "turn", "turn_id": 7002, "property_id": 101, "property_name": "Moss Dr", "unit": "1108 Moss Dr Unit D", "move_out": "2026-06-15", "target": "2026-07-01", "categories": { "Paint": "In Progress", "Floors/Carpets": "Not Started", "Housekeeping": "Not Started" }, "wo_count": 0 },
+    { "kind": "turn", "turn_id": 7003, "property_id": 102, "property_name": "Buckley Ave", "unit": "510 Buckley Ave", "move_out": "2026-05-20", "target": "2026-06-20", "categories": { "Maintenance/Repair": "Done", "Appliances": "Vendor Scheduled" }, "wo_count": 1 },
+    { "kind": "turn", "turn_id": 7004, "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 1", "move_out": "2026-04-01", "target": null, "categories": { "Other": "Not Started" }, "wo_count": 0 },
+    { "kind": "turn", "turn_id": 7005, "property_id": 104, "property_name": "Willow Park", "unit": "77 Willow Park Unit 3", "move_out": "2026-07-03", "target": "2026-07-06", "categories": { "Housekeeping": "In Progress", "Keys/Locks": "Done" }, "wo_count": 3 },
+    { "kind": "turn", "turn_id": 7006, "property_id": null, "property_name": null, "unit": null, "move_out": "2026-06-01", "target": "2026-06-25", "categories": { "Paint": "Not Started" }, "wo_count": 0 }
+  ],
+  "needs_verification": {
+    "make_ready_status_enum": {
+      "why": "The unit_turn_category_status status enum is the one NEEDS-CAPTURE in this family (§4.5/§5.4 step 4). The live generator prints the distinct strings it sees here on first run; the board renders them verbatim either way.",
+      "observed_statuses": ["Not Started", "In Progress", "Vendor Scheduled", "Done"]
+    }
+  },
+  "coming_soon": {}
+}

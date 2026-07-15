@@ -289,7 +289,7 @@ export default function CommsPage() {
                         type="button"
                         onClick={toggleSortOrder}
                         className="flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                        title={sortOrder === 'asc' ? 'Newest at bottom — click to flip' : 'Newest at top — click to flip'}
+                        title={sortOrder === 'asc' ? 'Newest at bottom, click to flip' : 'Newest at top, click to flip'}
                       >
                         <IconArrowsSort size={13} />
                         {sortOrder === 'asc' ? 'Newest \u2193' : 'Newest \u2191'}

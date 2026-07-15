@@ -1,0 +1,38 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every name, unit, and number is invented — no real tenant data (§6.6). The `live` block below is HAND-COMPUTED from `records` so the §6.4 invariant test is not circular. Renewal 'Drew Ellison' has property_id null on purpose: the unmapped-renewal case. Morgan Hale's lease is expired (overdue, outside the intake window) and is still counted in by_status — the overdue-drop bug class this fixture guards against. Casey Lane has no lease_expiry on file (blank) and is still counted by status. Alex Rivera's status ('PendingLegalReview') is deliberately not a known bucket, to prove by_status renders verbatim strings with no hardcoded enum.",
+  "lane": "renewals",
+  "generated_at": "2026-07-05T06:52:00-04:00",
+  "today": "2026-07-05",
+  "live": {
+    "in_window": 5,
+    "not_started": 3,
+    "out_for_signing": 1,
+    "offers_expiring_7d": 1,
+    "by_status": {
+      "not_started": 4,
+      "out_for_signing": 1,
+      "NonRenewal": 1,
+      "PendingLegalReview": 1
+    }
+  },
+  "records": [
+    { "kind": "renewal", "property_id": 101, "property_name": "Moss Dr", "unit": "1104 Moss Dr Unit B", "tenant_name": "Riley Brooks", "status": "not_started", "lease_expiry": "2026-08-20", "in_window": true, "out_for_signing": false },
+    { "kind": "renewal", "property_id": 102, "property_name": "Buckley Ave", "unit": "508 Buckley Ave", "tenant_name": "Avery Stone", "status": "out_for_signing", "lease_expiry": "2026-07-25", "in_window": true, "out_for_signing": true },
+    { "kind": "renewal", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 2", "tenant_name": "Jamie Fox", "status": "not_started", "lease_expiry": "2026-07-10", "in_window": true, "out_for_signing": false },
+    { "kind": "renewal", "property_id": 104, "property_name": "Willow Park", "unit": "77 Willow Park Unit 5", "tenant_name": "Morgan Hale", "status": "NonRenewal", "lease_expiry": "2026-06-01", "in_window": false, "out_for_signing": false },
+    { "kind": "renewal", "property_id": 101, "property_name": "Moss Dr", "unit": "1102 Moss Dr Unit A", "tenant_name": "Casey Lane", "status": "not_started", "lease_expiry": null, "in_window": false, "out_for_signing": false },
+    { "kind": "renewal", "property_id": null, "property_name": null, "unit": null, "tenant_name": "Drew Ellison", "status": "not_started", "lease_expiry": "2026-07-30", "in_window": true, "out_for_signing": false },
+    { "kind": "renewal", "property_id": 102, "property_name": "Buckley Ave", "unit": "512 Buckley Ave", "tenant_name": "Alex Rivera", "status": "PendingLegalReview", "lease_expiry": "2026-09-01", "in_window": true, "out_for_signing": false }
+  ],
+  "needs_verification": {
+    "property_join": {
+      "why": "renewals carry a property name string, not a numeric AppFolio property_id, so these rows stay unmapped under an owner/property/group scope until a numeric-id join lands."
+    }
+  },
+  "coming_soon": {
+    "mtm": { "needs": "/api/leases is_mtm read" },
+    "ready_to_countersign": {
+      "needs": "confirmed AF lease renewal_status enum token for 'signed, awaiting PM countersignature'; only not_started / out_for_signing are confirmed so far"
+    }
+  }
+}

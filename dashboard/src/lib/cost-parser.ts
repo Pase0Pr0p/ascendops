@@ -324,9 +324,18 @@ export function persistCostEntries(entries: CostEntry[]): number {
  * union explicitly so any future overlap (e.g., a codex agent that also gets
  * scanned through claude's projects dir) does not double-count.
  */
+// Codex cost ingest is DISABLED pending a parser fix. codex-tokens.jsonl logs
+// CUMULATIVE per-session token snapshots (not per-call deltas) — raw input_tokens
+// run to hundreds of millions and grow monotonically per notification — so
+// parseCodexJsonlFile counts each snapshot as a per-call charge and inflates
+// codex cost ~1000x (surfaced 2026-06-15: codex $3.28M vs claude $59K sane).
+// Re-enable by flipping this flag once parseCodexJsonlFile computes per-call
+// deltas + dedups snapshots (see the codex-cost-parser follow-up task).
+const CODEX_COST_INGEST_ENABLED = false;
+
 export function syncCosts(): { scanned: number; inserted: number } {
   const claudeEntries = scanClaudeProjectsCosts();
-  const codexEntries = scanCodexLogsCosts();
+  const codexEntries = CODEX_COST_INGEST_ENABLED ? scanCodexLogsCosts() : [];
 
   const seen = new Set<string>();
   const merged: CostEntry[] = [];

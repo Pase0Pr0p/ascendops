@@ -11,12 +11,14 @@ const RUNTIME_LABEL: Record<AgentRuntime, string> = {
   'claude-code': 'Claude',
   'codex-app-server': 'Codex',
   hermes: 'Hermes',
+  voice: 'Voice / Telnyx',
 };
 
 const RUNTIME_CLASSES: Record<AgentRuntime, string> = {
   'claude-code': 'bg-amber-500/10 text-amber-600 border-amber-500/30',
   'codex-app-server': 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30',
   hermes: 'bg-violet-500/10 text-violet-600 border-violet-500/30',
+  voice: 'bg-sky-500/10 text-sky-600 border-sky-500/30',
 };
 
 export function RuntimeBadge({ runtime, className }: RuntimeBadgeProps) {

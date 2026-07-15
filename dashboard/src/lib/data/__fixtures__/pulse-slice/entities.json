@@ -1,0 +1,26 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every name, unit, and number is invented — no real tenant, owner, or property data (master plan §6.6).",
+  "generated_at": "2026-07-05T06:45:00-04:00",
+  "properties": [
+    { "id": 101, "name": "Moss Dr", "owner_id": "o_1" },
+    { "id": 102, "name": "Buckley Ave", "owner_id": "o_1" },
+    { "id": 103, "name": "Cedar Ct", "owner_id": "o_2" },
+    { "id": 104, "name": "Willow Park", "owner_id": null }
+  ],
+  "owners": [
+    { "id": "o_1", "name": "Harbor Point LLC", "group": "harbor-family" },
+    { "id": "o_2", "name": "Jordan Vale", "group": "harbor-family" },
+    { "id": "o_3", "name": "Solo Holdings LLC", "group": null }
+  ],
+  "owner_groups": {
+    "harbor-family": { "label": "Harbor Family", "owners": ["o_1", "o_2"] }
+  },
+  "residents": [
+    { "key": "casey-lane--1102-moss-dr-unit-a", "name": "Casey Lane", "unit": "1102 Moss Dr Unit A", "property_id": 101 },
+    { "key": "riley-brooks--1104-moss-dr-unit-b", "name": "Riley Brooks", "unit": "1104 Moss Dr Unit B", "property_id": 101 },
+    { "key": "avery-stone--508-buckley-ave", "name": "Avery Stone", "unit": "508 Buckley Ave", "property_id": 102 },
+    { "key": "jamie-fox--12-cedar-ct-unit-2", "name": "Jamie Fox", "unit": "12 Cedar Ct Unit 2", "property_id": 103 },
+    { "key": "morgan-hale--77-willow-park-unit-5", "name": "Morgan Hale", "unit": "77 Willow Park Unit 5", "property_id": 104 }
+  ],
+  "unowned": [104]
+}

@@ -8,6 +8,7 @@
 // n/a with the feed's reason, never a guessed number (§8).
 import { Card, CardContent } from '@/components/ui/card';
 import { MiniStat, fmtUSD, fmtPct, providerLabel, fmtAsOf } from './owner-ui';
+import type { ComplianceReadinessData } from '@/lib/data/compliance-readiness';
 
 export interface OwnerPropertyView {
   propertyId: number;
@@ -27,6 +28,7 @@ export interface OwnerPropertyView {
   /** Whether this property appeared in the OV records at all (drives the
    *  header "no GL activity" note vs a live NOI). */
   hasRecords: boolean;
+  complianceReadiness?: ComplianceReadinessData;
 
   // -- AL-4 asset estimates (all provenance class `estimate`, §8.2) ----------
   /** AVM value; null => property is unvalued (see `unvaluedReason`). */
@@ -50,6 +52,93 @@ export interface OwnerPropertyView {
    *  whole building) is uncertain, so the comparison is labeled approximate
    *  instead of showing a confident precise gap (§8 owner-truth). */
   rentBasisApproximate: boolean;
+}
+
+// Semantic status colors for the readiness verdict — same emerald/amber/red
+// trio as the Pulse health tiles (HEALTH_DOT in pulse-ui.tsx), never a new hue.
+const READINESS_TONE = {
+  green: { text: 'text-emerald-500', bar: 'bg-emerald-400' },
+  amber: { text: 'text-amber-500', bar: 'bg-amber-500' },
+  red: { text: 'text-red-500', bar: 'bg-red-500' },
+} as const;
+
+function IssuePill({
+  count,
+  noun,
+  tone,
+}: {
+  count: number;
+  noun: string;
+  tone: 'red' | 'amber';
+}) {
+  if (count <= 0) return null;
+  const cls =
+    tone === 'red'
+      ? 'border-red-500/40 bg-red-500/10 text-red-500'
+      : 'border-amber-500/40 bg-amber-500/10 text-amber-500';
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tabular-nums ${cls}`}>
+      {count} {noun}{count === 1 ? '' : 's'}
+    </span>
+  );
+}
+
+function ComplianceReadinessStrip({ data }: { data?: ComplianceReadinessData }) {
+  if (!data || data.state !== 'ready') {
+    return (
+      <div className="rounded-lg border border-dashed px-3 py-2.5">
+        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Compliance readiness
+        </p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Pending{data ? `: ${data.reason}` : ''}
+        </p>
+      </div>
+    );
+  }
+
+  const { report } = data;
+  const tone: keyof typeof READINESS_TONE =
+    report.blockers.length > 0 ? 'red' : report.warnings.length > 0 ? 'amber' : 'green';
+  const topIssue = report.blockers[0] ?? report.warnings[0];
+
+  return (
+    <div
+      className="space-y-2 rounded-lg border bg-secondary/20 px-3 py-2.5"
+      title="Starts at 100; 25 deducted per blocker, 10 per warning."
+    >
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Compliance readiness
+        </p>
+        <div className="flex flex-wrap justify-end gap-1">
+          <IssuePill count={report.blockers.length} noun="blocker" tone="red" />
+          <IssuePill count={report.warnings.length} noun="warning" tone="amber" />
+          {report.blockers.length === 0 && report.warnings.length === 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-500">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              Clear
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="flex items-baseline gap-1">
+        <span className={`text-2xl font-semibold tracking-tight tabular-nums ${READINESS_TONE[tone].text}`}>
+          {report.score}
+        </span>
+        <span className="text-xs text-muted-foreground">/ 100</span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-muted/40">
+        <div
+          className={`h-1.5 rounded-full transition-all ${READINESS_TONE[tone].bar}`}
+          style={{ width: `${Math.min(Math.max(report.score, 2), 100)}%` }}
+        />
+      </div>
+      {topIssue && (
+        <p className="text-xs leading-snug text-muted-foreground">{topIssue.label}</p>
+      )}
+    </div>
+  );
 }
 
 export function PropertyCard({ p }: { p: OwnerPropertyView }) {
@@ -138,6 +227,7 @@ export function PropertyCard({ p }: { p: OwnerPropertyView }) {
             note={rentNote}
           />
         </div>
+        <ComplianceReadinessStrip data={p.complianceReadiness} />
         {showAssetFooter && (
           <p className="text-[10px] leading-snug text-muted-foreground">
             Valuation &amp; rent: {providerLabel(p.assetProvider)} · as of {fmtAsOf(p.assetAsOf)}

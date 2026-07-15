@@ -189,9 +189,38 @@ export function getAgentsForOrg(org: string): string[] {
   return Array.from(agents);
 }
 
+// Infra/pseudo-entries that live alongside real agents but are NOT fleet agents
+// and must not appear on the dashboard roster: daemon infra (gateway,
+// fast-checker) and test-org scaffolds (codex-test). Underscore-prefixed names
+// (e.g. _shared resource dirs) are excluded separately in isFleetAgent().
+const NON_FLEET_AGENTS = new Set(['gateway', 'fast-checker', 'codex-test', 'alex']);
+
+/**
+ * Names reserved for external / pseudo services that must never be created as a
+ * fleet agent. 'alex' is the external Telnyx voice agent surfaced read-only on
+ * the roster; reserving it guards against a fleet agent taking the name and
+ * colliding with the /agents/alex detail route. Enforced in the create-agent
+ * API; the roster filter (isFleetAgent) also excludes these.
+ */
+export const RESERVED_AGENT_NAMES = new Set(['alex']);
+
+export function isReservedAgentName(name: string): boolean {
+  return RESERVED_AGENT_NAMES.has(name.toLowerCase());
+}
+
+/**
+ * Whether a roster entry is a real fleet agent vs an infra/pseudo entry that
+ * happens to live under orgs/<org>/agents or in enabled-agents.json.
+ */
+function isFleetAgent(name: string): boolean {
+  if (name.startsWith('_')) return false; // shared/resource dirs (e.g. _shared)
+  return !NON_FLEET_AGENTS.has(name);
+}
+
 /**
  * Returns all agents by merging enabled-agents.json with filesystem scan.
  * Filesystem scan ensures CLI-created agents are always visible.
+ * Non-fleet infra/test entries are filtered out (see isFleetAgent).
  */
 export function getAllAgents(): Array<{ name: string; org: string }> {
   const seen = new Set<string>();
@@ -224,7 +253,7 @@ export function getAllAgents(): Array<{ name: string; org: string }> {
     }
   }
 
-  return agents;
+  return agents.filter((a) => isFleetAgent(a.name));
 }
 
 export function getAllowedRootsConfigPath(): string {

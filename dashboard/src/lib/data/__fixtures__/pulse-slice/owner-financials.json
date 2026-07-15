@@ -1,0 +1,68 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every property, category, and number is invented — no real financial data (master plan §6.6). The `live` block below is HAND-COMPUTED from `records` so the §8.1 invariant test is not circular. property_ids reuse entities.json (101/102 -> owner o_1, 103 -> owner o_2). One record (101 2025-07 Rent 9999) is dated OUTSIDE the trailing-12-month window anchored on today (2026-07-05, window 2025-08..2026-07) and MUST be excluded from every total — the TTM-filter drift guard.",
+  "lane": "owner_financials",
+  "generated_at": "2026-07-05T06:50:00-04:00",
+  "today": "2026-07-05",
+  "live": {
+    "income_ttm": 14500,
+    "expenses_ttm": 1315,
+    "noi_ttm": 13185,
+    "monthly_series": [
+      { "month": "2025-08", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2025-09", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2025-10", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2025-11", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2025-12", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2026-01", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2026-02", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2026-03", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2026-04", "income": 0, "expenses": 0, "noi": 0 },
+      { "month": "2026-05", "income": 5000, "expenses": 340, "noi": 4660 },
+      { "month": "2026-06", "income": 5000, "expenses": 800, "noi": 4200 },
+      { "month": "2026-07", "income": 4500, "expenses": 175, "noi": 4325 }
+    ],
+    "by_category": {
+      "Rent Income": { "class": "income", "amount": 14500 },
+      "Repairs & Maintenance": { "class": "expense_operating", "amount": 625 },
+      "Management Fee": { "class": "expense_operating", "amount": 240 },
+      "Landscaping": { "class": "expense_operating", "amount": 100 },
+      "Property Tax": { "class": "passthrough_tax", "amount": 250 },
+      "Insurance": { "class": "passthrough_insurance", "amount": 100 },
+      "Owner Distribution": { "class": "owner_draw", "amount": 1500 },
+      "Mortgage Interest": { "class": "debt_service", "amount": 800 },
+      "Roof Replacement": { "class": "expense_capex", "amount": 5000 }
+    },
+    "by_property": {
+      "101": { "property_name": "Moss Dr", "income_ttm": 9000, "expenses_ttm": 990, "noi_ttm": 8010 },
+      "102": { "property_name": "Buckley Ave", "income_ttm": 4000, "expenses_ttm": 250, "noi_ttm": 3750 },
+      "103": { "property_name": "Cedar Ct", "income_ttm": 1500, "expenses_ttm": 75, "noi_ttm": 1425 }
+    }
+  },
+  "records": [
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-05", "category": "Rent Income", "class": "income", "amount": 3000 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-05", "category": "Management Fee", "class": "expense_operating", "amount": 240 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-06", "category": "Rent Income", "class": "income", "amount": 3000 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-06", "category": "Repairs & Maintenance", "class": "expense_operating", "amount": 400 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-06", "category": "Property Tax", "class": "passthrough_tax", "amount": 250 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-06", "category": "Owner Distribution", "class": "owner_draw", "amount": 1500 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-07", "category": "Rent Income", "class": "income", "amount": 3000 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-07", "category": "Insurance", "class": "passthrough_insurance", "amount": 100 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2026-07", "category": "Roof Replacement", "class": "expense_capex", "amount": 5000 },
+    { "kind": "gl_month", "property_id": 101, "property_name": "Moss Dr", "month": "2025-07", "category": "Rent Income", "class": "income", "amount": 9999 },
+    { "kind": "gl_month", "property_id": 102, "property_name": "Buckley Ave", "month": "2026-05", "category": "Rent Income", "class": "income", "amount": 2000 },
+    { "kind": "gl_month", "property_id": 102, "property_name": "Buckley Ave", "month": "2026-05", "category": "Landscaping", "class": "expense_operating", "amount": 100 },
+    { "kind": "gl_month", "property_id": 102, "property_name": "Buckley Ave", "month": "2026-06", "category": "Rent Income", "class": "income", "amount": 2000 },
+    { "kind": "gl_month", "property_id": 102, "property_name": "Buckley Ave", "month": "2026-06", "category": "Repairs & Maintenance", "class": "expense_operating", "amount": 150 },
+    { "kind": "gl_month", "property_id": 102, "property_name": "Buckley Ave", "month": "2026-06", "category": "Mortgage Interest", "class": "debt_service", "amount": 800 },
+    { "kind": "gl_month", "property_id": 103, "property_name": "Cedar Ct", "month": "2026-07", "category": "Rent Income", "class": "income", "amount": 1500 },
+    { "kind": "gl_month", "property_id": 103, "property_name": "Cedar Ct", "month": "2026-07", "category": "Repairs & Maintenance", "class": "expense_operating", "amount": 75 }
+  ],
+  "ledger": [
+    { "property_id": 102, "property_name": "Buckley Ave", "date": "2026-06-05", "type": "rent_received", "category": "Rent Income", "description": "June rent — 508 Buckley", "amount": 2000 },
+    { "property_id": 101, "property_name": "Moss Dr", "date": "2026-07-03", "type": "rent_received", "category": "Rent Income", "description": "July rent — Unit A", "amount": 3000 },
+    { "property_id": 101, "property_name": "Moss Dr", "date": "2026-07-10", "type": "expense", "category": "Insurance", "description": "Hazard insurance premium", "amount": 100 },
+    { "property_id": 103, "property_name": "Cedar Ct", "date": "2026-07-14", "type": "expense", "category": "Repairs & Maintenance", "description": "Kitchen faucet repair", "amount": 75 }
+  ],
+  "needs_verification": {},
+  "coming_soon": {}
+}

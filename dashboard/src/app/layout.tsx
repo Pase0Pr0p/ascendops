@@ -1,14 +1,16 @@
 import type { Metadata } from "next";
-import { Sora, JetBrains_Mono } from "next/font/google";
+import { Inter, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { SessionProvider } from "@/components/session-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getDefaultBrand } from "@/lib/data/organization";
 import "./globals.css";
 
-const sora = Sora({
+// Body font — matches agenticpm.io / the classroom, which render body in Inter.
+// Headings/display use CameraPlainVariable (self-hosted @font-face in globals.css).
+const inter = Inter({
   subsets: ["latin"],
-  variable: "--font-sora",
+  variable: "--font-inter",
   weight: ["400", "500", "600", "700"],
 });
 
@@ -23,7 +25,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const brand = getDefaultBrand();
   const descriptionSuffix = brand.isOrgBrand
     ? `${brand.name} agent orchestration dashboard`
-    : "cortextOS agent orchestration dashboard";
+    : "Agentic PM agent orchestration dashboard";
   return {
     title: `${brand.name} Dashboard`,
     description: descriptionSuffix,
@@ -44,12 +46,12 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${sora.variable} ${jetbrainsMono.variable} h-full antialiased`}
+      className={`${inter.variable} ${jetbrainsMono.variable} h-full antialiased`}
       suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
         <SessionProvider>
-          <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
+          <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
             <TooltipProvider>
               {children}
             </TooltipProvider>

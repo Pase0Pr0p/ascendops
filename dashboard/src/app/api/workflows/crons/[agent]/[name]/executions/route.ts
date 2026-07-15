@@ -12,14 +12,15 @@
  *   ?format=json-download   — download as JSON with Content-Disposition header
  *   (no format param)       — returns { entries, total, hasMore } JSON
  *
- * Delegates to shared readExecutionLogPage + entriesToCsv helpers.
+ * Delegates to the shared readExecutionLogPage + entriesToCsv helpers from the
+ * agent-level executions route to avoid code duplication.
  */
 
 import { NextRequest } from 'next/server';
 import {
   readExecutionLogPage,
   entriesToCsv,
-} from '@/lib/data/cron-executions';
+} from '@/app/api/workflows/crons/[agent]/executions/route';
 
 export const dynamic = 'force-dynamic';
 

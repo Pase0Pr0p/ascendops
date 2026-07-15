@@ -44,6 +44,16 @@ next-env.d.ts
 # SQLite database
 .data/
 
+# Property Pulse snapshots — contain real tenant/financial data; regenerated per pull, never committed
+.pulse-data/
+
+# Owner-supplied loan/carry-cost inputs (§4.4, AL-1) — real balances are owner-confidential.
+# Only owner-inputs.example.json (synthetic template) is committed.
+/config/owner-inputs.json
+# Member-local Pulse snapshots
+.pulse-data/*
+!.pulse-data/.gitkeep
+
 # Runtime state files (not tracked)
 .appfolio-selfheal-state.json
 .emergency-dispatch-state.json

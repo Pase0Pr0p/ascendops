@@ -46,7 +46,7 @@ const TEMPLATES = [
     value: 'orchestrator',
     label: 'Orchestrator (Claude only)',
     runtime: 'claude-code',
-    description: 'Coordinates the org — morning/evening reviews, goal cascade, approvals. Claude-Code runtime only.',
+    description: 'Coordinates the org: morning/evening reviews, goal cascade, approvals. Claude-Code runtime only.',
   },
   {
     value: 'analyst',

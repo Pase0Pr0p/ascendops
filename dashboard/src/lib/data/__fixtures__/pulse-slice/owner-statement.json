@@ -1,0 +1,17 @@
+{
+  "_synthetic": "Committed demo/test fixture for the §8.3 owner-statement reconciliation harness. Invented numbers, no real data (§6.6). Represents AppFolio's owner statement for owner o_1 (properties 101 Moss Dr + 102 Buckley Ave), closed period 2026-06. Totals are hand-matched to ownerPeriodTotals(owner-financials fixture, owner:o_1, 2026-06) so a correct aggregate reconciles GREEN; the drift test in owner-aggregate.test.ts mutates a copy to force RED.",
+  "owner_id": "o_1",
+  "period": "2026-06",
+  "from": "2026-06",
+  "to": "2026-06",
+  "income": 5000,
+  "expenses": 800,
+  "net": 4200,
+  "by_category": {
+    "Rent Income": 5000,
+    "Repairs & Maintenance": 550,
+    "Property Tax": 250,
+    "Owner Distribution": 1500,
+    "Mortgage Interest": 800
+  }
+}

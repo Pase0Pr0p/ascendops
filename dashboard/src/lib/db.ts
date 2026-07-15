@@ -212,6 +212,64 @@ function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_messages_org ON messages(org);
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
   `);
+
+  migrateCostEntriesNaturalKey(db);
+}
+
+/**
+ * Migration: enforce natural-key uniqueness on cost_entries.
+ *
+ * The table was created with only an autoincrement `id` as its unique key, so
+ * the cost sync's `INSERT OR IGNORE` never actually deduplicated — a re-sync or
+ * backfill could double-count every row (43 duplicate rows had already
+ * accumulated in the live DB). Add a UNIQUE INDEX on the natural key so
+ * OR IGNORE dedups correctly. A unique index gives the same guarantee as a full
+ * table rebuild with no data copy/rename, so it is lower risk.
+ *
+ * source_file is COALESCE'd to '' in both the dedup and the index because SQLite
+ * treats NULL as DISTINCT in a unique index — without the COALESCE a NULL
+ * source_file would slip past OR IGNORE. (timestamp/agent/model are NOT NULL by
+ * schema.) Existing duplicates are removed first (keeping the lowest id per
+ * natural key) or the CREATE UNIQUE INDEX would fail.
+ *
+ * Concurrency: dashboard init can run in multiple workers at once, so the dedup
+ * and index creation run inside an IMMEDIATE transaction that takes the write
+ * lock up front. This makes the migration atomic against (a) a second
+ * initializer racing the same migration — without it, both observe
+ * "index missing" and the loser's bare CREATE UNIQUE INDEX throws
+ * "already exists" (a normal error, not SQLITE_BUSY, so the schema-init retry
+ * would not catch it); and (b) a concurrent cost-sync INSERT landing between the
+ * DELETE and the CREATE, which could re-introduce a duplicate and fail the index
+ * build. The in-transaction re-check skips if another initializer already
+ * migrated, and CREATE UNIQUE INDEX IF NOT EXISTS is belt-and-suspenders.
+ * SQLITE_BUSY on BEGIN IMMEDIATE propagates to the existing
+ * withSqliteBusyRetry('schema init') wrapper, which retries the whole init.
+ */
+function migrateCostEntriesNaturalKey(db: Database.Database): void {
+  const indexExists = (): boolean =>
+    db
+      .prepare(
+        `SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_cost_entries_natural'`,
+      )
+      .get() !== undefined;
+
+  // Fast path: already migrated, skip taking the write lock.
+  if (indexExists()) return;
+
+  const runMigration = db.transaction(() => {
+    // Re-check under the write lock: another initializer may have won the race.
+    if (indexExists()) return;
+    db.exec(`
+      DELETE FROM cost_entries
+       WHERE id NOT IN (
+         SELECT MIN(id) FROM cost_entries
+         GROUP BY timestamp, agent, model, COALESCE(source_file, '')
+       );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_cost_entries_natural
+        ON cost_entries (timestamp, agent, model, COALESCE(source_file, ''));
+    `);
+  });
+  runMigration.immediate();
 }
 
 // globalThis singleton survives Next.js hot reload

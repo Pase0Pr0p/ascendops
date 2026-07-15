@@ -4,6 +4,8 @@ import path from 'path';
 import { marked } from 'marked';
 import DOMPurify from 'isomorphic-dompurify';
 import { getCTXRoot, getFrameworkRoot, getAllowedRootsConfigPath } from '@/lib/config';
+import { redactSSNForDisplay, redactSSNForDisplayMarkup, redactSVGText } from '@/lib/redact-ssn';
+import { MIME_TYPES, IMAGE_EXTENSIONS, INLINE_EXTENSIONS, isTextContentType } from '@/lib/media-content-types';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,41 +49,6 @@ function isPathUnderAnyRoot(realPath: string, roots: string[]): boolean {
   return false;
 }
 
-const MIME_TYPES: Record<string, string> = {
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.mp4': 'video/mp4',
-  '.mov': 'video/quicktime',
-  '.m4a': 'audio/mp4',
-  '.mp3': 'audio/mpeg',
-  '.ogg': 'audio/ogg',
-  '.opus': 'audio/opus',
-  '.wav': 'audio/wav',
-  '.pdf': 'application/pdf',
-  '.txt': 'text/plain; charset=utf-8',
-  '.json': 'application/json',
-  '.md': 'text/plain; charset=utf-8',
-  // SECURITY: .html/.htm are deliberately served as text/plain, NOT text/html.
-  // Agent-written HTML served inline as text/html would execute scripts on the
-  // dashboard origin (stored XSS → auth-cookie theft). The dashboard's own
-  // HTML preview (deliverable-preview.tsx) fetches the body as text and renders
-  // it in a sandboxed srcDoc iframe, so it does not rely on this content type.
-  '.html': 'text/plain; charset=utf-8',
-  '.htm': 'text/plain; charset=utf-8',
-  '.ts': 'text/plain; charset=utf-8',
-  '.tsx': 'text/plain; charset=utf-8',
-  '.js': 'text/plain; charset=utf-8',
-  '.css': 'text/plain; charset=utf-8',
-  '.sh': 'text/plain; charset=utf-8',
-  '.csv': 'text/csv; charset=utf-8',
-  '.svg': 'image/svg+xml',
-};
-
-const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg']);
-const INLINE_EXTENSIONS = new Set(['.md', '.html', '.htm', '.txt', '.ts', '.tsx', '.js', '.css', '.sh', '.json', '.csv']);
 
 // ---------------------------------------------------------------------------
 // Sensitive-file denylist.
@@ -209,6 +176,25 @@ export async function GET(
     );
   }
 
+  // SECURITY: the agent log directory (CTX_ROOT/logs) is served EXCLUSIVELY by
+  // the dedicated /api/agents/[name]/logs route, which scrubs SSNs at the read
+  // boundary. This generic file server resolves any path under CTX_ROOT and
+  // serves it raw (octet-stream), with no scrub — so without this guard it is a
+  // SECOND, UNSCRUBBED door to stdout.log/stderr.log (the PTY Layer-1 holdback
+  // leaves bounded SSN residuals in those files). Deny anything resolving under
+  // CTX_ROOT/logs so the scrubbed logs route is the exclusive door. Same 404
+  // shape as a miss, so the route is not a file-existence oracle. Checked on
+  // the realpath'd path so `..`/symlinks cannot bypass it.
+  if (isPathUnderAnyRoot(realFullPath, [path.join(ctxRoot, 'logs')])) {
+    return new Response(
+      JSON.stringify({
+        error: 'not_found',
+        message: 'File not found under any configured root.',
+      }),
+      { status: 404, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
   const ext = path.extname(realFullPath).toLowerCase();
   const renderMd = _request.nextUrl.searchParams.get('render') === 'true';
 
@@ -221,11 +207,17 @@ export async function GET(
   if (renderMd && ext === '.md') {
     const mdContent = fs.readFileSync(realFullPath, 'utf-8');
     const rawHtml = marked.parse(mdContent) as string;
-    const htmlBody = DOMPurify.sanitize(rawHtml, {
+    const sanitized = DOMPurify.sanitize(rawHtml, {
       USE_PROFILES: { html: true },
       FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'link', 'meta', 'base'],
       FORBID_ATTR: ['style', 'onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur', 'onchange', 'onsubmit', 'formaction'],
     });
+    // SECURITY: scrub SSNs from the RENDERED markdown before it goes off-host.
+    // marked turns emphasis markers into tags, so an SSN split by a marker in the
+    // .md (`123-45-*6789*`) reassembles in the preview — redactSSNForDisplayMarkup
+    // tolerates tags between digits and redacts the whole span (same class as the
+    // Telegram markdown egress). This .md preview branch previously had NO scrub.
+    const htmlBody = redactSSNForDisplayMarkup(sanitized);
     return new Response(htmlBody, {
       status: 200,
       headers: {
@@ -237,11 +229,41 @@ export async function GET(
   }
 
   const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
-  const fileBuffer = fs.readFileSync(realFullPath);
+
+  // SECURITY: scrub SSNs from served content before it goes off-host. Three
+  // body shapes:
+  //   1. TEXT content (text/* or application/json) — the renderMd branch above
+  //      scrubs only the ?render=true preview; this raw fallthrough serves
+  //      .md/.txt/.csv/etc. VERBATIM (the "Open file in new tab" door). Scrub
+  //      with redactSSNForDisplay (the same aggressive scrubber the logs route
+  //      uses). Body = scrubbed string.
+  //   2. SVG (image/svg+xml) — not text-gated, but it is XML text served inline
+  //      that can carry an SSN in <text>/<tspan> element content. redactSVGText
+  //      scrubs ONLY element text, never geometry (path d=, coords, viewBox), so
+  //      the vector is not corrupted. Body = scrubbed string. (This closes the
+  //      previously-documented SVG residual.)
+  //   3. BINARY (images/pdf/audio/video/octet-stream) — no text SSN; served
+  //      byte-identical. Body = Uint8Array. `new Uint8Array(buf)` (copy form):
+  //      a Node Buffer is typed `Buffer<ArrayBufferLike>` and does NOT satisfy
+  //      BodyInit's `ArrayBufferView<ArrayBuffer>` under TS 5.7+; the fresh
+  //      allocation is `Uint8Array<ArrayBuffer>` (valid BodyInit). The copy is
+  //      byte-identical and bounded to the Buffer's own length (copies the
+  //      Buffer's view, never the pooled backing ArrayBuffer — no over-read).
+  let textBody: string | null = null;
+  let binaryBody: Uint8Array<ArrayBuffer> | null = null;
+  if (isTextContentType(mimeType)) {
+    textBody = redactSSNForDisplay(fs.readFileSync(realFullPath, 'utf-8'));
+  } else if (ext === '.svg') {
+    textBody = redactSVGText(fs.readFileSync(realFullPath, 'utf-8'));
+  } else {
+    binaryBody = new Uint8Array(fs.readFileSync(realFullPath));
+  }
+  const contentLength =
+    textBody !== null ? Buffer.byteLength(textBody) : (binaryBody as Uint8Array<ArrayBuffer>).length;
 
   const headers: Record<string, string> = {
     'Content-Type': mimeType,
-    'Content-Length': String(fileBuffer.length),
+    'Content-Length': String(contentLength),
     'Cache-Control': 'private, max-age=3600',
     // SECURITY: prevent browsers from MIME-sniffing text/plain responses
     // (e.g. .html served as text/plain above) back into executable HTML.
@@ -263,5 +285,9 @@ export async function GET(
     headers['Content-Disposition'] = `attachment; filename="${path.basename(realFullPath)}"`;
   }
 
-  return new Response(fileBuffer, { status: 200, headers });
+  // Separate typed Response per branch — string and Uint8Array<ArrayBuffer> are
+  // each assignable to BodyInit on their own; a string|bytes union is not.
+  return textBody !== null
+    ? new Response(textBody, { status: 200, headers })
+    : new Response(binaryBody as Uint8Array<ArrayBuffer>, { status: 200, headers });
 }

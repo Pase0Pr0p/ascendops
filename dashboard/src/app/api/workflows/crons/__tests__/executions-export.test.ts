@@ -33,7 +33,7 @@ const CRON_NAME = 'heartbeat';
 
 function makeEntry(
   cronName: string,
-  status: 'fired' | 'retried' | 'failed',
+  status: CronExecutionLogEntry['status'],
   idx: number,
 ): CronExecutionLogEntry {
   return {
@@ -56,11 +56,13 @@ function writeLog(agentName: string, entries: CronExecutionLogEntry[]): void {
   );
 }
 
-// Write 10 fired + 5 failed for the test agent
+// Write 9 fired + 1 confirmed + 5 failed + 1 persistent no-op for the test agent
 beforeAll(() => {
   const entries: CronExecutionLogEntry[] = [
-    ...Array.from({ length: 10 }, (_, i) => makeEntry(CRON_NAME, 'fired', i)),
+    ...Array.from({ length: 9 }, (_, i) => makeEntry(CRON_NAME, 'fired', i)),
+    makeEntry(CRON_NAME, 'confirmed', 9),
     ...Array.from({ length: 5 }, (_, i) => makeEntry(CRON_NAME, 'failed', 10 + i)),
+    makeEntry(CRON_NAME, 'noop_persistent', 15),
   ];
   writeLog(AGENT, entries);
 });
@@ -102,39 +104,39 @@ describe('GET /api/workflows/crons/[agent]/executions — pagination shape', () 
     expect(Array.isArray(body.entries)).toBe(true);
     expect(typeof body.total).toBe('number');
     expect(typeof body.hasMore).toBe('boolean');
-    expect(body.total).toBe(15); // 10 fired + 5 failed
+    expect(body.total).toBe(16); // 10 success + 5 failed + 1 persistent no-op
     expect(body.entries).toHaveLength(5);
     expect(body.hasMore).toBe(true);
   });
 
-  it('offset=10 returns remaining 5, hasMore=false', async () => {
+  it('offset=10 returns remaining 6, hasMore=false', async () => {
     const res = await callGet(AGENT, 'limit=10&offset=10');
     expect(res.status).toBe(200);
     const body = await res.json() as { entries: unknown[]; total: number; hasMore: boolean };
-    expect(body.entries).toHaveLength(5);
+    expect(body.entries).toHaveLength(6);
     expect(body.hasMore).toBe(false);
   });
 });
 
 describe('GET /api/workflows/crons/[agent]/executions — status filter', () => {
-  it('?status=success returns only fired entries', async () => {
+  it('?status=success returns fired and confirmed entries', async () => {
     const res = await callGet(AGENT, 'limit=100&status=success');
     const body = await res.json() as { entries: CronExecutionLogEntry[]; total: number };
     expect(body.total).toBe(10);
-    expect(body.entries.every(e => e.status === 'fired')).toBe(true);
+    expect(body.entries.every(e => e.status === 'fired' || e.status === 'confirmed')).toBe(true);
   });
 
-  it('?status=failure returns only failed entries', async () => {
+  it('?status=failure returns failed and persistent no-op entries', async () => {
     const res = await callGet(AGENT, 'limit=100&status=failure');
     const body = await res.json() as { entries: CronExecutionLogEntry[]; total: number };
-    expect(body.total).toBe(5);
-    expect(body.entries.every(e => e.status === 'failed')).toBe(true);
+    expect(body.total).toBe(6);
+    expect(body.entries.every(e => e.status === 'failed' || e.status === 'noop_persistent')).toBe(true);
   });
 
   it('?status=all (default) returns all entries', async () => {
     const res = await callGet(AGENT, 'limit=100&status=all');
     const body = await res.json() as { total: number };
-    expect(body.total).toBe(15);
+    expect(body.total).toBe(16);
   });
 });
 
@@ -160,7 +162,7 @@ describe('GET /api/workflows/crons/[agent]/executions — CSV export', () => {
     const body = await res.text();
     const lines = body.split('\n').filter(l => l.trim());
     expect(lines.length).toBeGreaterThan(1); // header + data
-    expect(lines.length).toBe(16); // 1 header + 15 entries
+    expect(lines.length).toBe(17); // 1 header + 16 entries
   });
 
   it('?format=csv with ?status=success filters before export', async () => {
@@ -186,7 +188,7 @@ describe('GET /api/workflows/crons/[agent]/executions — JSON download export',
     const body = await res.text();
     const parsed = JSON.parse(body) as unknown[];
     expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed.length).toBe(15);
+    expect(parsed.length).toBe(16);
   });
 
   it('Content-Type is application/json for JSON download', async () => {

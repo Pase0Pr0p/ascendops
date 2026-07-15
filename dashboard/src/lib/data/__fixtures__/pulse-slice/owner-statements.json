@@ -1,0 +1,120 @@
+{
+  "lane": "owner_statements",
+  "generated_at": "2026-07-05T06:55:00-04:00",
+  "period": { "from": "2026-06-01", "to": "2026-06-30" },
+  "statements": [
+    {
+      "report": "owner_statement",
+      "entities_owner_id": "o_1",
+      "owner_name": "Harbor Point LLC",
+      "appfolio_owner_id": "9999",
+      "party_id": "o_9999",
+      "period_from": "2026-06-01",
+      "period_to": "2026-06-30",
+      "properties": [
+        {
+          "property_name": "Moss Dr",
+          "beginning_balance": 1000,
+          "ending_balance": 1850,
+          "total_income": 3000,
+          "total_expense": 2150,
+          "bills_due_total": 0,
+          "required_reserves": 300,
+          "work_order_estimates": 0,
+          "lines": [
+            {
+              "date": "2026-06-03",
+              "payer_payee": "Synthetic Resident",
+              "type": "Receipt",
+              "reference": "R-1",
+              "description": "Rent Income - June",
+              "income": 3000,
+              "expense": null,
+              "balance": 4000,
+              "gl_class": "income"
+            },
+            {
+              "date": "2026-06-08",
+              "payer_payee": "Synthetic Vendor",
+              "type": "Bill",
+              "reference": "B-1",
+              "description": "Repairs & Maintenance - Faucet",
+              "income": null,
+              "expense": 400,
+              "balance": 3600,
+              "gl_class": "expense_operating"
+            },
+            {
+              "date": "2026-06-10",
+              "payer_payee": "County",
+              "type": "Bill",
+              "reference": "B-2",
+              "description": "Property Tax - June",
+              "income": null,
+              "expense": 250,
+              "balance": 3350,
+              "gl_class": "passthrough_tax"
+            },
+            {
+              "date": "2026-06-20",
+              "payer_payee": "Owner",
+              "type": "Check",
+              "reference": "C-1",
+              "description": "Owner Distribution - June",
+              "income": null,
+              "expense": 1500,
+              "balance": 1850,
+              "gl_class": "owner_draw"
+            }
+          ]
+        },
+        {
+          "property_name": "Buckley Ave",
+          "beginning_balance": 500,
+          "ending_balance": 1550,
+          "total_income": 2000,
+          "total_expense": 950,
+          "bills_due_total": 0,
+          "required_reserves": 200,
+          "work_order_estimates": 0,
+          "lines": [
+            {
+              "date": "2026-06-05",
+              "payer_payee": "Synthetic Resident 2",
+              "type": "Receipt",
+              "reference": "R-2",
+              "description": "Rent Income - June",
+              "income": 2000,
+              "expense": null,
+              "balance": 2500,
+              "gl_class": "income"
+            },
+            {
+              "date": "2026-06-12",
+              "payer_payee": "Synthetic Vendor",
+              "type": "Bill",
+              "reference": "B-3",
+              "description": "Repairs & Maintenance - Minor repair",
+              "income": null,
+              "expense": 150,
+              "balance": 2350,
+              "gl_class": "expense_operating"
+            },
+            {
+              "date": "2026-06-24",
+              "payer_payee": "Lender",
+              "type": "Bill",
+              "reference": "B-4",
+              "description": "Mortgage Interest - June",
+              "income": null,
+              "expense": 800,
+              "balance": 1550,
+              "gl_class": "debt_service"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

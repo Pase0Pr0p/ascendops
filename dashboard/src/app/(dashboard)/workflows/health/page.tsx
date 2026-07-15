@@ -394,7 +394,7 @@ export default function FleetHealthPage() {
                             <td className="py-2.5 pr-4 text-xs text-muted-foreground hidden sm:table-cell">
                               {row.lastFire
                                 ? formatRelative(new Date(row.lastFire).toISOString())
-                                : <span className="text-muted-foreground/50">—</span>}
+                                : <span className="text-muted-foreground/50">·</span>}
                             </td>
                             <td className="py-2.5 pr-4 text-xs text-muted-foreground hidden md:table-cell">
                               {row.firesLast24h > 0 ? (

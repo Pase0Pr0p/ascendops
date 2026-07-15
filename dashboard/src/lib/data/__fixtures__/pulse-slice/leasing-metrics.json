@@ -1,0 +1,70 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every name, unit, and number is invented — no real tenant data (§6.6). The `live` block below is HAND-COMPUTED from `records` so the §6.4 invariant test is not circular.",
+  "lane": "leasing",
+  "generated_at": "2026-07-05T06:45:00-04:00",
+  "today": "2026-07-05",
+  "live": {
+    "applications": {
+      "total": 6,
+      "submitted_30d": 4,
+      "submitted_90d": 5,
+      "status_breakdown": {
+        "approved": 2,
+        "denied": 1,
+        "decision_pending": 1,
+        "canceled": 1,
+        "new": 1
+      },
+      "converting_now": 1,
+      "approval_rate_pct": 66.7,
+      "median_days_to_decision": 3
+    },
+    "funnel": [
+      { "stage": "Submitted (30d)", "count": 4 },
+      { "stage": "Decision pending", "count": 1 },
+      { "stage": "Approved", "count": 2 },
+      { "stage": "Converting to lease", "count": 1 }
+    ],
+    "occupancy": {
+      "status": "live",
+      "occupied_units": 4,
+      "vacant_available": 2,
+      "on_notice": 1,
+      "unit_basis": 7,
+      "occupancy_rate_pct": 57.1,
+      "vacancy_rate_pct": 42.9,
+      "basis_note": "unit-level rent-roll rows (building % summaries excluded)"
+    },
+    "renewal_retention": {
+      "status": "live",
+      "intake_window_rows": 3,
+      "by_status": {
+        "not_started": 2,
+        "out_for_signing": 1
+      }
+    }
+  },
+  "records": [
+    { "kind": "unit", "property_id": 101, "property_name": "Moss Dr", "unit": "1102 Moss Dr Unit A", "tenant_name": "Casey Lane", "occupancy_status": "occupied", "status_raw": "Current", "rent": 1450 },
+    { "kind": "unit", "property_id": 101, "property_name": "Moss Dr", "unit": "1104 Moss Dr Unit B", "tenant_name": "Riley Brooks", "occupancy_status": "occupied", "status_raw": "Current", "rent": 1390 },
+    { "kind": "unit", "property_id": 101, "property_name": "Moss Dr", "unit": "1106 Moss Dr Unit C", "tenant_name": null, "occupancy_status": "vacant_available", "status_raw": "Vacant-Unrented", "rent": null },
+    { "kind": "unit", "property_id": 102, "property_name": "Buckley Ave", "unit": "508 Buckley Ave", "tenant_name": "Avery Stone", "occupancy_status": "occupied", "status_raw": "Current", "rent": 1825 },
+    { "kind": "unit", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 1", "tenant_name": null, "occupancy_status": "vacant_available", "status_raw": "Vacant-Rented", "rent": 1100 },
+    { "kind": "unit", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 2", "tenant_name": "Jamie Fox", "occupancy_status": "on_notice", "status_raw": "Notice-Unrented", "rent": 1150 },
+    { "kind": "unit", "property_id": 104, "property_name": "Willow Park", "unit": "77 Willow Park Unit 5", "tenant_name": "Morgan Hale", "occupancy_status": "occupied", "status_raw": "Current", "rent": 990 },
+    { "kind": "application", "property_id": 101, "property_name": "Moss Dr", "unit": "1106 Moss Dr Unit C", "applicant_name": "Sam Reyes", "status": "approved", "converting": true, "submitted": "2026-06-20", "days_to_decision": 3 },
+    { "kind": "application", "property_id": 101, "property_name": "Moss Dr", "unit": "1106 Moss Dr Unit C", "applicant_name": "Drew Park", "status": "denied", "converting": false, "submitted": "2026-04-10", "days_to_decision": 5 },
+    { "kind": "application", "property_id": 102, "property_name": "Buckley Ave", "unit": "508 Buckley Ave", "applicant_name": "Kai Moreno", "status": "decision_pending", "converting": false, "submitted": "2026-06-28", "days_to_decision": null },
+    { "kind": "application", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 1", "applicant_name": "Rowan Ellis", "status": "approved", "converting": false, "submitted": "2026-03-01", "days_to_decision": 2 },
+    { "kind": "application", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 1", "applicant_name": "Blair Quinn", "status": "canceled", "converting": false, "submitted": "2026-06-10", "days_to_decision": null },
+    { "kind": "application", "property_id": 104, "property_name": "Willow Park", "unit": "77 Willow Park Unit 2", "applicant_name": "Ash Bennett", "status": "new", "converting": false, "submitted": "2026-07-03", "days_to_decision": null },
+    { "kind": "renewal", "property_id": 101, "property_name": "Moss Dr", "unit": "1104 Moss Dr Unit B", "tenant_name": "Riley Brooks", "status": "not_started", "lease_expiry": "2026-08-31" },
+    { "kind": "renewal", "property_id": 102, "property_name": "Buckley Ave", "unit": "508 Buckley Ave", "tenant_name": "Avery Stone", "status": "out_for_signing", "lease_expiry": "2026-09-15" },
+    { "kind": "renewal", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 2", "tenant_name": "Jamie Fox", "status": "not_started", "lease_expiry": "2026-08-01" }
+  ],
+  "needs_verification": {},
+  "coming_soon": {
+    "speed_to_lead": { "needs": "lead-inquiry timestamps (leasing CRM / guest-card feed)" },
+    "days_on_market": { "needs": "per-unit listing/list-date (derivable next pass)" }
+  }
+}

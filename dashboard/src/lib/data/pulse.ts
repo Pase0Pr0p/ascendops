@@ -11,6 +11,18 @@
 import fs from 'fs';
 import path from 'path';
 
+// Committed synthetic fixtures (no real tenant data) used for PULSE_DEMO=1
+// and by the §6.4 invariant tests. Never mix these with real snapshots.
+import leasingFixture from './__fixtures__/pulse-slice/leasing-metrics.json';
+import maintenanceFixture from './__fixtures__/pulse-slice/maintenance-metrics.json';
+import financeFixture from './__fixtures__/pulse-slice/finance-metrics.json';
+import turnsFixture from './__fixtures__/pulse-slice/turns-metrics.json';
+import renewalsFixture from './__fixtures__/pulse-slice/renewals-metrics.json';
+import evictionsFixture from './__fixtures__/pulse-slice/evictions-metrics.json';
+import entitiesFixture from './__fixtures__/pulse-slice/entities.json';
+import ownerFinancialsFixture from './__fixtures__/pulse-slice/owner-financials.json';
+import assetMetricsFixture from './__fixtures__/pulse-slice/asset-metrics.json';
+import ownerStatementsFixture from './__fixtures__/pulse-slice/owner-statements.json';
 // Type-only import (erased at runtime — no import cycle): the OV-1 + asset-feed
 // snapshot shapes live with the owner math in owner-aggregate.ts (§8.1 single
 // module).
@@ -434,40 +446,52 @@ function read<T>(file: string): T | null {
   }
 }
 
-// Pulse renders from the member's own gitignored .pulse-data/ snapshots, or an
-// empty-state when that dir is absent (fresh pull). There is no bundled demo
-// data — every getter reads the member source and returns null until configured.
+// Demo mode: PULSE_DEMO=1 serves the committed synthetic fixtures so the full
+// slice UX (records + registry + scoping) is demoable without live data. The
+// page shows an explicit "synthetic demo data" badge — fixture numbers must
+// never be mistakable for real ones.
+export const isPulseDemo = () => process.env.PULSE_DEMO === '1';
+
 export const getLeasingMetrics = (): LeasingMetrics | null =>
-  read<LeasingMetrics>('leasing-metrics.json');
+  isPulseDemo() ? (leasingFixture as unknown as LeasingMetrics) : read<LeasingMetrics>('leasing-metrics.json');
 export const getMaintenanceMetrics = (): MaintenanceMetrics | null =>
-  read<MaintenanceMetrics>('maintenance-metrics.json');
+  isPulseDemo() ? (maintenanceFixture as unknown as MaintenanceMetrics) : read<MaintenanceMetrics>('maintenance-metrics.json');
 export const getFinanceMetrics = (): FinanceMetrics | null =>
-  read<FinanceMetrics>('finance-metrics.json');
+  isPulseDemo() ? (financeFixture as unknown as FinanceMetrics) : read<FinanceMetrics>('finance-metrics.json');
 export const getTurnsMetrics = (): TurnsMetrics | null =>
-  read<TurnsMetrics>('turns-metrics.json');
+  isPulseDemo() ? (turnsFixture as unknown as TurnsMetrics) : read<TurnsMetrics>('turns-metrics.json');
 export const getRenewalsMetrics = (): RenewalsMetrics | null =>
-  read<RenewalsMetrics>('renewals-metrics.json');
+  isPulseDemo() ? (renewalsFixture as unknown as RenewalsMetrics) : read<RenewalsMetrics>('renewals-metrics.json');
 export const getEvictionsMetrics = (): EvictionsMetrics | null =>
-  read<EvictionsMetrics>('evictions-metrics.json');
+  isPulseDemo() ? (evictionsFixture as unknown as EvictionsMetrics) : read<EvictionsMetrics>('evictions-metrics.json');
 export const getEntities = (): EntityRegistry | null =>
-  read<EntityRegistry>('entities.json');
+  isPulseDemo() ? (entitiesFixture as unknown as EntityRegistry) : read<EntityRegistry>('entities.json');
 
-// OV-1 per-property financial spine snapshot (owner dashboard §5). Absent (null)
-// until the member populates .pulse-data — the owner route renders an honest
-// "data pending" shell in that case, never fabricated numbers (§8 owner-truth).
+// OV-1 per-property financial spine snapshot (owner dashboard §5). Same demo /
+// .pulse-data pattern as the lane snapshots. Absent (null) until OV-1 lands
+// live — the owner route renders an honest "data pending" shell in that case,
+// never fabricated numbers (§8 owner-truth).
 export const getOwnerFinancials = (): OwnerFinancialsSnapshot | null =>
-  read<OwnerFinancialsSnapshot>('owner-financials.json');
+  isPulseDemo()
+    ? (ownerFinancialsFixture as unknown as OwnerFinancialsSnapshot)
+    : read<OwnerFinancialsSnapshot>('owner-financials.json');
 
-// AL-2 asset-metrics snapshot (AVM value + market rent). Absent (null) until the
-// member's bounded pull runs — the value/rent cards stay honest ComingSoon in
-// that case (§8.2), never fabricated. asset-metrics.json is gitignored (.pulse-data).
+// AL-2 asset-metrics snapshot (RentCast AVM value + market rent). Same demo /
+// .pulse-data pattern as the lane snapshots; absent (null) until the bounded
+// RentCast pull runs — the value/rent cards stay honest ComingSoon in that case
+// (§8.2), never fabricated. Real asset-metrics.json is gitignored (.pulse-data).
 export const getAssetMetrics = (): AssetMetricsSnapshot | null =>
-  read<AssetMetricsSnapshot>('asset-metrics.json');
+  isPulseDemo()
+    ? (assetMetricsFixture as unknown as AssetMetricsSnapshot)
+    : read<AssetMetricsSnapshot>('asset-metrics.json');
 
-// A7 owner-statement reconciliation feed. Real data lives in the member's
-// .pulse-data and is server-read only; absent (null) until configured.
+// A7 owner-statement reconciliation feed. Real data lives in .pulse-data and is
+// server-read only. Demo mode uses committed synthetic owner statements matched
+// to the synthetic owner-financials fixture.
 export const getOwnerStatements = (): OwnerStatementFeed | null =>
-  read<OwnerStatementFeed>('owner-statements.json');
+  isPulseDemo()
+    ? (ownerStatementsFixture as unknown as OwnerStatementFeed)
+    : read<OwnerStatementFeed>('owner-statements.json');
 
 // Pretty label for a coming-soon / needs-source slot key.
 export function humanizeKey(k: string): string {

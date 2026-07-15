@@ -144,7 +144,7 @@ export async function POST(
           success: true,
           action,
           agent: decoded,
-          output: `${registryMessage}; daemon not running — agent will start when daemon starts`,
+          output: `${registryMessage}; daemon not running, agent will start when daemon starts`,
         });
       }
       console.error(`[api/agents/${decoded}/lifecycle] POST IPC error (${action}):`, ipcResult.error);

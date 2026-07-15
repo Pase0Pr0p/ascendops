@@ -82,7 +82,8 @@ export async function middleware(request: NextRequest) {
     pathname === '/api/brand' ||
     pathname.startsWith('/_next') ||
     pathname === '/favicon.ico' ||
-    pathname === '/api/workflows/health'
+    pathname === '/api/workflows/health' ||
+    pathname.startsWith('/owner/status/')
   ) {
     const response = NextResponse.next();
     response.headers.set('Access-Control-Allow-Origin', corsOrigin);
