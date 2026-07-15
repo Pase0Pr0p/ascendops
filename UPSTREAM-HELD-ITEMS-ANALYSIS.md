@@ -123,3 +123,28 @@ The commit touches **~51 `src/` files**. The conflict surface is **asymmetric**:
 2. Item 2: OK with roster-driven agent-name lint (no roster → no lint) as the default?
 
 On your go for either, each lands as its own reviewed PR — item 2 with the conflict resolution called out above.
+
+---
+
+## Final Decisions (2026-07-15, with upstream-fleet input)
+
+The upstream AscendOps fleet reviewed this and shared **lived experience** (both commits are live in their public repo). Two lessons they added that this analysis originally missed, now incorporated:
+
+- **Item 1 — the base-template gutting (their lesson):** the regeneration strips `templates/agent/` down to ~2 skill stubs, deleting ~35 skills including core operational ones. Upstream had to immediately follow it with corrective commits ("Restore canonical agent template skills" + a 158-file "Restore template completeness contract") so a freshly scaffolded agent is not crippled. **The real cost is the base-template stripping, not the persona additions.** If adopted, it must be paired with the completeness restore *in the same change*.
+- **Item 2 — the roster lint fails OPEN (their harder flag):** the roster-driven agent-name lint gives **no** agent-name lint at all if a deployment does not pass its own roster. Do not rely on the default — wire the roster explicitly and guard against an empty roster in a real environment.
+
+### Decisions
+
+| Item | Decision | Rationale |
+|------|----------|-----------|
+| **1 — Persona regeneration** | **SKIP (for now)** | We are not standardizing on the persona catalog yet, and we are scaffolding a new agent (code reviewer) right now, which needs the base template fully skilled. We already hold the stripping and already merged the completeness contract, so our base template is intact. Revisit only if we standardize on personas — and then pair it with the completeness restore. Existing agents unaffected either way. |
+| **2 — Framework batch-1** | **PULL, as a careful sequenced hand-merge** | High value (fleet-wide SSN redaction, hook hardening, CI, opencode runtime), benign scrub. |
+
+### Item 2 execution plan
+1. Take the **PTY + opencode layer clean** (pure addition, no overlap).
+2. **Hand-merge the bus SSN wiring** against our utility-bill plumbing (shared message/event/task paths), timed against a **stable point** in the utility-bill build — not into a moving target. Clean parts can land ahead.
+3. **Restore the `redact-ssn` drift-guard test** off the canonical `ssn-redaction` module this commit carries.
+4. **Wire the Paseo roster explicitly** into comms-lint + add a guard that **errors on an empty roster** in a real environment, so the agent-name lint never fails open.
+5. Lands as its own reviewed PR.
+
+**Standing rule preserved throughout:** cherry-pick only, no bulk merge; Paseo business logic isolated and protected.
