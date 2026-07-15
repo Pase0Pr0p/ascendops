@@ -21,11 +21,11 @@ triggers: ["upstream check", "framework update", "check upstream", "upstream aut
 
 ## Scope (worktree-aware)
 
-This skill operates EXCLUSIVELY at the canonical framework root (`$CTX_FRAMEWORK_ROOT`). The `upstream` git remote is only tracked at canonical — not in per-agent worktrees. Every bash block in this skill starts with `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"` to guarantee correct cwd; each shell invocation in an agent session is a fresh shell. Running this skill from a per-agent worktree would either fail the fetch (no `upstream` remote) or fetch into the wrong tree.
+This skill operates EXCLUSIVELY at the canonical framework root (`$CTX_FRAMEWORK_ROOT`). The `upstream` git remote is only tracked at canonical - not in per-agent worktrees. Every bash block in this skill starts with `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"` to guarantee correct cwd; each shell invocation in an agent session is a fresh shell. Running this skill from a per-agent worktree would either fail the fetch (no `upstream` remote) or fetch into the wrong tree.
 
 ## Procedure
 
-### Step 1 — Fetch and inspect
+### Step 1 - Fetch and inspect
 ```bash
 cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"
 cortextos bus check-upstream
@@ -39,7 +39,7 @@ git fetch upstream main
 git log --oneline HEAD..upstream/main
 ```
 
-### Step 2 — Classify each commit
+### Step 2 - Classify each commit
 For each new commit, read the subject and the diff:
 ```bash
 cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"
@@ -56,19 +56,19 @@ Classification buckets:
 | **feature** | `feat(...)`, `feat:`, `new:` | Do NOT apply. Route to [ORCHESTRATOR] for approval. |
 | **mixed** | Any commit that contains multiple fix/feat changes or that is ambiguous | Route to [ORCHESTRATOR]. |
 
-### Step 3 — Check touched paths (HARD GUARDRAIL)
+### Step 3 - Check touched paths (HARD GUARDRAIL)
 For EVERY new commit, scan the diff for touched paths. If ANY of the new commits touch any of these paths, **do NOT auto-apply anything**, flag the whole batch to [ORCHESTRATOR], and stop:
 
-- `orgs/` — multi-tenant configuration, never auto-merge
-- `**/.env*` — credentials and secrets
+- `orgs/` - multi-tenant configuration, never auto-merge
+- `**/.env*` - credentials and secrets
 - `**/memory/` (agent memory subfolders)
 - `**/MEMORY.md` (agent-level long-term memory)
-- `community/skills/` — community skill catalog changes that affect running agents
-- `community/agents/` — community agent templates that affect running agents
+- `community/skills/` - community skill catalog changes that affect running agents
+- `community/agents/` - community agent templates that affect running agents
 
 When flagging: collect the commit SHAs, commit messages, and touched paths, and send them to [ORCHESTRATOR] via `cortextos bus send-message [ORCHESTRATOR] normal '<summary>'`. Do not apply.
 
-### Step 4 — Apply safe bugfix / docs / chore commits
+### Step 4 - Apply safe bugfix / docs / chore commits
 If all new commits are pure bugfix or docs/chore AND none touch the guardrail paths:
 ```bash
 cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"
@@ -82,9 +82,9 @@ cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"
 npm run build
 npm test
 ```
-Both must succeed. If either fails, DO NOT revert silently — report the failure to [ORCHESTRATOR] with the full error output and wait for instructions. The framework remains in its applied state; [ORCHESTRATOR] will decide whether to revert or patch.
+Both must succeed. If either fails, DO NOT revert silently - report the failure to [ORCHESTRATOR] with the full error output and wait for instructions. The framework remains in its applied state; [ORCHESTRATOR] will decide whether to revert or patch.
 
-### Step 5 — Handle feature or mixed batches (no apply)
+### Step 5 - Handle feature or mixed batches (no apply)
 If any new commit is feature or mixed but all paths are safe:
 - Do NOT run `--apply`
 - Send [ORCHESTRATOR] a summary message containing:
@@ -93,14 +93,14 @@ If any new commit is feature or mixed but all paths are safe:
   - Your recommendation: apply as-is, hold for user review, or request clarification
 - Wait for [ORCHESTRATOR] to route to the user. The cron exits after sending the message.
 
-### Step 6 — Report to [ORCHESTRATOR] on success
+### Step 6 - Report to [ORCHESTRATOR] on success
 When a bugfix batch is successfully applied and the build + tests are green:
 ```bash
 cortextos bus send-message [ORCHESTRATOR] normal 'Framework upstream auto-update YYYY-MM-DD: applied N commits. Build + test green. Details: ...'
 ```
 Include the commit list and any interesting touched paths (e.g. dist/cli.js rebuilt, specific src/ modules touched).
 
-### Step 7 — Log and record (run this step ALWAYS, even for noop)
+### Step 7 - Log and record (run this step ALWAYS, even for noop)
 ```bash
 cortextos bus create-task "framework-upstream-check $(date +%Y-%m-%d)" --desc "Daily upstream check. Result: <applied N / flagged M / skipped K / noop>"
 cortextos bus log-event action framework_updated info --meta '{"applied":N,"flagged":M,"skipped":K,"noop":BOOL}'
@@ -108,7 +108,7 @@ cortextos bus log-event action framework_updated info --meta '{"applied":N,"flag
 
 Write a single-line entry to today's daily memory file describing the result.
 
-### Step 8 — Morning briefing hook
+### Step 8 - Morning briefing hook
 Include whatever was applied or flagged overnight from Step 7's memory entry in the next morning brief. Users should see the result in their morning summary, not have to ask.
 
 ## Failure Modes

@@ -24,14 +24,14 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
 3. Read org knowledge base: `../../knowledge.md`
 4. Discover available skills: `cortextos bus list-skills --format text`
 5. Discover active agents: `cortextos bus list-agents`
-6. **Crons are daemon-managed.** External crons auto-load from `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json` on daemon start; you do not need to restore them. Use `cortextos bus list-crons $CTX_AGENT_NAME` to confirm. Do NOT use `CronCreate` or `/loop` — those are session-only and won't survive restarts.
+6. **Crons are daemon-managed.** External crons auto-load from `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json` on daemon start; you do not need to restore them. Use `cortextos bus list-crons $CTX_AGENT_NAME` to confirm. Do NOT use `CronCreate` or `/loop` - those are session-only and won't survive restarts.
 7. Check today's memory file for in-progress work
 8. If resuming a task, query KB: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
 9. Check inbox: `cortextos bus check-inbox`
 10. Update heartbeat: `cortextos bus update-heartbeat "online"`
 11. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 12. Write session start entry to daily memory
-13. Send full online status — **only AFTER crons are confirmed set**
+13. Send full online status - **only AFTER crons are confirmed set**
 
 ## Task Workflow
 
@@ -49,15 +49,15 @@ TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
 ## Contract-at-dispatch (load-bearing)
 
-Every non-trivial dispatch you SEND — to a subagent (Agent tool), a spawned worker, or a peer agent (bus message handing off a task) — must follow the 4-part structure from the durable spec at `orgs/ascendops/docs/durable/subagent-prompt-structure-2026-05-24.md`:
+Every non-trivial dispatch you SEND - to a subagent (Agent tool), a spawned worker, or a peer agent (bus message handing off a task) - must follow the 4-part structure from the durable spec at `your org internal docs`:
 
-1. **Index-doc framing** — files to read with "why" annotations, not inlined docs
-2. **High-level workflow steps** — outcome-oriented, not bash-by-bash
-3. **Validation loop** — proof-not-word baked in (exit codes, line counts, `git diff --stat`)
-4. **Past + future contracts (KEYSTONE)** — input shape + output shape + explicit ownership of edge cases
+1. **Index-doc framing** - files to read with "why" annotations, not inlined docs
+2. **High-level workflow steps** - outcome-oriented, not bash-by-bash
+3. **Validation loop** - proof-not-word baked in (exit codes, line counts, `git diff --stat`)
+4. **Past + future contracts (KEYSTONE)** - input shape + output shape + explicit ownership of edge cases
    - **Research artifact sub-bullet (v2)**: include `RESEARCH_ARTIFACT_PATH=<repo-relative-path>.md` when the dispatch involves research. Subagent writes raw facts there (URLs, code excerpts, line numbers, quotes); main-agent reads on demand. Keeps facts addressable without polluting context. See canonical spec §Part 4 sub-bullet for the artifact file format.
 
-**Receiver-side enforcement**: if you RECEIVE a dispatch missing any of the 4 parts (especially past/future contracts), PUSH BACK and request them before starting. Refusal-to-start is the enforcement — neither agent needs the orchestrator to police it.
+**Receiver-side enforcement**: if you RECEIVE a dispatch missing any of the 4 parts (especially past/future contracts), PUSH BACK and request them before starting. Refusal-to-start is the enforcement - neither agent needs the orchestrator to police it.
 
 This applies equally to spawn-worker dispatches and peer-agent dispatches. The durable spec carries the worked example.
 
@@ -140,20 +140,20 @@ cortextos bus send-message <orchestrator> normal 'Heartbeat:
 
 **Rules:**
 - Send this every heartbeat cycle, not just when something changes
-- Do NOT route routine task details through the orchestrator to the user — the user contacts you directly
+- Do NOT route routine task details through the orchestrator to the user - the user contacts you directly
 - Only escalate to the orchestrator when you need a decision, a handoff, or are genuinely blocked
 
 ---
 
 ## Crons
 
-External crons are daemon-managed and live in `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json`. The daemon scheduler owns dispatch — you do not register or restore crons in-session.
+External crons are daemon-managed and live in `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json`. The daemon scheduler owns dispatch - you do not register or restore crons in-session.
 
 **View:** `cortextos bus list-crons $CTX_AGENT_NAME`
 **Add:** `cortextos bus add-cron $CTX_AGENT_NAME <name> <interval-or-cron-expr> <prompt>`
 **Remove:** `cortextos bus remove-cron $CTX_AGENT_NAME <name>`
 
-Do NOT use `CronCreate` or `/loop` — those are session-only and evaporate on restart.
+Do NOT use `CronCreate` or `/loop` - those are session-only and evaporate on restart.
 
 ---
 

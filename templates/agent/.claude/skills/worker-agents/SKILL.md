@@ -1,12 +1,12 @@
 ---
 name: worker-agents
-description: "You have a task that would benefit from running in a separate isolated Claude Code session — either because it is long-running and you do not want it to consume your context window, or because you want multiple pieces of work running in parallel that each require a full Claude Code session with its own tools, memory, and context (not just a subagent call). You will spawn one or more ephemeral worker sessions, give each a focused task, monitor their progress via the bus, and collect their outputs when done."
+description: "You have a task that would benefit from running in a separate isolated Claude Code session - either because it is long-running and you do not want it to consume your context window, or because you want multiple pieces of work running in parallel that each require a full Claude Code session with its own tools, memory, and context (not just a subagent call). You will spawn one or more ephemeral worker sessions, give each a focused task, monitor their progress via the bus, and collect their outputs when done."
 triggers: ["worker", "parallelize", "spawn worker", "spin up", "parallel work", "background task", "isolated session", "separate session", "long running task", "run in background", "parallel research", "multiple workers", "worker session", "spawn session", "full claude code session", "context window", "parallel tasks", "run simultaneously", "independent sessions"]
 ---
 
 # Worker Agents
 
-> Spawn ephemeral Claude Code sessions for parallelized long-running tasks. Workers get a scoped task, produce deliverables, and are cleaned up when done. Use when work requires a full independent Claude Code session — not just a subagent tool call.
+> Spawn ephemeral Claude Code sessions for parallelized long-running tasks. Workers get a scoped task, produce deliverables, and are cleaned up when done. Use when work requires a full independent Claude Code session - not just a subagent tool call.
 
 > Worker session spawn is fully implemented. Use `cortextos spawn-worker` to launch isolated Claude Code sessions for parallelized tasks.
 
@@ -32,7 +32,7 @@ triggers: ["worker", "parallelize", "spawn worker", "spin up", "parallel work", 
 | | Persistent Agent | Worker Agent |
 |---|---|---|
 | Lifetime | 24/7, survives restarts | Dies when task is done |
-| Identity | IDENTITY.md, SOUL.md, GOALS.md | None — just a task prompt |
+| Identity | IDENTITY.md, SOUL.md, GOALS.md | None - just a task prompt |
 | Heartbeat | Updates every 4h | None |
 | Crons | config.json scheduled tasks | None |
 | Inbox | Bus messages via check-inbox | Bus messages (optional) |
@@ -43,21 +43,21 @@ triggers: ["worker", "parallelize", "spawn worker", "spin up", "parallel work", 
 
 ## Contract-at-dispatch (load-bearing)
 
-Every non-trivial worker dispatch you SEND must follow the 4-part structure from the durable spec at `orgs/ascendops/docs/durable/subagent-prompt-structure-2026-05-24.md`:
+Every non-trivial worker dispatch you SEND must follow the 4-part structure from the durable spec at `your org internal docs`:
 
-1. **Index-doc framing** — files to read with "why" annotations, not inlined docs
-2. **High-level workflow steps** — outcome-oriented, not bash-by-bash
-3. **Validation loop** — proof-not-word baked in (exit codes, line counts, `git diff --stat`)
-4. **Past + future contracts (KEYSTONE)** — input shape + output shape + explicit ownership of edge cases
+1. **Index-doc framing** - files to read with "why" annotations, not inlined docs
+2. **High-level workflow steps** - outcome-oriented, not bash-by-bash
+3. **Validation loop** - proof-not-word baked in (exit codes, line counts, `git diff --stat`)
+4. **Past + future contracts (KEYSTONE)** - input shape + output shape + explicit ownership of edge cases
    - **Research artifact sub-bullet (v2)**: include `RESEARCH_ARTIFACT_PATH=<repo-relative-path>.md` when the dispatch involves research. Subagent writes raw facts there (URLs, code excerpts, line numbers, quotes); main-agent reads on demand. Keeps facts addressable without polluting context. See canonical spec §Part 4 sub-bullet for the artifact file format.
 
-**Receiver-side enforcement**: if you RECEIVE a dispatch missing any of the 4 parts (especially past/future contracts), PUSH BACK and request them before starting. Refusal-to-start is the enforcement — neither agent needs the orchestrator to police it.
+**Receiver-side enforcement**: if you RECEIVE a dispatch missing any of the 4 parts (especially past/future contracts), PUSH BACK and request them before starting. Refusal-to-start is the enforcement - neither agent needs the orchestrator to police it.
 
 This applies equally to spawn-worker dispatches (this skill) and peer-agent dispatches. The durable spec carries the worked example.
 
 ---
 
-## Workflow (Concepts — Implementation TBD)
+## Workflow (Concepts - Implementation TBD)
 
 ### Step 1: Scope the Work
 
@@ -80,7 +80,7 @@ The worker:
 - Runs `claude --dangerously-skip-permissions` in the given directory
 - Gets a bus identity (`CTX_AGENT_NAME=<worker-name>`) for two-way communication
 - Logs to `~/.cortextos/<instance>/logs/<worker-name>/stdout.log`
-- Is tracked by the daemon — use `cortextos list-workers` to monitor status
+- Is tracked by the daemon - use `cortextos list-workers` to monitor status
 
 ### Step 3: Inject Task Prompt
 

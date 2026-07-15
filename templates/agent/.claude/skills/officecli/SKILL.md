@@ -1,11 +1,11 @@
 ---
 name: officecli
 effort: low
-description: "Create, read, and edit Word (.docx), Excel (.xlsx), and PowerPoint (.pptx) files. Use when a task requires generating a report, analysis spreadsheet, or presentation. No Office installation needed — single binary, works offline."
+description: "Create, read, and edit Word (.docx), Excel (.xlsx), and PowerPoint (.pptx) files. Use when a task requires generating a report, analysis spreadsheet, or presentation. No Office installation needed - single binary, works offline."
 triggers: ["word document", "excel", "spreadsheet", "powerpoint", "presentation", "docx", "xlsx", "pptx", "generate report", "create report", "monthly report", "owner report", "work order report", "onboarding deck", "officecli", "office document"]
 ---
 
-# OfficeCLI — Word, Excel, PowerPoint from the Terminal
+# OfficeCLI - Word, Excel, PowerPoint from the Terminal
 
 > Create and edit Office documents without Microsoft Office. Single binary, no auth, no cloud. Works on any file the agent can read/write.
 
@@ -55,7 +55,7 @@ DOC=~/reports/owner-report-$(date +%Y-%m).docx
 
 # Title
 officecli add $DOC /body --type paragraph \
-  --prop text="AscendOps Monthly Report — $(date +%B\ %Y)" \
+  --prop text="AscendOps Monthly Report - $(date +%B\ %Y)" \
   --prop style=Heading1
 
 # Sections
@@ -134,7 +134,7 @@ officecli add $DECK / --type slide \
 # Content slide
 officecli add $DECK / --type slide --prop title="Your AI Agent Team"
 officecli add $DECK '/slide[2]' --type shape \
-  --prop text="• your orchestrator — Orchestrator\n• the PM agent — PM Specialist\n• your analyst — Analyst\n• your dev agent — Dev Agent" \
+  --prop text="• your orchestrator - Orchestrator\n• the PM agent - PM Specialist\n• your analyst - Analyst\n• your dev agent - Dev Agent" \
   --prop x=2cm --prop y=4cm --prop font=Arial --prop size=20
 
 # Live preview while building
@@ -181,10 +181,10 @@ officecli batch report.docx --input ops.json --force
 
 ## Tips
 
-- Use `view outline` before editing — cheaper than reading the full document
+- Use `view outline` before editing - cheaper than reading the full document
 - Use `--json` when the output will be parsed by code
-- `merge` is fastest for templated reports — create the template once, fill it each month
-- `watch` is useful when iterating on a presentation — live browser preview
+- `merge` is fastest for templated reports - create the template once, fill it each month
+- `watch` is useful when iterating on a presentation - live browser preview
 - Resident mode (`officecli open` → edit → `officecli close`) reduces per-operation latency for many sequential edits
 
 ---

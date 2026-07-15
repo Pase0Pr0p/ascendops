@@ -10,7 +10,7 @@ Check for cortextOS framework updates from the remote repository. Never auto-mer
 
 ## Scope (worktree-aware)
 
-This skill operates EXCLUSIVELY at the canonical framework root (`$CTX_FRAMEWORK_ROOT`). The `upstream` git remote is only tracked at canonical — not in per-agent worktrees. Every bash block in this skill starts with `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"` to guarantee correct cwd; each shell invocation in an agent session is a fresh shell. Running this skill from a per-agent worktree would either fail the fetch (no `upstream` remote) or fetch into the wrong tree.
+This skill operates EXCLUSIVELY at the canonical framework root (`$CTX_FRAMEWORK_ROOT`). The `upstream` git remote is only tracked at canonical - not in per-agent worktrees. Every bash block in this skill starts with `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"` to guarantee correct cwd; each shell invocation in an agent session is a fresh shell. Running this skill from a per-agent worktree would either fail the fetch (no `upstream` remote) or fetch into the wrong tree.
 
 ## When to Run
 
@@ -32,7 +32,7 @@ The script fetches from upstream and returns a JSON summary categorizing changes
 ### Step 2: If updates available
 
 1. Read the JSON output to understand what changed
-2. If `catalog_additions` array is present, note those new community items separately — surface them to user after the framework update conversation
+2. If `catalog_additions` array is present, note those new community items separately - surface them to user after the framework update conversation
 3. Read the actual diff: `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}" && git diff HEAD..upstream/main`
 4. Explain EVERY change in plain English to the user via Telegram
 5. Categorize: security fix, new feature, template change, breaking change
@@ -57,7 +57,7 @@ npm audit --audit-level=moderate
 ```
 
 If `npm audit` reports any moderate+ vulnerability:
-- **BLOCK** — do not proceed to build/test
+- **BLOCK** - do not proceed to build/test
 - Record advisory IDs, affected packages, and severity
 - Report to orchestrator: "Upstream merge blocked by npm audit: [details]. Manual resolution required."
 
@@ -65,7 +65,7 @@ This catches upstream merges that silently downgrade a dependency that was previ
 
 ### Step 5: Post-apply verification
 
-- Run `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}" && npm run build && npm test` — both must pass
+- Run `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}" && npm run build && npm test` - both must pass
 - Verify the merge was clean
 - Check if any agent bootstrap files need updating (template changes)
 - Report results to orchestrator
@@ -78,6 +78,6 @@ Requires `ecosystem.upstream_sync.enabled: true` in config.json.
 
 - NEVER auto-merges
 - NEVER applies without explicit user approval
-- NEVER applies during night mode — check day_mode_start/day_mode_end from config.json before proceeding
+- NEVER applies during night mode - check day_mode_start/day_mode_end from config.json before proceeding
 - Always explains changes before applying
 - Warns about breaking changes or template modifications
