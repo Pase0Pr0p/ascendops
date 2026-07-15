@@ -4,6 +4,7 @@
   "startup_delay": 0,
   "max_session_seconds": 255600,
   "max_crashes_per_day": 10,
+  "tier": "sonnet",
   "working_directory": "",
   "timezone": "",
   "crons": [
@@ -11,13 +12,7 @@
       "name": "heartbeat",
       "type": "recurring",
       "interval": "4h",
-      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, scan for new work orders, and flag anything stale."
-    },
-    {
-      "name": "morning-scan",
-      "type": "recurring",
-      "interval": "24h",
-      "prompt": "Read and follow .claude/skills/pm/pm-morning-scan/SKILL.md. Generate the morning work order report and send it to the property manager."
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority maintenance task (work-order triage, vendor follow-up, documentation closeout, or roster cleanup)."
     }
   ],
   "ecosystem": {

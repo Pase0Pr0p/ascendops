@@ -134,7 +134,7 @@ officecli add $DECK / --type slide \
 # Content slide
 officecli add $DECK / --type slide --prop title="Your AI Agent Team"
 officecli add $DECK '/slide[2]' --type shape \
-  --prop text="• your orchestrator — Orchestrator\n• the PM agent — PM Specialist\n• your analyst — Analyst\n• your dev agent — Dev Agent" \
+  --prop text="• an agent — Orchestrator\n• Blue — PM Specialist\n• an agent — Analyst\n• an agent — Dev Agent" \
   --prop x=2cm --prop y=4cm --prop font=Arial --prop size=20
 
 # Live preview while building

@@ -149,7 +149,7 @@ The integration eliminates manual re-entry — inspection findings land directly
 
 ## 7. TENANT-COMPLETED MOVE-IN INSPECTIONS
 
-the PM agent should know this workflow — it shifts documentation burden to the tenant and creates a legally signed baseline.
+Blue should know this workflow — it shifts documentation burden to the tenant and creates a legally signed baseline.
 
 ### How to Invite Tenant
 1. In zInspector web, go to Tenants page

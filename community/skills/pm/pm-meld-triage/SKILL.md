@@ -11,9 +11,9 @@ triggers: ["triage meld", "classify meld", "triage rules", "how urgent", "should
 
 ## Email Processing Rule (Critical)
 
-**New work orders** (same-day emails, fresh meld submissions): Triage immediately — read the meld, classify urgency, post a PM message or alert your approver as needed. **Never bulk-label and queue a fresh work order.**
+**New work orders** (same-day emails, fresh meld submissions): Triage immediately — read the meld, classify urgency, post a PM message or alert David as needed. **Never bulk-label and queue a fresh work order.**
 
-**Old notification emails** (historical backlog, activity on existing melds, same-day notifications for melds you've already processed): Bulk-label with your processed label (e.g. `your-processed-label`) and mark read. No triage required.
+**Old notification emails** (historical backlog, activity on existing melds, same-day notifications for melds you've already processed): Bulk-label `blue-processed` and mark read. No triage required.
 
 **How to distinguish**: Check the email date. Same-day = immediate triage. Older = bulk label.
 
@@ -27,7 +27,7 @@ Before classifying any meld, pull comments:
 python3 scripts/pm-get-comments.py <meld_id>
 ```
 
-A meld that looks unhandled from the subject may already have a vendor reply, scheduled appointment, or your regional contact note in the thread. **Triage on thread state, not title.**
+A meld that looks unhandled from the subject may already have a vendor reply, scheduled appointment, or Brittany note in the thread. **Triage on thread state, not title.**
 
 ---
 
@@ -35,8 +35,8 @@ A meld that looks unhandled from the subject may already have a vendor reply, sc
 
 | Level | Definition | Response |
 |-------|-----------|----------|
-| **Emergency** | Active safety/habitability threat | Telegram the owner immediately, any hour |
-| **High** | No heat, sewage, lock-out, water intrusion | Escalate to your orchestrator during day hours; wake the owner only if containment risk |
+| **Emergency** | Active safety/habitability threat | Telegram David immediately, any hour |
+| **High** | No heat, sewage, lock-out, water intrusion | Escalate to an agent during day hours; wake David only if containment risk |
 | **Normal** | Routine repair, appliance, cosmetic | Standard dispatch, SLA applies |
 | **Low** | Cosmetic, non-functional (e.g. paint, landscaping) | Batch in next morning scan |
 
@@ -44,11 +44,11 @@ A meld that looks unhandled from the subject may already have a vendor reply, sc
 
 ## Routing Rules
 
-### your special-routing region Melds → your regional contact
-Any meld tagged to a your special-routing region property goes to your regional contact, not the standard vendor dispatch queue.
+### Nashville Melds → Brittany
+Any meld tagged to a Nashville property goes to Brittany, not the standard vendor dispatch queue.
 
 ```
-→ cortextos bus send-message <orchestrator> normal "your special-routing region meld <id> — routing to your regional contact per protocol"
+→ cortextos bus send-message an agent normal "Nashville meld <id> — routing to Brittany per protocol"
 ```
 
 ### Standard Portfolio → Vendor Dispatch
@@ -61,14 +61,14 @@ All other melds follow normal vendor assignment flow.
 ### Pest Control
 Suppress pest control meld alerts **while a vendor search is open** for that meld.
 - Check: does the meld have a `vendor_assigned: null` and a pending vendor search event?
-- If yes: do not ping your orchestrator. The search is already in flight.
+- If yes: do not ping an agent. The search is already in flight.
 - If vendor search has been open >48h with no assignment: apply RULE_R1 (see meld-ops).
 
 ### Routine Follow-ups
 Do not re-alert on a meld that has:
 - An assigned vendor AND a scheduled date
-- A your regional contact note marked "handled" or "scheduled"
-- A comment from the PM agent within the last 6h
+- A Brittany note marked "handled" or "scheduled"
+- A comment from Blue within the last 6h
 
 ---
 
@@ -81,7 +81,7 @@ The following conditions **bypass all suppression rules** and escalate immediate
 - No hot water >24h
 - Gas smell or suspected leak
 - Lock-out (tenant cannot enter unit)
-- Fire or smoke (call 911 first, then the owner)
+- Fire or smoke (call 911 first, then David)
 
 **Override action:**
 ```bash
@@ -99,7 +99,7 @@ cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "URGENT: <meld_id> — <condit
 | Normal | 24h | 5 business days |
 | Low | 72h | 14 days |
 
-SLA clock starts from meld open timestamp, not from the PM agent's detection.
+SLA clock starts from meld open timestamp, not from Blue's detection.
 
 ---
 
@@ -109,8 +109,8 @@ Apply to any open meld regardless of priority, measured from meld open timestamp
 
 | Age | Flag | Action |
 |-----|------|--------|
-| ≥ 4 days open | **Approaching critical** | Include in morning scan report with age. Message your orchestrator if no vendor assigned. |
-| ≥ 5.5 days open | **Critical threshold** | Flag prominently in report. Message your orchestrator immediately regardless of time of day. Resident churn risk is active at this point. |
+| ≥ 4 days open | **Approaching critical** | Include in morning scan report with age. Message an agent if no vendor assigned. |
+| ≥ 5.5 days open | **Critical threshold** | Flag prominently in report. Message an agent immediately regardless of time of day. Resident churn risk is active at this point. |
 
 **Why 5.5 days:** Property Meld data shows that repairs exceeding 5.5 days drive the probability of a positive resident review to near zero. 46% of move-outs cite maintenance as a factor.
 
@@ -124,7 +124,7 @@ If meld description mentions: leak, flood, water coming in, ceiling drip, pipe b
 
 1. Classify as **High** minimum (Emergency if active/spreading)
 2. Pull thread immediately — check if tenant has already isolated source
-3. If no isolation confirmed: message your orchestrator to call tenant for containment steps
+3. If no isolation confirmed: message an agent to call tenant for containment steps
 4. Flag for same-day vendor regardless of day/hour
 
 ---
@@ -135,7 +135,7 @@ Make-ready melds (unit turnover prep) are time-sensitive when:
 - Move-in date is within 5 days
 - Lease is already signed
 
-Treat as **High** urgency. Route to your regional contact if your special-routing region; otherwise escalate to your orchestrator with move-in date.
+Treat as **High** urgency. Route to Brittany if Nashville; otherwise escalate to an agent with move-in date.
 
 ---
 
@@ -144,13 +144,13 @@ Treat as **High** urgency. Route to your regional contact if your special-routin
 ```
 Read thread
   → Already handled (vendor assigned + date set)?  → Log only, no action
-  → your special-routing region property?                            → Route to your regional contact
-  → Habitability override condition?               → Telegram the owner immediately
+  → Nashville property?                            → Route to Brittany
+  → Habitability override condition?               → Telegram David immediately
   → Pest control + vendor search open?             → Suppress alert
-  → Age ≥ 5.5 days?                               → Critical flag, message your orchestrator immediately
+  → Age ≥ 5.5 days?                               → Critical flag, message an agent immediately
   → Age ≥ 4 days?                                 → Approaching critical, include in report
-  → Emergency priority + no vendor 4h+?            → RULE_R2: Telegram the owner
-  → High priority?                                 → Message your orchestrator (day hours only)
+  → Emergency priority + no vendor 4h+?            → RULE_R2: Telegram David
+  → High priority?                                 → Message an agent (day hours only)
   → Normal/Low?                                    → Standard dispatch or batch
 ```
 
@@ -158,10 +158,10 @@ Read thread
 
 ## Copilot Threshold Logging (MANDATORY)
 
-Before sending any recommendation to the owner for approval, log the decision with a full reasoning trace:
+Before sending any recommendation to David for approval, log the decision with a full reasoning trace:
 
 ```bash
-cortextos bus log-event quality decision_presented info \
+cortextos bus log-event quality blue_decision_presented info \
   --meta "{
     \"category\": \"<category>\",
     \"meld_id\": \"<meld_id>\",
@@ -182,7 +182,7 @@ Examples: `["leak", "flooding"]`, `["no heat", "40F outside"]`, `["gas smell"]`
 Standard path:
 ```
 "habitability_override:no|yes"
-"special_routing_property:no|yes"
+"nashville_property:no|yes"
 "pest_control_suppressed:no|yes"
 "age_days:<N>"
 "age_flag:none|approaching_critical|critical"
@@ -191,7 +191,7 @@ Standard path:
 ```
 Stop the path at the first rule that terminates the decision (e.g., if habitability_override:yes, no need to log further rules).
 
-**confidence** — how certain the PM agent is about the recommendation:
+**confidence** — how certain Blue is about the recommendation:
 - `high` — clear match to existing rules, no ambiguity
 - `medium` — rule applies but some unknown (vendor availability, scope unclear)
 - `low` — novel situation, significant unknowns, or conflicting signals
@@ -210,7 +210,7 @@ Stop the path at the first rule that terminates the decision (e.g., if habitabil
 - Closing/canceling meld → `meld_closure`
 - Emergency dispatch → `emergency_dispatch`
 
-**Log first, send recommendation second.** Skipping this means the decision is invisible to your analyst and your accuracy score never accumulates.
+**Log first, send recommendation second.** Skipping this means the decision is invisible to an agent and your accuracy score never accumulates.
 
 ---
 
@@ -224,8 +224,8 @@ When a meld is awaiting tenant response (photos, troubleshooting answers) and no
 |-----|--------|-------|
 | Day 1 | Send PM message requesting photos/response | Standard intake SOP |
 | Day 2 | Send second PM follow-up | Substitute for SMS until A2P available |
-| Day 3 | Send third PM follow-up, then escalate to the owner regardless of response | Surface to the owner as needing direct involvement |
-| Day 4+ | the owner's direct involvement required | Do not continue self-resolving |
+| Day 3 | Send third PM follow-up, then escalate to David regardless of response | Surface to David as needing direct involvement |
+| Day 4+ | David's direct involvement required | Do not continue self-resolving |
 
 **Tracking:** Log first contact date in daily memory. Check elapsed days on each heartbeat/morning scan.
 
@@ -233,7 +233,7 @@ When a meld is awaiting tenant response (photos, troubleshooting answers) and no
 - When A2P SMS is live: Day 2 becomes an outbound text instead of PM message
 - When calling is available: Day 3 becomes a phone call instead of PM message
 
-**Apply to:** Any PENDING_ASSIGNMENT meld where the PM agent sent the initial photo/response request and tenant has not replied.
+**Apply to:** Any PENDING_ASSIGNMENT meld where Blue sent the initial photo/response request and tenant has not replied.
 
 ---
 

@@ -1,0 +1,27 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "tier": "sonnet",
+  "working_directory": "",
+  "timezone": "",
+  "turn_target_days": 10,
+  "inspection_sla_hours": 48,
+  "scope_sla_hours": 24,
+  "stale_stage_alert_days": 2,
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on the highest priority turnover task: intake move-out triggers, build or refine punch lists, track trade progress, QC completed items, or certify rent-ready units."
+    }
+  ],
+  "ecosystem": {
+    "local_version_control": {
+      "enabled": true
+    }
+  }
+}

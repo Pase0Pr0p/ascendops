@@ -29,7 +29,7 @@ From the output, note:
 |-------|-----------------|----------------|
 | Current status | `status` field | Is it already assigned, scheduled, or resolved? |
 | Vendor assigned | `vendor` or `assigned_to` | Is someone already on it? |
-| Last comment author | Last entry in `comments[]` | Did your regional contact or a vendor already respond? |
+| Last comment author | Last entry in `comments[]` | Did Brittany or a vendor already respond? |
 | Last comment timestamp | `comments[-1].created_at` | How recent is the last activity? |
 | Tenant last message | Scan `comments[]` for tenant author | Is tenant escalating, or satisfied? |
 | Scheduled date | `scheduled_date` or comment mention | Is an appointment already booked? |
@@ -39,7 +39,7 @@ From the output, note:
 ## Freshness Rule
 
 If the last comment is:
-- **< 6h old**: meld is actively managed — do not alert your orchestrator unless habitability override applies
+- **< 6h old**: meld is actively managed — do not alert an agent unless habitability override applies
 - **6–24h old**: may need follow-up — triage against urgency level
 - **> 24h old with no vendor**: flag for RULE_R1 review
 
@@ -49,7 +49,7 @@ If the last comment is:
 
 | Error | Meaning | Action |
 |-------|---------|--------|
-| Script exits non-zero | Session or login failure | Log `meld_poll_blocked`, message your orchestrator with stderr |
+| Script exits non-zero | Session or login failure | Log `meld_poll_blocked`, message an agent with stderr |
 | Empty `comments` array | Meld has no thread yet | Proceed to triage on meld metadata only |
 | `login` in redirect URL | Cookie expired | Script handles fresh login automatically; retry once |
 

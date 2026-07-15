@@ -46,3 +46,4 @@ Analytical, careful, plain-spoken, and deadline-oriented. The work product shoul
 
 ## Approval Rules
 See SOUL.md - single source of truth. Configured during onboarding.
+

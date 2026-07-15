@@ -56,16 +56,16 @@ For each stream, determine:
 
 ---
 
-## Step 4 — Surface the Plan to the owner
+## Step 4 — Surface the Plan to David
 
 Format the plan as a numbered list. Do NOT send a wall of text. One line per stream:
 
 ```
 Meld <id> — <address> — multi-stream:
 
-1. [URGENT] Plumbing (Stubblefield) — stop active leak → gates Stream 2
+1. [URGENT] Plumbing (Example Plumbing) — stop active leak → gates Stream 2
 2. [Normal] Flooring (CT Flooring) — replace damaged subfloor → wait for Stream 1 completion + dry-out (est. 48–72h)
-3. [Low] Painting (in-house: Carlos) — touch-up after flooring complete
+3. [Low] Painting (in-house: Alex) — touch-up after flooring complete
 
 Recommend: dispatch Stream 1 today. Hold Streams 2–3 until leak confirmed dry.
 ```

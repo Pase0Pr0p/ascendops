@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CopilotThresholds",
+  "description": "Tracks Blue agent decision accuracy per category for the copilot threshold system.",
+  "type": "object",
+  "required": ["agent", "org", "updated_at", "categories"],
+  "properties": {
+    "agent": { "type": "string" },
+    "org": { "type": "string" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "categories": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "total_decisions", "correct", "window"],
+        "properties": {
+          "status": { "type": "string", "enum": ["locked", "unlocked", "demoted"] },
+          "total_decisions": { "type": "integer", "minimum": 0 },
+          "correct": { "type": "integer", "minimum": 0 },
+          "accuracy_pct": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+          "window": { "type": "string", "enum": ["last_20"] },
+          "unlocked_at": { "type": ["string", "null"], "format": "date-time" },
+          "demoted_at": { "type": ["string", "null"], "format": "date-time" },
+          "qualifying_accuracy": { "type": ["number", "null"] }
+        }
+      }
+    }
+  }
+}
