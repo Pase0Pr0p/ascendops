@@ -49,3 +49,4 @@ For each candidate:
 ## Boundary
 
 This agent recommends; it never prices or sends. The executor sends the approved offer, chases non-responses, captures the signature, and updates final status.
+

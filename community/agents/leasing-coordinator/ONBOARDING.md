@@ -78,9 +78,26 @@ Which property management software do you use for leasing? Common ones:
   8. None yet — email + spreadsheets for now
 ```
 
-For each, follow the matching subsection (same patterns as the Maintenance Coordinator template — different keys). Common fields:
-- API key / web session credentials → `.env`
+For each, follow the matching subsection. Common fields:
+- API key / web-session credentials → `.env` or a captured-session file
 - Tenant universe import (CSV or API)
+
+### 3a. AppFolio
+AppFolio exposes no official public API for this surface. The integration runs through the `af` CLI (package: `cli-anything-appfolio`) — plain HTTP authenticated by a captured web-session cookie from the property manager's AppFolio login. No browser automation for day-to-day operations. Install via pipx from your platform operator's CLI source (a checkout path or git URL), then verify with `af --version`.
+
+Tell the property manager:
+```
+I read AppFolio (occupancies, leases, applications, units, reports) through your logged-in web session. One-time setup: log in to AppFolio in your browser on this machine, then I run the bundled session-capture helper — about a minute. The session expires periodically; recapture is the same one-minute routine and I'll flag it when needed.
+```
+
+The captured session is stored at `~/.claude/credentials/appfolio-session.json` (the capture helper writes it). Then verify end to end:
+```bash
+af probe
+```
+Note in `SYSTEM.md`: "PM platform: AppFolio (af CLI configured — captured session)." Full command surface, the dry-run write posture, and the recapture runbook: `.claude/skills/appfolio/SKILL.md`.
+
+### 3b. Other platforms
+Collect the API key / credentials → `.env` keyed by platform; note the platform in `SYSTEM.md`. If the platform has no API, fall back to CSV import + `[HUMAN]` tasks (see Troubleshooting).
 
 Save the chosen platform to `SYSTEM.md`.
 
@@ -200,6 +217,8 @@ Or just say "defaults are fine".
 
 Save to `SOUL.md` Custom Rules section.
 
+Also explain graduated autonomy: `copilot-thresholds.json` ships with every outward-facing decision category locked — everything routes through the property manager for approval at first. As presented-decision accuracy builds a track record (last-20 window), they can unlock categories one at a time; any correction re-locks the category. Two things never unlock regardless of accuracy: application denials (FCRA adverse action) and lease signing. See GUARDRAILS.md "Copilot Thresholds".
+
 ---
 
 ## Step 10: Property manager identity confirmation
@@ -263,5 +282,6 @@ The `.onboarded` marker is only created at Step 11. Anything short of that = res
 ## Troubleshooting
 
 - **Screening API returns "invalid key"** — tell the property manager: "That key looks wrong — regenerate from the screening service portal and paste the new one." Do not proceed until probe passes.
+- **AppFolio `af` commands fail with an auth / login-redirect error** — the captured session expired. Routine, not a blocker: ask the property manager to log in to AppFolio in their browser, re-run the bundled session-capture helper (~1 minute), then `af probe` and retry once. Never fall back to browser automation for day-to-day reads.
 - **PM software has no API** — fall back to CSV import + a `[HUMAN]` task `[HUMAN] Drop today's prospect/applicant CSV into agents/<name>/inbox/`. Document in `SYSTEM.md`.
 - **No SMS provider configured and customer wants SMS** — tell them: "I can queue a `[HUMAN]` task to set up Twilio / Telnyx tomorrow, or run Telegram-only for now."

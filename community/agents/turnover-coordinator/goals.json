@@ -1,0 +1,13 @@
+{
+  "focus": "Turnover coordination — intake move-out triggers, build PM-approved punch lists, sequence trades to minimize days-to-rent-ready, QC every must-fix with evidence, and certify rent-ready units",
+  "goals": [
+    "Start the day-0 clock within hours of possession confirmation and escalate missing inspection findings on schedule",
+    "Deliver a PM-approved punch list with wear-vs-damage recommendations within the configured scope SLA",
+    "Publish the dependency-sequenced critical-path timeline and keep it current through Stage 3",
+    "Verify every must-fix item with evidence and re-key last before any rent-ready certification",
+    "Hand off certified units to leasing with a complete completion record and track leasing ACK to close the pipeline"
+  ],
+  "bottleneck": "",
+  "updated_at": "",
+  "updated_by": ""
+}

@@ -1,6 +1,6 @@
 ---
 name: onboarding
-description: "You have just booted for the first time — there is no .onboarded flag in your state directory — and you need to set up your identity, connect your Telegram bot, configure your goals, and establish yourself within the org. Or onboarding was previously interrupted and the user has asked you to run it again. This skill walks you through every step of becoming a functioning agent. Do not skip steps. Do not start normal operations until onboarding is complete."
+description: "You have just booted for the first time - there is no .onboarded flag in your state directory - and you need to set up your identity, connect your Telegram bot, configure your goals, and establish yourself within the org. Or onboarding was previously interrupted and the user has asked you to run it again. This skill walks you through every step of becoming a functioning agent. Do not skip steps. Do not start normal operations until onboarding is complete."
 triggers: ["onboarding", "/onboarding", "first boot", "run onboarding", "setup", "not onboarded", "configure agent", "set up identity", "establish identity", "set goals", "onboard me", "start onboarding", "redo onboarding", "onboarding interrupted", "first time setup", "initial setup", "agent setup"]
 ---
 
@@ -10,20 +10,20 @@ This skill runs on first boot or when explicitly triggered. It is the only thing
 
 ---
 
-## Step 0: Bootstrap orientation (Phase 1 — for operators starting from zero)
+## Step 0: Bootstrap orientation (Phase 1 - for operators starting from zero)
 
 The full, doc-independent zero-to-fleet install sequence lives locally at
 `SKOOL-INSTALL.md` in the AscendOps project root (delivered by a successful
-install — do NOT rely on any external/Skool link, which may render blank). If the
+install - do NOT rely on any external/Skool link, which may render blank). If the
 operator hasn't completed bootstrap, point them there. The two phases:
 
-- **Phase 1 — Bootstrap (must be done before this skill matters):** create prereq
+- **Phase 1 - Bootstrap (must be done before this skill matters):** create prereq
   accounts (GitHub, Anthropic/Claude, Google, Telegram, optional Telnyx) → install
   Claude Code (`npm install -g @anthropic-ai/claude-code` + `claude login`) → run
   the installer (`curl -fsSL https://raw.githubusercontent.com/noogalabs/ascendops/main/install.mjs | node`)
   → open `~/ascendops` in Claude Code → create a Telegram bot per agent with auto
   chat_id capture (below).
-- **Phase 2 — Onboarding (this skill):** configure the agent for the operator's PM
+- **Phase 2 - Onboarding (this skill):** configure the agent for the operator's PM
   business + software.
 
 **Agent order is data-driven:** EA/orchestrator FIRST (it coordinates the rest),
@@ -38,14 +38,14 @@ For THIS agent, if its `.env` has no `BOT_TOKEN`/`CHAT_ID` yet:
 1. In Telegram, message **@BotFather** → `/newbot` → pick a display name → pick a
    username ending in `bot`. Copy the **BOT_TOKEN** it returns (looks like
    `123456789:AA...`).
-2. Auto-capture the chat_id (no manual hunting) — run:
+2. Auto-capture the chat_id (no manual hunting) - run:
    ```bash
    cortextos detect-chat-id --agent "$CTX_AGENT_NAME" --org "$CTX_ORG"
    ```
    Paste the token when asked, then **send `/start` to the bot `@username` it
    prints**. It captures `CHAT_ID` + `ALLOWED_USER` the moment you message the bot
    and writes `BOT_TOKEN`/`CHAT_ID`/`ALLOWED_USER` into this agent's `.env`
-   (chmod 600). It times out cleanly if you wait too long — just re-run it.
+   (chmod 600). It times out cleanly if you wait too long - just re-run it.
    (Interactive alternative: `cortextos bot create "$CTX_AGENT_NAME"`.)
 
 Only after the bot is wired does the rest of onboarding (below) run.
@@ -142,4 +142,4 @@ If a session crash or restart interrupts onboarding mid-way:
 - Do NOT send a Telegram message claiming you are online until onboarding is complete
 - Do NOT set up crons until IDENTITY.md and GOALS.md are written
 - Do NOT start processing user requests until `.onboarded` is written
-- The user is waiting — be efficient, but do not skip steps
+- The user is waiting - be efficient, but do not skip steps

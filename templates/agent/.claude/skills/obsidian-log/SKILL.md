@@ -1,7 +1,7 @@
 ---
 name: obsidian-log
 effort: low
-description: "Write key decisions, project milestones, and feedback rules back to the Obsidian vault. Use this after confirming any architectural decision, project milestone, or durable feedback rule — keeps the vault current with agent memory."
+description: "Write key decisions, project milestones, and feedback rules back to the Obsidian vault. Use this after confirming any architectural decision, project milestone, or durable feedback rule - keeps the vault current with agent memory."
 triggers: ["obsidian", "write to vault", "log decision", "save to obsidian", "update vault", "obsidian log", "decision log", "vault write-back", "milestone logged", "write back", "obsidian write"]
 ---
 
@@ -19,7 +19,7 @@ Trigger this skill when you:
 - Receive and confirm a durable feedback rule (e.g. "always do X, never do Y")
 - Finish an onboarding or knowledge distillation session
 
-Do NOT log every task or message — only decisions and milestones that should persist across agents and sessions.
+Do NOT log every task or message - only decisions and milestones that should persist across agents and sessions.
 
 ---
 
@@ -65,7 +65,7 @@ If the daily file does not exist yet, use `create` instead of `append`:
 TODAY=$(date +%Y-%m-%d)
 obsidian vault=[VAULT_NAME] create \
   path="01-Memory/decisions-${TODAY}.md" \
-  content="# Decisions — ${TODAY}
+  content="# Decisions - ${TODAY}
 
 ## [HH:MM] <Decision title>
 
@@ -84,7 +84,7 @@ Project milestones append to `02-Projects/<project-name>.md`:
 obsidian vault=[VAULT_NAME] append \
   path="02-Projects/<project-name>.md" \
   content="
-## Milestone — $(date +%Y-%m-%d)
+## Milestone - $(date +%Y-%m-%d)
 
 **What shipped:** <Feature or deliverable>
 **Status:** Complete
@@ -100,7 +100,7 @@ Feedback rules that should persist append to `01-Memory/agent-feedback.md`:
 obsidian vault=[VAULT_NAME] append \
   path="01-Memory/agent-feedback.md" \
   content="
-## $(date +%Y-%m-%d) — <Rule title>
+## $(date +%Y-%m-%d) - <Rule title>
 
 **Rule:** <The feedback rule>
 **Why:** <Reason given by user or inferred>
@@ -133,7 +133,7 @@ You can also add a daily cron entry to `config.json` to keep the KB automaticall
 
 ## Checklist Before Writing
 
-- [ ] Is this a decision, milestone, or feedback rule — not just a task update?
+- [ ] Is this a decision, milestone, or feedback rule - not just a task update?
 - [ ] Does the vault path match the correct date / project name?
 - [ ] Use `append` if the file exists, `create` with `overwrite` if starting fresh for the day
 - [ ] Ingest `01-Memory/` after writing so the KB reflects the new entry

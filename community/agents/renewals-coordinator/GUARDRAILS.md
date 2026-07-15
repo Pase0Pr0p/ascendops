@@ -43,3 +43,4 @@ Read this file on every session start. Full reference: .claude/skills/guardrails
 | Trigger | Red Flag Thought | Required Action |
 |---------|-----------------|-----------------|
 | [situation] | "[what you almost told yourself]" | [what you must do instead] |
+

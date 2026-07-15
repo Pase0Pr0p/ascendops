@@ -26,8 +26,8 @@ Safari is preferred on Mac — it uses the native browser you are already runnin
 Run when ANY of:
 -  returns non-OK status (401, 403, or )
 - Any snapcli command returns 401/403 on a normally working operation
-- the PM agent receives a comms-boundary escalation message about PM session death
-- your orchestrator explicitly requests session refresh
+- Blue receives a comms-boundary escalation message about PM session death
+- an agent explicitly requests session refresh
 
 Do NOT run if:
 - Nexus API (OAuth2) is the failing component — that has its own credentials and does not use cookies
@@ -76,7 +76,7 @@ PM_WEB_EMAIL="$PM_WEB_EMAIL" PM_WEB_PASSWORD="$PM_WEB_PASSWORD" python3 scripts/
 PM_WEB_EMAIL="$PM_WEB_EMAIL" PM_WEB_PASSWORD="$PM_WEB_PASSWORD" python3 scripts/pm-recapture-session-playwright.py
 ```
 
-All scripts are in `adapters/pm/scripts/` in your-pm-adapter-repo.
+All scripts are in `adapters/pm/scripts/` in noogalabs/snapcli.
 
 Script will:
 1. Launch Chrome with  if not already running with it
@@ -106,7 +106,7 @@ On success:
 ```bash
 cortextos bus log-event action pm_session_refreshed info \
   --meta '{"method":"ax-cdp","creds_path":"~/.claude/credentials/property-meld.json"}'
-cortextos bus send-message <orchestrator> normal 'PM session recaptured via AX+CDP. Snapcli operations restored.'
+cortextos bus send-message an agent normal 'PM session recaptured via AX+CDP. Snapcli operations restored.'
 ```
 
 On failure (script exits 1):
@@ -114,14 +114,14 @@ On failure (script exits 1):
 cortextos bus log-event action pm_session_recapture_failed warning \
   --meta '{"method":"ax-cdp","reason":"script exit 1"}'
 # Escalate immediately — human must intervene
-cortextos bus send-message <orchestrator> urgent 'PM session recapture FAILED. Manual intervention required. PM_WEB_EMAIL/PASSWORD may be wrong, PM may have changed login flow, or Accessibility permission may be missing.'
+cortextos bus send-message an agent urgent 'PM session recapture FAILED. Manual intervention required. PM_WEB_EMAIL/PASSWORD may be wrong, PM may have changed login flow, or Accessibility permission may be missing.'
 ```
 
 ---
 
 ## Comms Boundary
 
-If recapture fails, this is a hard escalation to your orchestrator + the owner. Do NOT retry more than once — a failed recapture usually means credentials are wrong or PM has changed their login flow, not a transient network issue. Retry once after 60s, then escalate.
+If recapture fails, this is a hard escalation to an agent + David. Do NOT retry more than once — a failed recapture usually means credentials are wrong or PM has changed their login flow, not a transient network issue. Retry once after 60s, then escalate.
 
 ---
 
@@ -130,7 +130,7 @@ If recapture fails, this is a hard escalation to your orchestrator + the owner. 
 Resume the operation that triggered the session check:
 - If triggered by a meld assignment: retry  or vendor assignment
 - If triggered by morning scan: re-run 
-- If triggered explicitly by your orchestrator: report success and stand by
+- If triggered explicitly by an agent: report success and stand by
 
 ---
 

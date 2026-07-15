@@ -1,6 +1,6 @@
 ---
 name: monday
-description: "CLI for Monday.com — read boards/items, update columns, post updates, register webhooks. Use when a task references a Monday board, turnover item, or work order that lives in Monday."
+description: "CLI for Monday.com - read boards/items, update columns, post updates, register webhooks. Use when a task references a Monday board, turnover item, or work order that lives in Monday."
 triggers: ["monday", "monday.com", "turnover board", "monday item", "monday work order", "register webhook", "change column value"]
 ---
 
@@ -16,7 +16,7 @@ export MONDAY_API_KEY=<api_key>   # from Monday > Developer > API v2 tab
 For webhook receiver:
 ```
 pip install fastapi uvicorn
-export MONDAY_WEBHOOK_AGENT=blue   # which agent receives webhook notifications
+export MONDAY_WEBHOOK_AGENT=<your-agent>   # which agent receives webhook notifications
 uvicorn cli_anything.monday.webhook_backend:app --host 0.0.0.0 --port 8080
 ```
 

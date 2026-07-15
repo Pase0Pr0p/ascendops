@@ -30,7 +30,7 @@ See AGENTS.md for the full session start checklist. Key steps:
 3. Read org knowledge base: `../../knowledge.md`
 4. Discover available skills: `ascendops bus list-skills --format text`
 5. Discover active agents: `ascendops bus list-agents`
-6. **Crons are daemon-managed** — use `ascendops bus list-crons $CTX_AGENT_NAME` to see what's scheduled (no manual restore needed)
+6. Verify crons are registered (daemon-managed — auto-loaded from `state/crons.json`, they survive restarts): `ascendops bus list-crons $CTX_AGENT_NAME`
 7. Check today's memory file for in-progress work
 8. If resuming a task, query KB: `ascendops bus kb-query "<task topic>" --org $CTX_ORG`
 9. Check inbox: `ascendops bus check-inbox`
@@ -55,27 +55,27 @@ TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
 ---
 
-## Maintenance Workflow Context
+## Leasing Workflow Context
 
 Your integrations are configured during onboarding (see ONBOARDING.md). Typical stack:
 
-- **PM software** (Property Meld / AppFolio / Buildium / Rentec / Yardi / custom) — work-order source of truth. Credentials in `.env` keyed by platform (`MELD_NEXUS_API_KEY`, `APPFOLIO_SESSION`, etc.).
-- **SMS** (Twilio or Telnyx) — resident and vendor communications. Credentials in `.env` (`TWILIO_*` or `TELNYX_*`). Optional — Telegram-only also works.
+- **PM software** (AppFolio / Buildium / Rent Manager / Yardi / custom) — occupancy, lease, and application source of truth. For AppFolio, the `af` CLI is the primary tool for ALL reads (see `.claude/skills/appfolio/SKILL.md` and ONBOARDING Step 3a); its session credential is a captured web-session file, not an `.env` key. Other platforms: credentials in `.env` keyed by platform.
+- **Screening service** (TransUnion SmartMove / RentPrep / RentSpree / AppFolio built-in / etc.) — API credentials in `.env` (`SCREENING_API_KEY`, etc.), or web-portal-only with a `[HUMAN]` dispatch task.
+- **SMS** (Twilio or Telnyx) — prospect and resident communications. Credentials in `.env` (`TWILIO_*` or `TELNYX_*`). Optional — Telegram/email-only also works.
 - **Unit roster** — populated at onboarding into `unit-roster.md` and indexed to the shared KB. Query with `ascendops bus kb-query "unit roster" --org $CTX_ORG`.
-- **Vendor roster** — populated at onboarding into `vendor-roster.md` and indexed to the private KB. Query before recommending or dispatching any vendor.
+- **Screening criteria** — captured at onboarding into `screening-criteria.md` and indexed to the private KB. Every application decision cites these criteria and nothing else.
 
-When a maintenance issue arrives:
-1. Acknowledge the work order or message
-2. Determine whether the issue is crystal clear; ask diagnostic questions if not
-3. Request photos by default
+When a new prospect inquiry arrives:
+1. Run the Fair-Housing screen FIRST (`fair-housing-guard`) — before drafting any reply
+2. Run intake triage (`lead-intake-triage`): dedupe against existing records, qualify against objective criteria, classify hot/warm/cold
+3. Respond within the prospect SLA — drafts route for property-manager approval while `prospect_comms` is locked
 4. Create a task in the bus
-5. Check KB for vendor preferences for this trade
-6. Stage the vendor dispatch + resident response for property-manager approval
-7. After approval, create or update the work order in the PM platform
-8. Coordinate scheduling and follow up until vendor and resident both confirm
-9. On closeout, verify required documentation (before/after photos, notes, hours) is present before treating the job as complete
+5. Route to a showing (`showing-coordination`) or an application invite, per the prospect's readiness
+6. Applications run the pipeline (`application-screening-pipeline`): completeness gate → screening dispatch → criteria triage → recommendation. The adverse-action decision is PERMANENTLY the property manager's
+7. Approved applications flow to lease prep (`lease-prep-esign`) and move-in (`movein-coordination`)
+8. At the other end of the lifecycle: renewals execute per `renewal-execution` (the number always comes from the renewals coordinator or the property manager — never you); notices to vacate run `ntv-moveout-handoff`; rent-ready units come back to market through `listing-vacancy-posting`
 
-Vendor-first scheduling: confirm the time with the vendor before promising a window to the resident. See SOUL.md for the full operating principles.
+Skill wiring for this workflow: `fair-housing-guard` (protected-class + steering screen on every inbound), `lead-intake-triage` (front gate: dedupe, qualify, classify), `showing-coordination` (confirm-before-promise, contact log, chase ladder), `application-screening-pipeline` (completeness gate → screening → recommendation), `lease-prep-esign` (variable verification + e-sign chase), `movein-coordination` (cleared funds + walkthrough before keys), `renewal-execution` (executes approved offers only), `ntv-moveout-handoff` (possession lock + turnover handoff), `listing-vacancy-posting` (draft-only listing packet), `appfolio` (the af CLI surface used throughout).
 
 ---
 
@@ -137,11 +137,12 @@ Always include `msg_id` as reply_to. Un-ACK'd messages redeliver after 5 min.
 
 ## Crons
 
-Crons are **daemon-managed** — loaded from `crons.json` on daemon start, no session-level restoration needed.
+Crons are **daemon-managed**. They live in `${CTX_ROOT}/state/$CTX_AGENT_NAME/crons.json` and are dispatched by the daemon. They survive agent restarts, context compactions, and daemon restarts automatically — there is no session-start restore step.
 
-**View:** `ascendops bus list-crons $CTX_AGENT_NAME`
-**Add:** `ascendops bus add-cron $CTX_AGENT_NAME <name> "<cron-or-interval>" "<text>"`
-**Remove:** `ascendops bus remove-cron $CTX_AGENT_NAME <name>`
+Verify: `ascendops bus list-crons $CTX_AGENT_NAME`
+Add: `ascendops bus add-cron $CTX_AGENT_NAME <name> <interval|cron-expr> "<prompt>"`
+
+Never use `/loop` or CronCreate for persistent recurring work — those are session-local and die on restart. Full docs: `.claude/skills/cron-management/SKILL.md`.
 
 ---
 
@@ -159,7 +160,7 @@ Always ask first: "Fresh restart or continue with conversation history?"
 ### Agent Lifecycle
 | Action | Command |
 |--------|---------|
-| Add agent | `ascendops add-agent <name> --template maintenance-coordinator` |
+| Add agent | `ascendops add-agent <name> --template leasing-coordinator` |
 | Start agent | `ascendops start <name>` |
 | Stop agent | `ascendops stop <name>` |
 | Check status | `ascendops status` |
@@ -181,5 +182,5 @@ Always ask first: "Fresh restart or continue with conversation history?"
 ### State
 | File | Purpose |
 |------|---------|
-| `config.json` | Crons, model tier, session limits |
-| `.env` | BOT_TOKEN, CHAT_ID, MELD_API_KEY, TWILIO_* |
+| `config.json` | Model tier, session limits, initial cron seed (runtime crons: `state/crons.json`, daemon-managed) |
+| `.env` | BOT_TOKEN, CHAT_ID, SCREENING_API_KEY, TWILIO_* |

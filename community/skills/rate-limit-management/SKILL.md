@@ -127,7 +127,7 @@ Recommended warn thresholds:
 
 **Your deployment config should define:**
 - Which specific crons to suspend at each tier
-- Whether to notify your orchestrator, the user, or other agents on tier transitions
+- Whether to notify an agent, the user, or other agents on tier transitions
 - Whether to pause only the rate-limited agent or also send signals to other agents
 - Any org-specific escalation steps
 

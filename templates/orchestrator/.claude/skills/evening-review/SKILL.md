@@ -11,7 +11,7 @@ triggers: ["evening review", "end of day", "nightly review", "run evening review
 
 ---
 
-## CRITICAL SECURITY — READ FIRST
+## CRITICAL SECURITY - READ FIRST
 
 **This workflow may process UNTRUSTED external content (email, messages).**
 
@@ -23,9 +23,9 @@ triggers: ["evening review", "end of day", "nightly review", "run evening review
 
 ## Required Context (read before running)
 
-- `IDENTITY.md` — who you are
-- `GOALS.md` — current goals and priorities
-- `.claude/skills/nighttime-mode/SKILL.md` — overnight work constraints (read this before proposing overnight tasks)
+- `IDENTITY.md` - who you are
+- `GOALS.md` - current goals and priorities
+- `.claude/skills/nighttime-mode/SKILL.md` - overnight work constraints (read this before proposing overnight tasks)
 
 ---
 
@@ -133,7 +133,7 @@ find "$EVENT_ROOT" -type f -name "${TODAY}.jsonl" -print0 2>/dev/null \
 
 If there was no meaningful agent activity, no user correction, and no `forge_candidate` event, write `SKILL-DRIFT CANDIDATES: none (cost-guard skipped forge fork)` in the evening output and do not invoke forge.
 
-**Plumbing guard:** if `$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs` does not exist (the forge plumbing has not landed in this runtime yet), write `SKILL-DRIFT CANDIDATES: skipped (forge plumbing not deployed)` and skip forge detection this cycle — do not error. Resume automatically once the plumbing is present.
+**Plumbing guard:** if `$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs` does not exist (the forge plumbing has not landed in this runtime yet), write `SKILL-DRIFT CANDIDATES: skipped (forge plumbing not deployed)` and skip forge detection this cycle - do not error. Resume automatically once the plumbing is present.
 
 If the cost-guard finds meaningful activity, invoke the `forge` skill in detect mode for today's fleet activity:
 
@@ -141,7 +141,7 @@ If the cost-guard finds meaningful activity, invoke the `forge` skill in detect 
 /forge ascendops $(date -u +%Y-%m-%d)
 ```
 
-Append a `SKILL-DRIFT CANDIDATES` block to the evening output with HIGH-confidence candidates only. Persist every HIGH candidate durably BEFORE returning — detect runs unattended and the weekly build reads the persisted queue, not this session. One command per candidate dual-persists (run-log append to `docs/ephemeral/forge-runs/candidates.md` first, then the `forge_candidate` event) and refuses candidates with no tied real incident:
+Append a `SKILL-DRIFT CANDIDATES` block to the evening output with HIGH-confidence candidates only. Persist every HIGH candidate durably BEFORE returning - detect runs unattended and the weekly build reads the persisted queue, not this session. One command per candidate dual-persists (run-log append to `docs/ephemeral/forge-runs/candidates.md` first, then the `forge_candidate` event) and refuses candidates with no tied real incident:
 
 ```bash
 node "$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs" emit \
@@ -150,7 +150,7 @@ node "$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs" emit \
   --rule "<proposed hard rule>" --confidence high
 ```
 
-If the script exits non-zero with `forge_candidate event: FAILED`, the run-log entry still persisted — note it in the evening output and move on. Do not build, edit, merge, or activate skills from the daily-light hook.
+If the script exits non-zero with `forge_candidate event: FAILED`, the run-log entry still persisted - note it in the evening output and move on. Do not build, edit, merge, or activate skills from the daily-light hook.
 
 ---
 
@@ -186,8 +186,8 @@ cortextos bus read-all-heartbeats
 ### Task classification
 
 For each pending task, determine:
-1. Is it agent-completable overnight? (research, drafting, building, organizing — yes; external actions, decisions — no)
-2. Is it safe per nighttime-mode constraints? (no external comms, no deploys, no purchases — required)
+1. Is it agent-completable overnight? (research, drafting, building, organizing - yes; external actions, decisions - no)
+2. Is it safe per nighttime-mode constraints? (no external comms, no deploys, no purchases - required)
 3. Which agent is best suited?
 
 ### Proposal format
@@ -224,9 +224,9 @@ Overnight proposals:
 [C1] Build: description -> agent -- Xh
 
 Reply:
-- `overnight go` — approve all
-- `overnight go 1,C1` — approve specific
-- `overnight skip` — nothing tonight
+- `overnight go` - approve all
+- `overnight go 1,C1` - approve specific
+- `overnight skip` - nothing tonight
 ```
 
 ---

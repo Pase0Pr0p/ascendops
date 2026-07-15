@@ -1,7 +1,7 @@
 ---
 name: skill-auto-discovery
 effort: low
-description: "After completing a complex task, check whether the sequence of steps used represents a recurring pattern worth codifying into a skill. Logs skill candidates to the bus for weekly review by your orchestrator."
+description: "After completing a complex task, check whether the sequence of steps used represents a recurring pattern worth codifying into a skill. Logs skill candidates to the bus for weekly review by an agent."
 triggers: ["skill candidate", "repeated pattern", "should this be a skill", "codify this", "skill discovery"]
 ---
 
@@ -59,7 +59,7 @@ Then write a one-line entry to today's memory file:
 - SKILL CANDIDATE: <proposed_name> — <description>. Evidence: <tasks>. Effort: <low/medium/high>
 ```
 
-Do NOT build the skill yourself. your orchestrator reviews candidates weekly and decides what to build.
+Do NOT build the skill yourself. an agent reviews candidates weekly and decides what to build.
 
 ---
 
@@ -71,10 +71,10 @@ On Monday morning, pull all skill_candidate events from the past 7 days:
 cortextos bus list-events --type quality --subtype skill_candidate --since 7d --format json
 ```
 
-If any candidates exist, send a message to your orchestrator:
+If any candidates exist, send a message to an agent:
 
 ```bash
-cortextos bus send-message <orchestrator> normal "Weekly skill candidates from the PM agent: <count> candidates logged this week. Top candidates: <list proposed_name + description for top 3>. Full list in activity log."
+cortextos bus send-message an agent normal "Weekly skill candidates from Blue: <count> candidates logged this week. Top candidates: <list proposed_name + description for top 3>. Full list in activity log."
 ```
 
 If no candidates: no message needed.
@@ -87,11 +87,11 @@ A skill candidate is worth building when:
 - It would save >10 min of reasoning per occurrence
 - It occurs at least 2–3x per week
 - It has clear inputs and outputs
-- It does not require the owner's judgment to execute
+- It does not require David's judgment to execute
 
 A candidate is NOT worth building when:
 - It's a one-off edge case
-- It requires judgment that belongs to the owner
+- It requires judgment that belongs to David
 - An existing skill already covers it with minor extension
 
 ---
@@ -100,7 +100,7 @@ A candidate is NOT worth building when:
 
 - Never propose a skill that bypasses an approval workflow
 - Never propose a skill that touches tenant personal data without explicit rules
-- Candidates are suggestions only — your orchestrator decides whether to build
+- Candidates are suggestions only — an agent decides whether to build
 - Do not log the same pattern twice in one week
 
 ---

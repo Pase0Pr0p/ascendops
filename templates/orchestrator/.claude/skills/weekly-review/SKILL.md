@@ -50,21 +50,21 @@ Inputs:
 - `docs/ephemeral/forge-runs/candidates.md` if present.
 - Any skill drift surfaced by the owner corrections, PR review loops, or under-fired skills this week.
 
-**Plumbing guard:** if `$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs` does not exist (the forge plumbing has not landed in this runtime yet), write `FORGE WEEKLY BUILD: skipped (forge plumbing not deployed)` and skip the rest of 1B — do not error. Resume automatically once the plumbing is present.
+**Plumbing guard:** if `$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs` does not exist (the forge plumbing has not landed in this runtime yet), write `FORGE WEEKLY BUILD: skipped (forge plumbing not deployed)` and skip the rest of 1B - do not error. Resume automatically once the plumbing is present.
 
-Read the accumulated queue first — it merges the events since the last build marker with the pending run-log entries, deduped and grouped by create-vs-edit verdict:
+Read the accumulated queue first - it merges the events since the last build marker with the pending run-log entries, deduped and grouped by create-vs-edit verdict:
 
 ```bash
 node "$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs" queue
 ```
 
-If the queue is empty, write `FORGE WEEKLY BUILD: queue empty — no build` and skip the rest of 1B. Otherwise invoke the forge skill in build mode:
+If the queue is empty, write `FORGE WEEKLY BUILD: queue empty - no build` and skip the rest of 1B. Otherwise invoke the forge skill in build mode:
 
 ```
 /forge --build
 ```
 
-Gate every spec'd skill in the change-set through the combined load gate (real-YAML parse + discoverable + ship features + references resolve from the target home; the trigger-fire smoke stays manual in the target agent's context). Pass `--target-home` as the skill's OWN tracked source home (its role-template `.claude/skills` dir, or `community/skills` for a shareable skill) — NOT the repo root: the reference check resolves names relative to that home, so the repo root would false-green a ref that exists anywhere in the monorepo but is absent from the skill's actual home:
+Gate every spec'd skill in the change-set through the combined load gate (real-YAML parse + discoverable + ship features + references resolve from the target home; the trigger-fire smoke stays manual in the target agent's context). Pass `--target-home` as the skill's OWN tracked source home (its role-template `.claude/skills` dir, or `community/skills` for a shareable skill) - NOT the repo root: the reference check resolves names relative to that home, so the repo root would false-green a ref that exists anywhere in the monorepo but is absent from the skill's actual home:
 
 ```bash
 node "$CTX_FRAMEWORK_ROOT/scripts/forge-load-gate.mjs" <skill-dir> --target-home "<the skill's tracked source home, e.g. templates/<role>/.claude/skills or community/skills>"
@@ -77,9 +77,9 @@ node "$CTX_FRAMEWORK_ROOT/scripts/forge-candidates.mjs" consume --build-id "buil
 ```
 
 Output a `FORGE WEEKLY BUILD` section with:
-- `SKILLS TO SHIP` — new skill specs ready for source PR.
-- `SKILLS TO SHARPEN` — existing skills with proposed diffs.
-- `SKIP / WATCHLIST` — candidates that are not yet proven by a real incident or should wait.
+- `SKILLS TO SHIP` - new skill specs ready for source PR.
+- `SKILLS TO SHARPEN` - existing skills with proposed diffs.
+- `SKIP / WATCHLIST` - candidates that are not yet proven by a real incident or should wait.
 - For every item: tied incident, proposed hard rule, tracked source home, runtime activation target, validation gate, and dev-side owner.
 
 Hard stop: do not merge, edit live runtime, or auto-activate from this weekly hook. The weekly hook produces the spec/change-set for the gate; dev-side implementation and two-step registration happen only after approval.
@@ -234,7 +234,7 @@ MEMEOF
 
 ## Custom Metrics
 
-<!-- Added during onboarding — user-specific tracking preferences -->
+<!-- Added during onboarding - user-specific tracking preferences -->
 <!-- Format: add bullet points below, each with the metric name and how to measure it -->
 
 <!-- Example:

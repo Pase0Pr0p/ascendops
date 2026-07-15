@@ -29,8 +29,9 @@ Property Meld uses Google Sign-In via Safari. When `pm` returns 401/403 or the s
 **Method:** `snapcli.capture.safari` parses Safari's binary cookie file directly (no automation, no login flow).
 
 ```python
+import os
 import sys
-sys.path.insert(0, '/path/to/your-pm-adapter')
+sys.path.insert(0, os.environ.get('SNAPCLI_PATH', ''))  # set SNAPCLI_PATH to your cli-anything-snapcli checkout
 from snapcli.capture.safari import capture
 from pathlib import Path
 
@@ -42,7 +43,7 @@ capture(
 ```
 
 **Prerequisites:**
-- the owner must already be logged into propertymeld.com in Safari (the parser only reads, it does not log in)
+- David must already be logged into propertymeld.com in Safari (the parser only reads, it does not log in)
 - Safari cookie store path: `~/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies`
 - Output: ~14 cookies including the `sessionid` cookie
 
@@ -51,7 +52,7 @@ capture(
 pm work-orders list --status open --limit 1 --json   # Should return real data, not 401
 ```
 
-If the parser returns "0 cookies for propertymeld.com", the owner needs to log in to PM in Safari first, then re-run the capture.
+If the parser returns "0 cookies for propertymeld.com", David needs to log in to PM in Safari first, then re-run the capture.
 
 ## Commands
 
@@ -90,14 +91,14 @@ pm vendors list --json                            # All vendors
 
 ### Tech Assignment (in-house)
 ```bash
-pm assign-tech --work-order-id <id> --tech Carlos --json
+pm assign-tech --work-order-id <id> --tech Alex --json
 ```
 
 ### Vendor Assignment
 ```bash
 # Top-level (preferred — mirrors assign-tech UX):
 pm assign-vendor --work-order-id 12345 --vendor Rogers --json
-pm assign-vendor --work-order-id 12345 --vendor "Rogers Electric" --json
+pm assign-vendor --work-order-id 12345 --vendor "Example Electric" --json
 
 # Nested form (still works, takes numeric vendor-id):
 pm work-orders assign-vendor --meld-id 12345 --vendor-id 92504 --json
@@ -180,7 +181,7 @@ pm probe --json                                   # Verify credentials
 | maintenance_notes PATCH | Nexus API | PM_CLIENT_ID/SECRET |
 
 ## Notes
-- `complete` requires meld to be in PENDING_COMPLETION status. Applies to work by any in-house tech (Carlos, Casey, Silvano, or any future in-house assignment).
+- `complete` requires meld to be in PENDING_COMPLETION status. Applies to work by any in-house tech (Alex, Casey, Jordan, or any future in-house assignment).
 - `merge` requires both melds to be at the same unit. Source meld gets MANAGER_CANCELED with "(Merged)" prefix.
 - `tenants list --search` does client-side filtering (server does not support name/email query params).
 

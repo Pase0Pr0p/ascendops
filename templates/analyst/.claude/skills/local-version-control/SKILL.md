@@ -10,7 +10,7 @@ Daily snapshot of all agent workspace changes. Runs via auto-commit.sh with a tw
 
 ## Scope (worktree-aware)
 
-This skill operates EXCLUSIVELY at the canonical framework root (`$CTX_FRAMEWORK_ROOT`) and snapshots **agent state files only** — `memory/`, `MEMORY.md`, `GOALS.md`, `config.json`, and the agent dir's tracked-by-canonical files. Worktree-tree code work is NOT auto-committed here — it ships via the PR workflow (feature branch on the agent's worktree + `gh pr create`). Every bash block in this skill starts with `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"` to guarantee correct cwd; each shell invocation in an agent session is a fresh shell. Running this skill from a per-agent worktree would either commit to the wrong tree or miss the canonical agent state files entirely.
+This skill operates EXCLUSIVELY at the canonical framework root (`$CTX_FRAMEWORK_ROOT`) and snapshots **agent state files only** - `memory/`, `MEMORY.md`, `GOALS.md`, `config.json`, and the agent dir's tracked-by-canonical files. Worktree-tree code work is NOT auto-committed here - it ships via the PR workflow (feature branch on the agent's worktree + `gh pr create`). Every bash block in this skill starts with `cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"` to guarantee correct cwd; each shell invocation in an agent session is a fresh shell. Running this skill from a per-agent worktree would either commit to the wrong tree or miss the canonical agent state files entirely.
 
 ## When to Run
 

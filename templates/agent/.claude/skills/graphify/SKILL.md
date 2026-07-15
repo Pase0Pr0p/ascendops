@@ -5,7 +5,7 @@ description: "Navigate the codebase using a pre-built knowledge graph instead of
 triggers: ["graphify", "knowledge graph", "code graph", "how does X work", "find path between", "explain node", "codebase navigation", "token efficient", "graph query"]
 ---
 
-# Graphify — Code Knowledge Graph
+# Graphify - Code Knowledge Graph
 
 > Query a pre-built AST-based knowledge graph instead of reading raw source files. 22x average token reduction. No LLM tokens consumed to build or update the graph.
 
@@ -28,9 +28,9 @@ graphify update <project-root>
 ```
 
 Outputs to `<project-root>/graphify-out/`:
-- `graph.json` — queryable node/edge data
-- `GRAPH_REPORT.md` — community hubs and unexpected connections
-- `cache/` — SHA256-based change detection for incremental updates
+- `graph.json` - queryable node/edge data
+- `GRAPH_REPORT.md` - community hubs and unexpected connections
+- `cache/` - SHA256-based change detection for incremental updates
 
 ### 3. Install git hooks (auto-update on commit)
 
@@ -98,4 +98,4 @@ graphify benchmark <project-root>/graphify-out/graph.json
 
 ---
 
-*Deployment note: replace `<project-root>` with your actual project path. The graph persists across sessions — no rebuild needed unless the codebase changes significantly.*
+*Deployment note: replace `<project-root>` with your actual project path. The graph persists across sessions - no rebuild needed unless the codebase changes significantly.*

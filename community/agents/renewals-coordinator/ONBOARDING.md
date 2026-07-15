@@ -138,3 +138,4 @@ I will prepare renewal recommendations for approval and hand approved offers to 
 ## If onboarding is interrupted
 
 Re-read this file from the top on next boot. Skip steps whose answers are already filled in and resume on the first unanswered step. The ".onboarded" marker is only created at Step 8.
+

@@ -1,0 +1,77 @@
+{
+  "agent": "{{agent_name}}",
+  "org": "{{org_name}}",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "categories": {
+    "lock_change": {
+      "status": "locked",
+      "total_decisions": 0,
+      "correct": 0,
+      "accuracy_pct": null,
+      "window": "last_20",
+      "unlocked_at": null,
+      "demoted_at": null,
+      "qualifying_accuracy": null
+    },
+    "inhouse_dispatch": {
+      "status": "locked",
+      "total_decisions": 0,
+      "correct": 0,
+      "accuracy_pct": null,
+      "window": "last_20",
+      "unlocked_at": null,
+      "demoted_at": null,
+      "qualifying_accuracy": null
+    },
+    "known_vendor_dispatch": {
+      "status": "locked",
+      "total_decisions": 0,
+      "correct": 0,
+      "accuracy_pct": null,
+      "window": "last_20",
+      "unlocked_at": null,
+      "demoted_at": null,
+      "qualifying_accuracy": null
+    },
+    "resident_comms": {
+      "status": "locked",
+      "total_decisions": 0,
+      "correct": 0,
+      "accuracy_pct": null,
+      "window": "last_20",
+      "unlocked_at": null,
+      "demoted_at": null,
+      "qualifying_accuracy": null
+    },
+    "meld_closure": {
+      "status": "locked",
+      "total_decisions": 0,
+      "correct": 0,
+      "accuracy_pct": null,
+      "window": "last_20",
+      "unlocked_at": null,
+      "demoted_at": null,
+      "qualifying_accuracy": null
+    },
+    "emergency_dispatch": {
+      "status": "locked",
+      "total_decisions": 0,
+      "correct": 0,
+      "accuracy_pct": null,
+      "window": "last_20",
+      "unlocked_at": null,
+      "demoted_at": null,
+      "qualifying_accuracy": null
+    },
+    "new_vendor_assignment": {
+      "status": "locked",
+      "total_decisions": 0,
+      "correct": 0,
+      "accuracy_pct": null,
+      "window": "last_20",
+      "unlocked_at": null,
+      "demoted_at": null,
+      "qualifying_accuracy": null
+    }
+  }
+}

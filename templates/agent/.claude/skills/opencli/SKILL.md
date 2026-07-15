@@ -1,13 +1,13 @@
 ---
 name: opencli
 effort: medium
-description: "Turn any website into a CLI command by driving Chrome's live session. Use when you need structured data from a site that has no API or where the API is inadequate — reads the browser's actual session (logged-in state, cookies) to extract data. Requires Chrome + Browser Bridge extension setup (one-time)."
+description: "Turn any website into a CLI command by driving Chrome's live session. Use when you need structured data from a site that has no API or where the API is inadequate - reads the browser's actual session (logged-in state, cookies) to extract data. Requires Chrome + Browser Bridge extension setup (one-time)."
 triggers: ["opencli", "browser automation", "website cli", "scrape", "browser adapter", "web adapter", "generate adapter", "opencli explore", "opencli generate", "property meld adapter", "browser control"]
 ---
 
-# OpenCLI — Turn Websites Into CLI Commands
+# OpenCLI - Turn Websites Into CLI Commands
 
-> Converts any website into a deterministic CLI by driving Chrome's live session. No credentials stored — reuses whatever Chrome is already logged into.
+> Converts any website into a deterministic CLI by driving Chrome's live session. No credentials stored - reuses whatever Chrome is already logged into.
 
 ---
 
@@ -26,7 +26,7 @@ If not connected:
 1. Download the extension from: https://github.com/jackwener/opencli/releases (look for `browser-bridge-extension.zip`)
 2. Open Chrome → `chrome://extensions` → enable **Developer Mode**
 3. Click **Load unpacked** → select the extracted extension folder
-4. Run `opencli doctor` — should show `[OK] Extension: connected`
+4. Run `opencli doctor` - should show `[OK] Extension: connected`
 
 ### 2. Log into target sites in Chrome
 
@@ -52,7 +52,7 @@ opencli doctor
 | `opencli explore <url>` | Discover APIs, data stores, and recommended strategies |
 | `opencli generate <url>` | One-shot: explore → synthesize → verify → register adapter |
 | `opencli cascade <url>` | Probe public endpoints before committing to session-based approach |
-| `opencli browser` | Direct page control — navigate, click, type, extract |
+| `opencli browser` | Direct page control - navigate, click, type, extract |
 | `opencli record <url>` | Capture API calls from live session → generate YAML candidates |
 | `opencli list` | List all available adapters (87+ built-in) |
 
@@ -63,11 +63,11 @@ opencli doctor
 Use this to build a new adapter for any site:
 
 ```bash
-# Step 1: Explore — discover what the site exposes
+# Step 1: Explore - discover what the site exposes
 opencli explore https://app.example.com \
   --goal "read maintenance work orders and their comments"
 
-# Step 2: Generate — build and register the adapter
+# Step 2: Generate - build and register the adapter
 opencli generate https://app.example.com \
   --goal "list open work orders with latest comment"
 
@@ -83,7 +83,7 @@ opencli <adapter-name> get-comments --meld-id 12345
 opencli record https://app.example.com
 
 # Perform the actions manually in Chrome while recording
-# Stop recording — synthesize converts captured calls to adapter
+# Stop recording - synthesize converts captured calls to adapter
 
 opencli synthesize propertymeld
 ```
@@ -131,7 +131,7 @@ Based on existing Playwright scripts, these endpoints carry the relevant data:
 | `/api/v2/melds/{id}/comments/` | Meld comments and notes |
 | `/api/v2/melds/{id}/` | Single meld detail |
 
-**Tip:** Use `opencli record` while navigating the Melds page and opening a meld — it captures the actual API calls Chrome makes, which is more reliable than guessing endpoints.
+**Tip:** Use `opencli record` while navigating the Melds page and opening a meld - it captures the actual API calls Chrome makes, which is more reliable than guessing endpoints.
 
 ---
 
@@ -188,7 +188,7 @@ opencli propertymeld list-melds --format table   # default
 ## Notes
 
 - Session-backed: if Chrome logs out, commands return empty data
-- Zero LLM cost at runtime — adapters are pre-compiled YAML + JS
+- Zero LLM cost at runtime - adapters are pre-compiled YAML + JS
 - Additive: does not replace existing Playwright scripts; use alongside them
 - `opencli cascade` first if unsure whether the site has public API endpoints (no extension needed for public routes)
 

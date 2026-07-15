@@ -1,13 +1,13 @@
 ---
 name: pm-propertymeld-platform
 effort: low
-description: "Property Meld platform deep reference for the PM agent. Full feature coverage: Projects, make-ready/turnover lifecycle, workflow automation, three-way chat, vendor portal, integrations, KPIs, MAX On-Call, resident portal, scheduling."
+description: "Property Meld platform deep reference for Blue. Full feature coverage: Projects, make-ready/turnover lifecycle, workflow automation, three-way chat, vendor portal, integrations, KPIs, MAX On-Call, resident portal, scheduling."
 triggers: ["property meld", "meld status", "how does meld work", "vendor portal", "three-way chat", "meld workflow", "what does pending mean", "meld lifecycle", "projects", "make ready", "turnover", "workflow automation"]
 ---
 
 # Property Meld Platform Reference — Full Feature Coverage
 
-> Operational deep reference for the PM agent. Sources: Property Meld help center + product documentation.
+> Operational deep reference for Blue. Sources: Property Meld help center + product documentation.
 
 ---
 
@@ -418,12 +418,12 @@ All integrations included at no extra charge.
 | Resident retention | 46% of move-outs cite maintenance; 31% say it was primary reason |
 | Cost per work order | Track by category; use for owner reporting |
 
-### the PM agent's Age-Based Escalation Rules (derived from KPI benchmarks)
+### Blue's Age-Based Escalation Rules (derived from KPI benchmarks)
 
 | Meld age | Flag | Action |
 |----------|------|--------|
-| ≥ 4 days | Approaching critical | Include in morning scan report; message your orchestrator if no vendor assigned |
-| ≥ 5.5 days | Critical threshold | Message your orchestrator immediately, any time of day |
+| ≥ 4 days | Approaching critical | Include in morning scan report; message an agent if no vendor assigned |
+| ≥ 5.5 days | Critical threshold | Message an agent immediately, any time of day |
 
 ---
 

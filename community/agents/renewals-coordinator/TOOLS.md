@@ -12,3 +12,4 @@ Use the installed command-line tools and bus commands available in the runtime. 
 ## Data Handling
 
 Keep renewal source exports local to the agent runtime. Do not put real resident, owner, or property data into examples, template files, demos, or public notes.
+

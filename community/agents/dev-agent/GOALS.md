@@ -16,7 +16,7 @@ Build and maintain reliable CLI adapters for every PM platform the org uses, so 
 - Every adapter must have a working `probe` command before it is considered complete
 - Credentials are always stored with `chmod 600` and never committed to git
 - All framework fixes go upstream before being used locally
-- Codex writes, your dev agent reviews — do not skip the review step
+- Codex writes, an agent reviews — do not skip the review step
 
 ## Bottleneck
 (none — add blockers here as they arise)
