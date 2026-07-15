@@ -48,9 +48,11 @@ interface CronSummaryRow {
   org: string;
   cron: CronDefinition;
   lastFire: string | null;
-  lastStatus: 'fired' | 'retried' | 'failed' | null;
+  lastStatus: CronExecutionStatus | null;
   nextFire: string;
 }
+
+type CronExecutionStatus = 'fired' | 'confirmed' | 'noop_unconfirmed' | 'noop_reinjected' | 'noop_persistent' | 'retried' | 'failed';
 
 // ---------------------------------------------------------------------------
 // Page component

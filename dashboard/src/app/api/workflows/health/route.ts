@@ -48,11 +48,13 @@ interface CronDefinition {
 interface CronExecutionLogEntry {
   ts: string;
   cron: string;
-  status: 'fired' | 'retried' | 'failed';
+  status: CronExecutionStatus;
   attempt: number;
   duration_ms: number;
   error: string | null;
 }
+
+type CronExecutionStatus = 'fired' | 'confirmed' | 'noop_unconfirmed' | 'noop_reinjected' | 'noop_persistent' | 'retried' | 'failed';
 
 export type CronHealthState = 'healthy' | 'warning' | 'failure' | 'never-fired';
 
@@ -211,7 +213,7 @@ function computeHealth(
   org: string,
   cron: CronDefinition,
   lastFire: string | null,
-  lastStatus: 'fired' | 'retried' | 'failed' | null,
+  lastStatus: CronExecutionStatus | null,
   nextFire: string,
   executionsLast24h: CronExecutionLogEntry[],
   nowMs: number,
@@ -221,7 +223,7 @@ function computeHealth(
   const expectedIntervalMs = Math.max(0, parseDurationMs(cron.schedule) || 0);
 
   const firesLast24h = executionsLast24h.length;
-  const successCount = executionsLast24h.filter(e => e.status === 'fired').length;
+  const successCount = executionsLast24h.filter(e => e.status === 'fired' || e.status === 'confirmed').length;
   const successRate24h = firesLast24h > 0 ? successCount / firesLast24h : 1;
 
   function make(state: CronHealthState, reason: string): CronHealthRow {
@@ -238,11 +240,19 @@ function computeHealth(
   }
 
   if (lastFireMs === null) {
-    return make('never-fired', 'cron has never fired — no execution history');
+    return make('never-fired', 'cron has never fired, no execution history');
   }
 
   if (lastStatus === 'failed') {
     return make('failure', `most recent execution failed`);
+  }
+
+  if (lastStatus === 'noop_persistent') {
+    return make('failure', 'persistent cron no-op detected after re-inject verification');
+  }
+
+  if (lastStatus === 'noop_unconfirmed' || lastStatus === 'noop_reinjected') {
+    return make('warning', `most recent cron fire was not confirmed by transcript detector (${lastStatus})`);
   }
 
   if (expectedIntervalMs > 0 && gapMs !== null && gapMs > WARNING_MULTIPLIER * expectedIntervalMs) {
@@ -291,7 +301,7 @@ export async function GET(request: NextRequest) {
       for (const cron of crons) {
         // Last fire + status for this cron (most recent log entry)
         let lastFire: string | null = null;
-        let lastStatus: 'fired' | 'retried' | 'failed' | null = null;
+        let lastStatus: CronExecutionStatus | null = null;
         for (let i = allEntries.length - 1; i >= 0; i--) {
           if (allEntries[i].cron === cron.name) {
             lastFire = allEntries[i].ts;

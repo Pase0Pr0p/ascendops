@@ -55,18 +55,20 @@ interface CronSummaryRow {
   org: string;
   cron: Cron;
   lastFire: string | null;
-  lastStatus: 'fired' | 'retried' | 'failed' | null;
+  lastStatus: CronExecutionStatus | null;
   nextFire: string;
 }
 
 interface CronExecutionEntry {
   ts: string;
   cron: string;
-  status: 'fired' | 'retried' | 'failed';
+  status: CronExecutionStatus;
   attempt: number;
   duration_ms: number;
   error: string | null;
 }
+
+type CronExecutionStatus = 'fired' | 'confirmed' | 'noop_unconfirmed' | 'noop_reinjected' | 'noop_persistent' | 'retried' | 'failed';
 
 interface AgentCrons {
   name: string;
@@ -118,16 +120,20 @@ function slugifyName(name: string): string {
 }
 
 function statusBadgeVariant(
-  status: 'fired' | 'retried' | 'failed' | null,
+  status: CronExecutionStatus | null,
 ): 'default' | 'secondary' | 'destructive' | 'outline' {
-  if (status === 'fired') return 'default';
-  if (status === 'failed') return 'destructive';
-  if (status === 'retried') return 'secondary';
+  if (status === 'fired' || status === 'confirmed') return 'default';
+  if (status === 'failed' || status === 'noop_persistent') return 'destructive';
+  if (status === 'retried' || status === 'noop_unconfirmed' || status === 'noop_reinjected') return 'secondary';
   return 'outline';
 }
 
-function statusLabel(status: 'fired' | 'retried' | 'failed' | null): string {
+function statusLabel(status: CronExecutionStatus | null): string {
   if (status === 'fired') return 'success';
+  if (status === 'confirmed') return 'confirmed';
+  if (status === 'noop_unconfirmed') return 'unconfirmed';
+  if (status === 'noop_reinjected') return 're-injected';
+  if (status === 'noop_persistent') return 'persistent no-op';
   if (status === 'failed') return 'failed';
   if (status === 'retried') return 'retried';
   return 'never';
@@ -689,7 +695,7 @@ export default function WorkflowsPage() {
                                 <div className="flex items-center justify-between mb-2">
                                   <p className="text-xs font-medium flex items-center gap-1.5">
                                     <IconHistory size={13} />
-                                    Recent executions — {row.cron.name}
+                                    Recent executions: {row.cron.name}
                                   </p>
                                   <button
                                     className="text-xs text-muted-foreground hover:text-foreground"

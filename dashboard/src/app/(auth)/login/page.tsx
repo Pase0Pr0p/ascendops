@@ -19,7 +19,7 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showSplash, setShowSplash] = useState(false);
-  const [brand, setBrand] = useState({ name: 'cortextOS', shortName: 'cortextOS', initials: 'cO' });
+  const [brand, setBrand] = useState({ name: 'Agentic PM', shortName: 'Agentic PM', initials: 'AP' });
 
   // Redirect to setup if no users exist
   useEffect(() => {
@@ -40,7 +40,7 @@ export default function LoginPage() {
       .then(r => (r.ok ? r.json() : null))
       .then(data => {
         if (cancelled || !data) return;
-        setBrand({ name: data.name, shortName: data.shortName, initials: data.initials ?? 'cO' });
+        setBrand({ name: data.name, shortName: data.shortName, initials: data.initials ?? 'AP' });
       })
       .catch(() => { /* keep default */ });
     return () => { cancelled = true; };

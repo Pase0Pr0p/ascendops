@@ -1,0 +1,47 @@
+{
+  "_note": "TEMPLATE — synthetic values only. Copy to config/owner-inputs.json (GITIGNORED) and replace with real owner-supplied data. Real loan balances are owner-confidential and must NEVER be committed. Keyed by AppFolio property id. loan:null means owned free & clear. Rules (master plan §4.4): per item, *_escrowed and *_via_pm are mutually exclusive; if *_escrowed is true, monthly_pi must be P&I ONLY (exclude escrow); balance_as_of older than 15 months is flagged stale. Run validateOwnerInputs() before trusting this file.",
+  "_schema": {
+    "properties.<propertyId>.loan": "null | { lender, balance, balance_as_of (YYYY-MM-DD), rate_pct (percent e.g. 6.25), monthly_pi (P&I only), term_months, origination }",
+    "properties.<propertyId>.carry": "{ hoa_monthly, tax_annual, taxes_via_pm, tax_escrowed, insurance_annual, insurance_via_pm, insurance_escrowed }",
+    "properties.<propertyId>.optional": "{ purchase_price?, purchase_date?, cash_invested? }"
+  },
+  "properties": {
+    "118": {
+      "loan": {
+        "lender": "Example Federal Credit Union",
+        "balance": 214500,
+        "balance_as_of": "2026-06-30",
+        "rate_pct": 6.25,
+        "monthly_pi": 1580,
+        "term_months": 360,
+        "origination": "2021-03-01"
+      },
+      "carry": {
+        "hoa_monthly": 0,
+        "tax_annual": 2900,
+        "taxes_via_pm": true,
+        "tax_escrowed": false,
+        "insurance_annual": 1450,
+        "insurance_via_pm": true,
+        "insurance_escrowed": false
+      },
+      "optional": {
+        "purchase_price": 250000,
+        "purchase_date": "2021-03-01",
+        "cash_invested": 62000
+      }
+    },
+    "204": {
+      "loan": null,
+      "carry": {
+        "hoa_monthly": 120,
+        "tax_annual": 3400,
+        "taxes_via_pm": true,
+        "tax_escrowed": false,
+        "insurance_annual": 1600,
+        "insurance_via_pm": true,
+        "insurance_escrowed": false
+      }
+    }
+  }
+}

@@ -12,9 +12,15 @@ import type { HealthStatus, SSEEvent } from '@/lib/types';
 
 interface AgentsGridProps {
   initialAgents: AgentCardData[];
+  /**
+   * External voice agent (Alex), rendered as a peer card AFTER the fleet cards.
+   * Passed separately (not in initialAgents) so it never enters the SSE-updated
+   * state or the healthy/stale/down tallies.
+   */
+  voiceAgent?: AgentCardData | null;
 }
 
-export function AgentsGrid({ initialAgents }: AgentsGridProps) {
+export function AgentsGrid({ initialAgents, voiceAgent }: AgentsGridProps) {
   const router = useRouter();
   const [agents, setAgents] = useState<AgentCardData[]>(initialAgents);
   const [createOpen, setCreateOpen] = useState(false);
@@ -74,6 +80,10 @@ export function AgentsGrid({ initialAgents }: AgentsGridProps) {
           {agents.map((agent) => (
             <AgentCard key={agent.name} agent={agent} />
           ))}
+          {/* External voice agent (Alex): a peer card, but NOT in the
+              health-counted `agents` list above, so it never affects the
+              healthy/stale/down tallies. */}
+          {voiceAgent && <AgentCard key={voiceAgent.name} agent={voiceAgent} />}
           <AddAgentCard onClick={() => setCreateOpen(true)} />
         </div>
       )}

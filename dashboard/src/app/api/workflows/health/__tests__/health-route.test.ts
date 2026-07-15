@@ -62,6 +62,7 @@ beforeAll(() => {
     boris: { enabled: true, org: 'lifeos' },
     paul: { enabled: true, org: 'lifeos' },
     nick: { enabled: true, org: 'cointally' },
+    quinn: { enabled: true, org: 'lifeos' },
   });
 
   writeCronsJson('boris', [
@@ -112,6 +113,28 @@ beforeAll(() => {
     { ts: new Date(NOW_MS - 1_000).toISOString(), cron: 'daily-report', status: 'failed', attempt: 1, duration_ms: 50, error: 'oops' },
     // never-run has no entry
   ]);
+
+  // quinn: detector no-op states inside schedule gap
+  writeCronsJson('quinn', [
+    {
+      name: 'soft-noop',
+      prompt: 'Soft no-op.',
+      schedule: '6h',
+      enabled: true,
+      created_at: new Date(NOW_MS - 86_400_000).toISOString(),
+    },
+    {
+      name: 'persistent-noop',
+      prompt: 'Persistent no-op.',
+      schedule: '6h',
+      enabled: true,
+      created_at: new Date(NOW_MS - 86_400_000).toISOString(),
+    },
+  ]);
+  writeExecLog('quinn', [
+    { ts: new Date(NOW_MS - 1_000).toISOString(), cron: 'soft-noop', status: 'noop_unconfirmed', attempt: 1, duration_ms: 50, error: null },
+    { ts: new Date(NOW_MS - 1_000).toISOString(), cron: 'persistent-noop', status: 'noop_persistent', attempt: 1, duration_ms: 50, error: null },
+  ]);
 });
 
 afterAll(() => {
@@ -151,9 +174,9 @@ describe('GET /api/workflows/health', () => {
   it('summary total matches total crons across all agents', async () => {
     const res = await GET(makeReq());
     const data = await res.json();
-    // boris: 1 + paul: 1 + nick: 2 = 4
-    expect(data.summary.total).toBe(4);
-    expect(data.rows).toHaveLength(4);
+    // boris: 1 + paul: 1 + nick: 2 + quinn: 2 = 6
+    expect(data.summary.total).toBe(6);
+    expect(data.rows).toHaveLength(6);
   });
 
   it('correctly classifies healthy cron (boris heartbeat)', async () => {
@@ -188,13 +211,31 @@ describe('GET /api/workflows/health', () => {
     expect(row.state).toBe('never-fired');
   });
 
+  it('classifies soft detector no-op states as warning', async () => {
+    const res = await GET(makeReq());
+    const data = await res.json();
+    const row = data.rows.find((r: { agent: string; cronName: string }) => r.agent === 'quinn' && r.cronName === 'soft-noop');
+    expect(row).toBeDefined();
+    expect(row.state).toBe('warning');
+    expect(row.reason).toContain('noop_unconfirmed');
+  });
+
+  it('classifies persistent detector no-op as failure', async () => {
+    const res = await GET(makeReq());
+    const data = await res.json();
+    const row = data.rows.find((r: { agent: string; cronName: string }) => r.agent === 'quinn' && r.cronName === 'persistent-noop');
+    expect(row).toBeDefined();
+    expect(row.state).toBe('failure');
+    expect(row.reason).toMatch(/persistent cron no-op/i);
+  });
+
   it('summary counts match per-state classification', async () => {
     const res = await GET(makeReq());
     const data = await res.json();
     const { summary } = data;
     expect(summary.healthy).toBe(1);    // boris heartbeat
-    expect(summary.warning).toBe(1);    // paul morning-briefing
-    expect(summary.failure).toBe(1);    // nick daily-report
+    expect(summary.warning).toBe(2);    // paul morning-briefing + quinn soft-noop
+    expect(summary.failure).toBe(2);    // nick daily-report + quinn persistent-noop
     expect(summary.neverFired).toBe(1); // nick never-run
   });
 
@@ -220,9 +261,11 @@ describe('GET /api/workflows/health', () => {
     expect(agents).toHaveProperty('boris');
     expect(agents).toHaveProperty('paul');
     expect(agents).toHaveProperty('nick');
+    expect(agents).toHaveProperty('quinn');
     expect(agents['boris'].total).toBe(1);
     expect(agents['paul'].total).toBe(1);
     expect(agents['nick'].total).toBe(2);
+    expect(agents['quinn'].total).toBe(2);
   });
 
   it('rows contain all required fields', async () => {

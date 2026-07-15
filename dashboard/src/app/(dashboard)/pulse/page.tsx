@@ -7,7 +7,9 @@ import {
   getRenewalsMetrics,
   getEvictionsMetrics,
   getEntities,
+  isPulseDemo,
 } from '@/lib/data/pulse';
+import { getWorkflowCockpitData } from '@/lib/data/workflows';
 import {
   aggregateLeasing,
   aggregateMaintenance,
@@ -29,6 +31,7 @@ import { RenewalsLane } from '@/components/pulse/renewals-lane';
 import { EvictionsLane } from '@/components/pulse/evictions-lane';
 import { MaintenanceLane } from '@/components/pulse/maintenance-lane';
 import { FinanceLane } from '@/components/pulse/finance-lane';
+import { WorkflowLane } from '@/components/pulse/workflow-lane';
 import { ScopePicker } from '@/components/pulse/scope-picker';
 import { LaneHeader, DataCaution } from '@/components/pulse/pulse-ui';
 import { Card, CardContent } from '@/components/ui/card';
@@ -93,6 +96,7 @@ export default async function PulsePage({
   const maintenance = getMaintenanceMetrics();
   const finance = getFinanceMetrics();
   const registry = getEntities();
+  const workflowData = await getWorkflowCockpitData();
 
   // --- entity scope (§2.4): parsed from the URL, resolved against the registry.
   const requested = parseScopeParam(sp.scope);
@@ -176,7 +180,7 @@ export default async function PulsePage({
               {generatedAt && <span> · Updated {generatedAt} ET</span>}
             </p>
             {/* Scope pill row — dismissable pill next to the headline (§2.4). */}
-            {(scoped || warning) && (
+            {(scoped || warning || isPulseDemo()) && (
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 {scoped && scopeLabel && (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-[12px] font-medium text-primary">
@@ -193,6 +197,11 @@ export default async function PulsePage({
                 {warning && (
                   <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-[12px] font-medium text-amber-500">
                     {warning}
+                  </span>
+                )}
+                {isPulseDemo() && (
+                  <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-[12px] font-medium text-amber-500">
+                    Synthetic demo data (PULSE_DEMO=1), not live numbers
                   </span>
                 )}
               </div>
@@ -313,6 +322,10 @@ export default async function PulsePage({
           financeView && <FinanceLane live={financeView.live} comingSoon={finance.coming_soon} />
         )}
         <DataCaution items={finance?.needs_verification} />
+      </div>
+
+      <div id="lane-workflows" className="scroll-mt-6">
+        <WorkflowLane data={workflowData} />
       </div>
     </div>
   );

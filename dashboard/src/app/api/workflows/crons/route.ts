@@ -41,18 +41,20 @@ interface CronDefinition {
 interface CronExecutionLogEntry {
   ts: string;
   cron: string;
-  status: 'fired' | 'retried' | 'failed';
+  status: CronExecutionStatus;
   attempt: number;
   duration_ms: number;
   error: string | null;
 }
+
+type CronExecutionStatus = 'fired' | 'confirmed' | 'noop_unconfirmed' | 'noop_reinjected' | 'noop_persistent' | 'retried' | 'failed';
 
 export interface CronSummaryRow {
   agent: string;
   org: string;
   cron: CronDefinition;
   lastFire: string | null;
-  lastStatus: 'fired' | 'retried' | 'failed' | null;
+  lastStatus: CronExecutionStatus | null;
   nextFire: string;
 }
 

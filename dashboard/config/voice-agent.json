@@ -1,0 +1,25 @@
+{
+  "_comment": "External Telnyx voice agent descriptor (read-only in v1). Not a cortextos fleet agent: no heartbeat, tasks, memory, goals, skills, or crons. Nothing here is sensitive: the number is the public resident-facing caller ID and the persona / rules are the operator-facing summary from the voice-coordinator runbook and portable-setup handoff. This file is the hinge for a future edit layer; the loader validates and types it.",
+  "name": "Alex",
+  "systemName": "alex",
+  "org": "ascendops",
+  "emoji": "🎙️",
+  "role": "Voice coordinator",
+  "runtime": "voice",
+  "platform": "Telnyx Voice AI",
+  "owner": "AscendOps (David)",
+  "persona": "Answers resident and vendor maintenance calls by phone and text, looks up work orders and property details, and never auto-dispatches: it texts David for approval before any outbound call or dispatch.",
+  "number": "+1 (555) 010-0100",
+  "numberNote": "public resident-facing line",
+  "channels": {
+    "summary": "Voice and SMS",
+    "detail": "Answers inbound voice calls and text messages on the same number.",
+    "voicemailPivot": "On voicemail Alex leaves a brief message and invites a text back to the same number: \"the easiest way to reach me is to send a text to this same number, I'll get right back to you.\""
+  },
+  "rules": [
+    {
+      "label": "Outbound calls need approval",
+      "detail": "A call only ever fires with a human OK: Alex parses the request, creates an approval, waits for David to approve, then dials."
+    }
+  ]
+}

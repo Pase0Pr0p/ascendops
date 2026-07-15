@@ -15,9 +15,9 @@ interface Brand {
 }
 
 const DEFAULT_BRAND: Brand = {
-  name: 'cortextOS',
-  shortName: 'cortextOS',
-  initials: 'cO',
+  name: 'Agentic PM',
+  shortName: 'Agentic PM',
+  initials: 'AP',
   isOrgBrand: false,
 };
 
@@ -27,11 +27,11 @@ const DEFAULT_BRAND: Brand = {
  * Resolution order per org:
  *   1. `brand_name` / `brand_short_name` explicitly set in context.json
  *   2. Fallback: smart-cased `name` (e.g. "ascendops" → "AscendOps")
- *   3. Fallback: "cortextOS" framework default
+ *   3. Fallback: "Agentic PM" product-brand default
  *
  * When no org is selected (currentOrg === 'all') or org context lookup
- * fails, falls back to the cortextOS default so the framework identity
- * is preserved in cross-org views.
+ * fails, falls back to the Agentic PM product default so the cockpit's
+ * brand identity is preserved in cross-org views.
  */
 export function useBrand(): Brand {
   const { currentOrg } = useOrg();

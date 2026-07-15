@@ -1,0 +1,37 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every name, unit, and number is invented — no real tenant data (§6.6). The `live` block below is HAND-COMPUTED from `records` so the §6.4 invariant test is not circular. d2 has balance 0 on purpose: zero-receivable rows are in totals but NOT in delinquent_accounts (the §6.4 trap).",
+  "lane": "finance",
+  "generated_at": "2026-07-05T08:05:00-04:00",
+  "live": {
+    "delinquency": {
+      "total_receivable": 1640,
+      "delinquent_accounts": 3,
+      "bucket_0_30": 1240,
+      "bucket_30_plus": 400
+    },
+    "deposits_held": {
+      "status": "live",
+      "total": 3550,
+      "accounts": 4
+    },
+    "cash_position": {
+      "operating": { "status": "live", "balance": 205000, "as_of": "2026-07-09" },
+      "trust": { "status": "coming_soon", "needs": "trust bank balance via a bank feed (Plaid or bank CSV, pending David decision); deposits-held is the liability owed to tenants, not the bank balance" }
+    }
+  },
+  "records": [
+    { "kind": "delinquency", "property_id": 101, "property_name": "Moss Dr", "unit": "1102 Moss Dr Unit A", "tenant_name": "Casey Lane", "balance": 1200, "bucket_0_30": 800, "bucket_30_plus": 400 },
+    { "kind": "delinquency", "property_id": 102, "property_name": "Buckley Ave", "unit": "508 Buckley Ave", "tenant_name": "Avery Stone", "balance": 0, "bucket_0_30": 0, "bucket_30_plus": 0 },
+    { "kind": "delinquency", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 2", "tenant_name": "Jamie Fox", "balance": 350, "bucket_0_30": 350, "bucket_30_plus": 0 },
+    { "kind": "delinquency", "property_id": 104, "property_name": "Willow Park", "unit": "77 Willow Park Unit 5", "tenant_name": "Morgan Hale", "balance": 90, "bucket_0_30": 90, "bucket_30_plus": 0 },
+    { "kind": "deposit", "property_id": 101, "property_name": "Moss Dr", "unit": "1102 Moss Dr Unit A", "tenant_name": "Casey Lane", "deposit_held": 950 },
+    { "kind": "deposit", "property_id": 101, "property_name": "Moss Dr", "unit": "1104 Moss Dr Unit B", "tenant_name": "Riley Brooks", "deposit_held": 800 },
+    { "kind": "deposit", "property_id": 102, "property_name": "Buckley Ave", "unit": "508 Buckley Ave", "tenant_name": "Avery Stone", "deposit_held": 1100 },
+    { "kind": "deposit", "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 2", "tenant_name": "Jamie Fox", "deposit_held": 700 }
+  ],
+  "needs_verification": {},
+  "coming_soon": {
+    "cash_position": { "needs": "operating/trust bank or GL balance read (AppFolio financials)" },
+    "collections_debt": { "needs": "debt-collection report / accounts sent to collections" }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every name, unit, and number is invented — no real tenant data (§6.6). The `live` block below is HAND-COMPUTED from `records` so the §6.4 invariant test is not circular. 'Casey Nguyen' has property_id null on purpose: the unmapped-eviction case (no numeric property id exists anywhere in the on-disk rent_roll/delinquency CSVs, same gap as renewals). 'Taylor Reed' and 'Morgan Hale' have no delinquency match (last_payment null, balance_source rent_roll_past_due) — the edge case where an Evict row is still shown with a real balance even though the delinquency join missed it, never dropped. 'Casey Lane' reuses the entities.json resident (property 101, '1102 Moss Dr Unit A') so a resident-scope test has a real eviction to match. oldest_eviction_age_days (65) is the max age among records that DO have a last_payment date (Jordan Blake, Sam Ortiz, Casey Lane) — Taylor/Morgan/Casey-N contribute no age (null last_payment), mirroring aggregateTurns' oldest_days-from-move_out convention.",
+  "lane": "evictions",
+  "generated_at": "2026-07-05T06:53:00-04:00",
+  "today": "2026-07-05",
+  "live": {
+    "units_in_eviction": 6,
+    "balance_at_risk": 11900,
+    "oldest_eviction_age_days": 65,
+    "move_outs_pending": 3
+  },
+  "records": [
+    { "kind": "eviction", "property_id": 101, "property_name": "Moss Dr", "unit": "1103 Moss Dr Unit C", "tenant_name": "Jordan Blake", "move_out": null, "balance": 3200, "balance_source": "delinquency", "last_payment": "2026-05-01" },
+    { "kind": "eviction", "property_id": 102, "property_name": "Buckley Ave", "unit": "510 Buckley Ave", "tenant_name": "Sam Ortiz", "move_out": "2026-06-01", "balance": 4100, "balance_source": "delinquency", "last_payment": "2026-06-10" },
+    { "kind": "eviction", "property_id": 103, "property_name": "Cedar Ct", "unit": "14 Cedar Ct Unit 1", "tenant_name": "Taylor Reed", "move_out": null, "balance": 1500, "balance_source": "rent_roll_past_due", "last_payment": null },
+    { "kind": "eviction", "property_id": null, "property_name": null, "unit": null, "tenant_name": "Casey Nguyen", "move_out": null, "balance": 0, "balance_source": "unavailable", "last_payment": null },
+    { "kind": "eviction", "property_id": 101, "property_name": "Moss Dr", "unit": "1102 Moss Dr Unit A", "tenant_name": "Casey Lane", "move_out": null, "balance": 2200, "balance_source": "delinquency", "last_payment": "2026-06-20" },
+    { "kind": "eviction", "property_id": 104, "property_name": "Willow Park", "unit": "77 Willow Park Unit 5", "tenant_name": "Morgan Hale", "move_out": "2026-04-15", "balance": 900, "balance_source": "rent_roll_past_due", "last_payment": null }
+  ],
+  "needs_verification": {
+    "delinquency_join": {
+      "why": "3/6 eviction rows matched delinquency.csv by (property, tenant name); the other 3 fall back to the rent_roll Past Due column (Taylor Reed, Morgan Hale) or have no source at all (Casey Nguyen, the unmapped case); see pulse_evictions_metrics.py's module docstring for the real on-disk finding this fixture demonstrates.",
+      "matched": 3,
+      "total": 6
+    }
+  },
+  "coming_soon": {
+    "filing_stage": { "needs": "a dedicated AppFolio eviction-filing/stage source (see master plan §5.7 deep pipeline)" },
+    "court_dates": { "needs": "a dedicated AppFolio court-date source (see master plan §5.7 deep pipeline)" }
+  }
+}

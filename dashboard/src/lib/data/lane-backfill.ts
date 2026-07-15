@@ -2,7 +2,7 @@ import type { EntityRegistry } from '@/lib/data/pulse';
 
 // Normalize a property name for the name->id join: lowercase, collapse
 // whitespace, and strip a trailing unit/apt designator so a unit-level record
-// ("123 Main St Unit A") matches its property ("123 Main St").
+// ("100 Example St Unit A") matches its property ("100 Example St").
 function norm(s: string | null | undefined): string {
   return (s ?? '')
     .toLowerCase()
@@ -13,8 +13,9 @@ function norm(s: string | null | undefined): string {
 
 /**
  * Backfill property_id onto lane records that carry a property_name but a null
- * property_id — maintenance / renewals / turns, whose upstream sources drop the
- * numeric property id. Without this they cannot be owner-scoped.
+ * property_id — maintenance / renewals / turns, whose sources (PropertyMeld, the
+ * renewals tracker) drop the numeric AppFolio id. Without this they cannot be
+ * owner-scoped.
  *
  * SAFE by construction (§8 owner-truth): a record is backfilled ONLY when its
  * normalized name maps to EXACTLY ONE registry property. Names that collide

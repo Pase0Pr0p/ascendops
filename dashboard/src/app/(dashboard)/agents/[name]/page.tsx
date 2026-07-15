@@ -1,14 +1,11 @@
-import Link from 'next/link';
 import { getAgentDetail } from '@/lib/data/agents';
 import { getTasksByAgent } from '@/lib/data/tasks';
 import { getAllAgents } from '@/lib/config';
 import { parseSoulMd } from '@/lib/markdown-parser';
 import { AgentDetailTabs } from '@/components/agents/agent-detail-tabs';
-import { AgentAvatar } from '@/components/shared/agent-avatar';
+import { AgentDetailHeader } from '@/components/agents/agent-detail-header';
 import { HealthDot } from '@/components/shared/health-dot';
-import { OrgBadge } from '@/components/shared/org-badge';
-import { RuntimeBadge } from '@/components/shared/runtime-badge';
-import { Button } from '@/components/ui/button';
+import { VoiceAgentDetail } from '@/components/agents/voice-agent-detail';
 import type { SoulFields } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -20,6 +17,15 @@ export default async function AgentDetailPage({
 }) {
   const { name } = await params;
   const decoded = decodeURIComponent(name);
+
+  // Alex is an external Telnyx voice agent, not a fleet agent, so it has no
+  // agent dir for getAgentDetail to read. It takes a dedicated branch that
+  // reuses the shared AgentDetailHeader but renders voice-only tabs. Any other
+  // name (including a nonexistent one) still flows through getAgentDetail below,
+  // so /agents/nonexistent still errors as before.
+  if (decoded.toLowerCase() === 'alex') {
+    return <VoiceAgentDetail />;
+  }
 
   // Look up org from enabled-agents.json (case-insensitive to handle legacy URLs)
   const allAgentsList = getAllAgents();
@@ -55,35 +61,14 @@ export default async function AgentDetailPage({
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-3">
-          <AgentAvatar
-            name={detail.identity.name}
-            emoji={detail.identity.emoji}
-            size="lg"
-          />
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-semibold">{detail.identity.name}</h1>
-              <HealthDot status={detail.health} showLabel />
-            </div>
-            <p className="text-sm text-muted-foreground">
-              {detail.identity.role || 'No role set'}
-            </p>
-            <div className="mt-1 flex items-center gap-1.5">
-              {detail.org && <OrgBadge org={detail.org} />}
-              {detail.runtime && <RuntimeBadge runtime={detail.runtime} />}
-            </div>
-          </div>
-        </div>
-
-        <Link href="/agents">
-          <Button variant="outline" size="sm">
-            Back to Roster
-          </Button>
-        </Link>
-      </div>
+      <AgentDetailHeader
+        name={detail.identity.name}
+        emoji={detail.identity.emoji}
+        role={detail.identity.role}
+        org={detail.org || undefined}
+        runtime={detail.runtime}
+        status={<HealthDot status={detail.health} showLabel />}
+      />
 
       {/* Tabbed content */}
       <AgentDetailTabs

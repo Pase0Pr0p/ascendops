@@ -8,7 +8,7 @@ interface SplashScreenProps {
 
 export function SplashScreen({ onComplete }: SplashScreenProps) {
   const [phase, setPhase] = useState<'enter' | 'hold' | 'fade'>('enter');
-  const [brand, setBrand] = useState({ name: 'cortextOS', initials: 'cO' });
+  const [brand, setBrand] = useState({ name: 'Agentic PM', initials: 'AP' });
 
   useEffect(() => {
     let cancelled = false;
@@ -17,8 +17,8 @@ export function SplashScreen({ onComplete }: SplashScreenProps) {
       .then(data => {
         if (cancelled || !data) return;
         setBrand({
-          name: data.name ?? 'cortextOS',
-          initials: data.initials ?? 'cO',
+          name: data.name ?? 'Agentic PM',
+          initials: data.initials ?? 'AP',
         });
       })
       .catch(() => { /* keep default */ });

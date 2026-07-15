@@ -102,7 +102,7 @@ export function KnowledgeBaseClient({ org, markdownContent, filePath }: Knowledg
         setResults([]);
       }
     } catch {
-      setSearchError('Network error — could not reach search API');
+      setSearchError('Network error, could not reach search API');
       setResults([]);
     } finally {
       setSearching(false);
@@ -250,7 +250,7 @@ export function KnowledgeBaseClient({ org, markdownContent, filePath }: Knowledg
           <div className="space-y-2">
             <p className="text-xs text-muted-foreground">
               {results.length === 0
-                ? 'No results — try different keywords or a different collection'
+                ? 'No results, try different keywords or a different collection'
                 : `${results.length} result${results.length !== 1 ? 's' : ''}${selectedCollection !== 'all' ? ` in ${collectionLabel(selectedCollection)}` : ''}`}
             </p>
             {results.length === 0 && (

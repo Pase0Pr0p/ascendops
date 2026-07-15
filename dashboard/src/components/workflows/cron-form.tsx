@@ -299,7 +299,7 @@ export default function CronForm({
                     onClick={() => setValues(prev => ({ ...prev, schedule: ex.value }))}
                   >
                     <span className="font-mono text-foreground/80">{ex.value}</span>
-                    {' — '}
+                    {' · '}
                     {ex.label}
                   </button>
                 ))}

@@ -1,37 +1,39 @@
 /**
- * cortextOS Dashboard - Chart theme configuration.
- * Gold/mustard palette for all Recharts components.
+ * Agentic PM Dashboard - Chart theme configuration.
+ * Brand blue/teal palette for all Recharts components.
+ * (Constant names keep the historical CHART_GOLD_* identifiers to avoid churn
+ *  across importers; their values are now the Agentic PM brand blues.)
  */
 
 // -- Color palette --
 
-export const CHART_GOLD = '#D4A017';
-export const CHART_GOLD_LIGHT = '#F5D76E';
-export const CHART_GOLD_DARK = '#A67C00';
-export const CHART_GOLD_MUTED = 'rgba(212, 160, 23, 0.15)';
+export const CHART_GOLD = '#2b7bff';       // brand blue (primary accent)
+export const CHART_GOLD_LIGHT = '#60a5fa'; // light blue
+export const CHART_GOLD_DARK = '#1d4ed8';  // deep blue
+export const CHART_GOLD_MUTED = 'rgba(43, 123, 255, 0.15)';
 
 export const CHART_COLORS = [
-  '#D4A017', // gold (primary)
-  '#2563EB', // blue
-  '#7C3AED', // purple
-  '#DB2777', // pink
-  '#059669', // green
-  '#EA580C', // orange
+  '#2b7bff', // brand blue (primary)
+  '#1d4ed8', // deep blue
+  '#0ea5e9', // sky
+  '#06b6d4', // cyan
+  '#14b8a6', // teal
+  '#60a5fa', // light blue
 ] as const;
 
 // -- Model-specific colors (for cost charts) --
 
 export const MODEL_COLORS: Record<string, string> = {
-  opus: '#D4A017',
-  sonnet: '#2563EB',
-  haiku: '#7C3AED',
+  opus: '#2b7bff',
+  sonnet: '#0ea5e9',
+  haiku: '#14b8a6',
 };
 
-// -- Severity colors --
+// -- Severity colors (semantic — status meaning, not brand palette) --
 
 export const SEVERITY_COLORS: Record<string, string> = {
-  info: '#2563EB',
-  warning: '#D4A017',
+  info: '#2b7bff',
+  warning: '#f59e0b',
   error: '#EF4444',
 };
 

@@ -1,0 +1,38 @@
+{
+  "_synthetic": "Committed demo/test fixture. Every name, unit, and number is invented — no real tenant data (§6.6). The `live` block below is HAND-COMPUTED from `records` so the §6.4 invariant test is not circular. m5 has property_id null on purpose: the pre-D-2 unmapped-meld case.",
+  "lane": "maintenance",
+  "generated_at": "2026-07-05T08:00:00-04:00",
+  "live": {
+    "open_work_orders": 5,
+    "genuinely_unassigned": 2,
+    "emergency": 1,
+    "high_priority": 1,
+    "priority_breakdown": {
+      "EMERGENCY": 1,
+      "MEDIUM": 2,
+      "HIGH": 1,
+      "LOW": 1
+    },
+    "aging_buckets": {
+      "0-2d": 1,
+      "3-7d": 1,
+      "8-14d": 1,
+      "15-30d": 1,
+      "30d+": 1
+    },
+    "oldest_open_days": 40,
+    "completed_last_7d": 2
+  },
+  "records": [
+    { "kind": "meld", "meld_id": 9001, "property_id": 101, "property_name": "Moss Dr", "unit": "1102 Moss Dr Unit A", "address_raw": "1102 Moss Dr Unit A", "tenant_name": "Casey Lane", "state": "open", "priority": "EMERGENCY", "genuinely_unassigned": false, "age_days": 1 },
+    { "kind": "meld", "meld_id": 9002, "property_id": 101, "property_name": "Moss Dr", "unit": "1106 Moss Dr Unit C", "address_raw": "1106 Moss Dr Unit C", "tenant_name": null, "state": "open", "priority": "MEDIUM", "genuinely_unassigned": true, "age_days": 5 },
+    { "kind": "meld", "meld_id": 9003, "property_id": 102, "property_name": "Buckley Ave", "unit": "508 Buckley Ave", "address_raw": "508 Buckley Ave", "tenant_name": "Avery Stone", "state": "open", "priority": "HIGH", "genuinely_unassigned": false, "age_days": 10 },
+    { "kind": "meld", "meld_id": 9004, "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 2", "address_raw": "12 Cedar Ct Unit 2", "tenant_name": "Jamie Fox", "state": "open", "priority": "MEDIUM", "genuinely_unassigned": false, "age_days": 20 },
+    { "kind": "meld", "meld_id": 9005, "property_id": null, "property_name": null, "unit": null, "address_raw": "9 Unmatched Rd Apt 3", "tenant_name": null, "state": "open", "priority": "LOW", "genuinely_unassigned": true, "age_days": 40 },
+    { "kind": "meld", "meld_id": 9006, "property_id": 101, "property_name": "Moss Dr", "unit": "1104 Moss Dr Unit B", "address_raw": "1104 Moss Dr Unit B", "tenant_name": "Riley Brooks", "state": "completed", "priority": "MEDIUM", "genuinely_unassigned": false, "age_days": null },
+    { "kind": "meld", "meld_id": 9007, "property_id": 103, "property_name": "Cedar Ct", "unit": "12 Cedar Ct Unit 1", "address_raw": "12 Cedar Ct Unit 1", "tenant_name": null, "state": "completed", "priority": "LOW", "genuinely_unassigned": false, "age_days": null }
+  ],
+  "coming_soon": {
+    "avg_time_to_complete": { "needs": "per-meld open->complete duration history" }
+  }
+}

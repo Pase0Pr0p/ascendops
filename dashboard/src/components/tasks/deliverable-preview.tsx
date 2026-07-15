@@ -158,7 +158,7 @@ function RenderedMdPreview({
         console.warn(`[file-ref] All HEAD checks failed for "${ref}". Opening first candidate as fallback.`, candidates);
         el.style.color = 'var(--color-destructive, #ef4444)';
         el.style.textDecoration = 'line-through';
-        el.title = `Could not verify: ${ref} — opening anyway`;
+        el.title = `Could not verify: , opening anyway`;
         onFileRefClick(candidates[0], label);
       };
     }

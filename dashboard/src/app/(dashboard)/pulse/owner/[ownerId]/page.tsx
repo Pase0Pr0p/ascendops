@@ -38,6 +38,7 @@ import {
 import { backfillPropertyIds } from '@/lib/data/lane-backfill';
 import { StatCard } from '@/components/pulse/pulse-ui';
 import { resolveScope, type ResolvedScope } from '@/lib/data/pulse-scope';
+import { getComplianceReadinessForProperty } from '@/lib/data/compliance-readiness';
 import {
   runOwnerReconciliation,
   isOwnerPublishable,
@@ -365,7 +366,11 @@ export default async function OwnerAssetViewPage({
   const ownerRenewals = renewalsFor(resolved, registry);
   const ownerTurns = turnsFor(resolved, registry);
 
-  const propViews: OwnerPropertyView[] = propertyIds.map((pid) => {
+  const complianceResults = await Promise.all(
+    propertyIds.map((pid) => getComplianceReadinessForProperty(pid)),
+  );
+
+  const propViews: OwnerPropertyView[] = propertyIds.map((pid, index) => {
     const roll = agg?.by_property[String(pid)];
     const name = registry.properties.find((p) => p.id === pid)?.name ?? `Property ${pid}`;
     const propScope: ResolvedScope = { kind: 'properties', via: 'property', ids: [pid], label: name };
@@ -394,6 +399,7 @@ export default async function OwnerAssetViewPage({
       occupancyPct: occupancyFor(propScope)?.pct ?? null,
       delinquency: delinquencyFor(propScope),
       hasRecords: Boolean(roll),
+      complianceReadiness: complianceResults[index],
       // AL-4 asset estimates (§8.2 provenance: estimate).
       value: av?.value ?? null,
       valueRange: av?.value_range ?? null,
