@@ -96,20 +96,24 @@ describe('Hook Utilities', () => {
   });
 
   describe('isClaudeDirOperation', () => {
-    it('auto-approves Bash commands containing .claude/', () => {
-      expect(isClaudeDirOperation('Bash', { command: 'cat .claude/settings.json' })).toBe(true);
+    it('never auto-approves Bash (Bash cannot be proven safe regardless of command)', () => {
+      expect(isClaudeDirOperation('Bash', { command: 'cat .claude/settings.json' })).toBe(false);
     });
 
-    it('auto-approves Edit with /.claude/ in file_path', () => {
-      expect(isClaudeDirOperation('Edit', { file_path: '/home/user/.claude/CLAUDE.md' })).toBe(true);
+    it('auto-approves Edit when file_path is inside agentDir/.claude/', () => {
+      expect(isClaudeDirOperation('Edit', { file_path: '/home/user/.claude/CLAUDE.md' }, '/home/user')).toBe(true);
     });
 
-    it('auto-approves Write with /.claude/ in file_path', () => {
-      expect(isClaudeDirOperation('Write', { file_path: '/project/.claude/settings.json' })).toBe(true);
+    it('auto-approves Write when file_path is inside agentDir/.claude/', () => {
+      expect(isClaudeDirOperation('Write', { file_path: '/project/.claude/settings.json' }, '/project')).toBe(true);
+    });
+
+    it('does not auto-approve Edit without agentDir (no trust boundary)', () => {
+      expect(isClaudeDirOperation('Edit', { file_path: '/home/user/.claude/CLAUDE.md' })).toBe(false);
     });
 
     it('does not auto-approve regular paths', () => {
-      expect(isClaudeDirOperation('Edit', { file_path: '/home/user/project/src/main.ts' })).toBe(false);
+      expect(isClaudeDirOperation('Edit', { file_path: '/home/user/project/src/main.ts' }, '/home/user')).toBe(false);
     });
 
     it('does not auto-approve other tool types', () => {
@@ -165,10 +169,11 @@ describe('Hook Utilities', () => {
       expect(summary.indexOf('a'.repeat(301))).toBe(-1);
     });
 
-    it('truncates Bash command at 200 chars', () => {
-      const longCmd = 'x'.repeat(300);
+    it('truncates Bash command at 1500 chars', () => {
+      const longCmd = 'x'.repeat(2000);
       const summary = formatToolSummary('Bash', { command: longCmd });
-      expect(summary.length).toBeLessThanOrEqual('Command: '.length + 200);
+      expect(summary).toContain('…(preview truncated');
+      expect(summary.indexOf('x'.repeat(1501))).toBe(-1);
     });
 
     it('formats unknown tools as JSON', () => {
