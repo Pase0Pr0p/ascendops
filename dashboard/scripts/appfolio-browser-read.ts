@@ -407,6 +407,11 @@ function validatePhone(phone: string): boolean {
   return digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
 }
 
+function normalizePhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+}
+
 function escapeForEval(value: string): string {
   return JSON.stringify(value).slice(1, -1);
 }
@@ -520,7 +525,7 @@ async function textTenant(
     ab('close');
     return {
       dry_run: true,
-      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> after human approval.',
+      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> --phone <validated_phone> after human approval.',
       tenant_name: tenantName,
       occupancy_id: occupancyId,
       tenant_id: tenantId,
@@ -529,12 +534,13 @@ async function textTenant(
       text_inputs_found: textAreas,
       message_preview: messageText.slice(0, 100) + (messageText.length > 100 ? '...' : ''),
       message_length: messageText.length,
+      message_hash: createHash('sha256').update(messageText).digest('hex').slice(0, 16),
     };
   }
 
   // Cross-check: approved phone must match browser-discovered phone
-  const approvedDigits = approvedPhone.replace(/\D/g, '');
-  const discoveredDigits = selectedPhone.replace(/\D/g, '');
+  const approvedDigits = normalizePhone(approvedPhone);
+  const discoveredDigits = normalizePhone(selectedPhone);
   if (approvedDigits !== discoveredDigits) {
     ab('close');
     return { error: 'approved_phone_mismatch', message: `Approved phone (${approvedPhone}) does not match browser-discovered phone (${selectedPhone}). Refusing to send.` };
@@ -741,7 +747,7 @@ async function textFromWorkOrder(
     ab('close');
     return {
       dry_run: true,
-      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> after human approval.',
+      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> --phone <validated_phone> after human approval.',
       recipient,
       sr_id: srId,
       wo_id: woId,
@@ -751,6 +757,7 @@ async function textFromWorkOrder(
       text_sections_found: textSections,
       message_preview: messageText.slice(0, 100) + (messageText.length > 100 ? '...' : ''),
       message_length: messageText.length,
+      message_hash: createHash('sha256').update(messageText).digest('hex').slice(0, 16),
     };
   }
 
@@ -826,19 +833,19 @@ async function textFromWorkOrder(
   try { interfaceResult = JSON.parse(interfacePhoneCheck.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
   // Use the selected dropdown phone first, then fall back to header-displayed phone
   const activePhone = interfaceResult.selected || interfaceResult.displayed[0] || '';
-  const activeDigits = activePhone.replace(/\D/g, '');
+  const activeDigits = normalizePhone(activePhone);
   if (!activePhone || !validatePhone(activeDigits)) {
     ab('close');
     return { error: 'no_active_destination_phone', message: `No valid phone found as the active/selected destination in the text interface for ${recipient}.`, interface_result: interfaceResult, wo_state: woState };
   }
-  const validatedDigits = validatedWoPhone.replace(/\D/g, '');
+  const validatedDigits = normalizePhone(validatedWoPhone);
   if (validatedDigits !== activeDigits) {
     ab('close');
     return { error: 'phone_mismatch', message: `Active destination phone (${activePhone}) does not match recipient-scoped phone (${validatedWoPhone}). Refusing to send to unverified recipient.`, validated_phone: validatedWoPhone, active_phone: activePhone, wo_state: woState };
   }
 
   // Cross-check: approved phone must match browser-discovered scoped phone
-  const approvedDigits = approvedPhone.replace(/\D/g, '');
+  const approvedDigits = normalizePhone(approvedPhone);
   if (approvedDigits !== validatedDigits) {
     ab('close');
     return { error: 'approved_phone_mismatch', message: `Approved phone (${approvedPhone}) does not match browser-discovered phone (${validatedWoPhone}). Refusing to send.` };
@@ -970,12 +977,13 @@ async function textVendor(
     ab('close');
     return {
       dry_run: true,
-      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> after human approval.',
+      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> --phone <validated_phone> after human approval.',
       vendor_id: vendorId,
       vendor_state: vendorState,
       validated_phone: validatedVendorPhone || 'NONE — vendor may not have a valid mobile number',
       message_preview: messageText.slice(0, 100) + (messageText.length > 100 ? '...' : ''),
       message_length: messageText.length,
+      message_hash: createHash('sha256').update(messageText).digest('hex').slice(0, 16),
     };
   }
 
@@ -985,8 +993,8 @@ async function textVendor(
   }
 
   // Cross-check: approved phone must match browser-discovered phone
-  const approvedDigits = approvedPhone.replace(/\D/g, '');
-  const vendorDigits = validatedVendorPhone.replace(/\D/g, '');
+  const approvedDigits = normalizePhone(approvedPhone);
+  const vendorDigits = normalizePhone(validatedVendorPhone);
   if (approvedDigits !== vendorDigits) {
     ab('close');
     return { error: 'approved_phone_mismatch', message: `Approved phone (${approvedPhone}) does not match browser-discovered phone (${validatedVendorPhone}). Refusing to send.` };
@@ -1177,7 +1185,7 @@ function validateExecuteGate(
       process.exit(1);
     }
   }
-  const phoneDigits = context.phone.replace(/\D/g, '');
+  const phoneDigits = normalizePhone(context.phone);
   if (!combined.includes(phoneDigits)) {
     console.error(`ERROR: approval ${approvalId} does not contain destination phone "${phoneDigits}". This approval was created for a different recipient.`);
     process.exit(1);
