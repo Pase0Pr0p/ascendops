@@ -32,11 +32,28 @@ function signRs256(data: string, key: string): string {
   return signer.sign(key, 'base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+const ALLOWED_SCOPES = new Set([GMAIL_SCOPE, CALENDAR_SCOPE]);
+const REQUIRED_SUBJECT = 'rob@paseopropertymanagement.com';
+
 export async function mintPamelaToken(scope: string): Promise<string> {
+  // [fix-1] Scope allowlist: reject anything not exactly gmail.readonly or calendar.readonly.
+  // Prevents callers from minting DWD tokens for broader scopes on this SA.
+  if (!ALLOWED_SCOPES.has(scope)) {
+    throw new Error(`mintPamelaToken: scope not allowed: ${scope}`);
+  }
+
   const keyPath = process.env.GOOGLE_CONTACTS_SA_KEY_PATH;
-  const subject = process.env.PAMELA_GMAIL_SUBJECT;
-  if (!keyPath || !subject) {
+  const rawSubject = process.env.PAMELA_GMAIL_SUBJECT;
+  if (!keyPath || !rawSubject) {
     throw new Error('GOOGLE_CONTACTS_SA_KEY_PATH and PAMELA_GMAIL_SUBJECT must be set');
+  }
+
+  // [fix-2] Subject exact-match: normalize and fail closed. The sub claim in the DWD JWT
+  // determines which Workspace account the SA impersonates. Any value other than Rob's
+  // mailbox must be rejected — a mis-set env var must not silently impersonate another user.
+  const subject = rawSubject.trim().toLowerCase();
+  if (subject !== REQUIRED_SUBJECT) {
+    throw new Error(`mintPamelaToken: subject must be ${REQUIRED_SUBJECT}, got: ${subject}`);
   }
 
   const sa: ServiceAccountKey = JSON.parse(readFileSync(resolve(process.cwd(), keyPath), 'utf8'));
