@@ -681,23 +681,38 @@ async function textFromWorkOrder(
   let textSections: Array<Record<string, string>> = [];
   try { textSections = JSON.parse(textSectionResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
 
-  // Extract and validate the recipient phone from the WO text section
+  // Extract recipient-scoped phones from the WO page
+  const recipientType = escapeForEval(recipient);
   const recipientPhoneResult = abEval(`
     var phones = [];
-    var links = Array.from(document.querySelectorAll('a'));
-    links.forEach(function(a) {
-      var t = a.textContent.trim();
-      if (/\\(\\d{3}\\)\\s*\\d{3}-\\d{4}/.test(t) || /\\d{3}-\\d{3}-\\d{4}/.test(t)) {
-        phones.push(t);
+    var recipientType = "${recipientType}";
+    var phoneRe = /\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}/;
+    var strictPhoneRe = /^\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}$/;
+    if (recipientType === 'tenant') {
+      var sections = document.querySelectorAll('tr, div, li, dd, section');
+      for (var i = 0; i < sections.length; i++) {
+        var txt = sections[i].textContent || '';
+        if (/requester|tenant|resident|occupant/i.test(txt)) {
+          var els = sections[i].querySelectorAll('a, td, span');
+          for (var j = 0; j < els.length; j++) {
+            var t = els[j].textContent.trim();
+            if (strictPhoneRe.test(t) && phones.indexOf(t) === -1) phones.push(t);
+          }
+        }
       }
-    });
-    var tds = Array.from(document.querySelectorAll('td, span, div'));
-    tds.forEach(function(el) {
-      var t = el.textContent.trim();
-      if (/^\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}$/.test(t) && phones.indexOf(t) === -1) {
-        phones.push(t);
+    } else {
+      var sections = document.querySelectorAll('tr, div, li, dd, section');
+      for (var i = 0; i < sections.length; i++) {
+        var txt = sections[i].textContent || '';
+        if (/vendor|assigned|contractor/i.test(txt)) {
+          var els = sections[i].querySelectorAll('a, td, span');
+          for (var j = 0; j < els.length; j++) {
+            var t = els[j].textContent.trim();
+            if (strictPhoneRe.test(t) && phones.indexOf(t) === -1) phones.push(t);
+          }
+        }
       }
-    });
+    }
     JSON.stringify(phones);
   `);
 
@@ -770,6 +785,40 @@ async function textFromWorkOrder(
     await new Promise(r => setTimeout(r, 500));
   }
 
+  // Secondary phone check: verify a valid phone is visible in the active text interface
+  const interfacePhoneCheck = abEval(`
+    var phoneRe = /\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}/;
+    var panels = document.querySelectorAll('[role="tabpanel"], .text-panel, .sms-panel, [class*="message"], [class*="conversation"], [class*="text"]');
+    var found = [];
+    var searchIn = panels.length > 0 ? panels : [document.body];
+    for (var i = 0; i < searchIn.length; i++) {
+      var selects = searchIn[i].querySelectorAll('select');
+      for (var j = 0; j < selects.length; j++) {
+        var opts = selects[j].options;
+        for (var k = 0; k < opts.length; k++) {
+          if (phoneRe.test(opts[k].textContent)) found.push(opts[k].textContent.trim());
+        }
+      }
+      var els = searchIn[i].querySelectorAll('span, label, div, td');
+      for (var j = 0; j < els.length; j++) {
+        var t = els[j].textContent.trim();
+        if (/^\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}$/.test(t) && found.indexOf(t) === -1) found.push(t);
+      }
+    }
+    JSON.stringify(found);
+  `);
+  let interfacePhones: string[] = [];
+  try { interfacePhones = JSON.parse(interfacePhoneCheck.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
+  let verifiedInterfacePhone = '';
+  for (const p of interfacePhones) {
+    const digits = p.replace(/\D/g, '');
+    if (validatePhone(digits)) { verifiedInterfacePhone = p; break; }
+  }
+  if (!verifiedInterfacePhone) {
+    ab('close');
+    return { error: 'no_recipient_phone_in_interface', message: `No valid phone found in the active text interface for ${recipient}. The recipient may not have a mobile number on file.`, interface_phones: interfacePhones, wo_state: woState };
+  }
+
   const sanitized = escapeForEval(messageText);
   const fillResult = abEval(`
     var input = null;
@@ -820,7 +869,8 @@ async function textFromWorkOrder(
     sr_id: srId,
     wo_id: woId,
     wo_state: woState,
-    phones_on_page: recipientPhones,
+    validated_phone: validatedWoPhone,
+    verified_interface_phone: verifiedInterfacePhone,
     message_length: messageText.length,
     message_preview: messageText.slice(0, 100),
   };
@@ -1046,7 +1096,12 @@ function loadApprovalFile(approvalId: string): Record<string, unknown> | null {
   return null;
 }
 
-function validateExecuteGate(execute: boolean, approvalId: string): void {
+function validateExecuteGate(
+  execute: boolean,
+  approvalId: string,
+  command: string,
+  messageText: string,
+): void {
   if (!execute) return;
   if (!approvalId) {
     console.error('ERROR: --execute requires --approval-id <id>. Get approval via cortextos bus create-approval first.');
@@ -1063,6 +1118,18 @@ function validateExecuteGate(execute: boolean, approvalId: string): void {
   }
   if (approval.category !== 'external-comms') {
     console.error(`ERROR: approval ${approvalId} category is "${approval.category}", expected "external-comms".`);
+    process.exit(1);
+  }
+  const title = String(approval.title || '');
+  const desc = String(approval.description || '');
+  const combined = title + ' ' + desc;
+  if (!combined.includes(command)) {
+    console.error(`ERROR: approval ${approvalId} does not match command "${command}". Title: "${title}"`);
+    process.exit(1);
+  }
+  const msgPrefix = messageText.slice(0, 80);
+  if (!combined.includes(msgPrefix)) {
+    console.error(`ERROR: approval ${approvalId} message content does not match. This approval may have been created for a different message.`);
     process.exit(1);
   }
 }
@@ -1123,7 +1190,7 @@ async function main() {
         console.error('  Default is dry-run. --execute requires --approval-id from cortextos approval gate.');
         process.exit(1);
       }
-      validateExecuteGate(parsed.execute, parsed.approvalId);
+      validateExecuteGate(parsed.execute, parsed.approvalId, 'text-tenant', parsed.message);
       const result = await textTenant(occId, tenId, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
@@ -1142,7 +1209,7 @@ async function main() {
         console.error('text-wo: --recipient must be "tenant" or "vendor"');
         process.exit(1);
       }
-      validateExecuteGate(parsed.execute, parsed.approvalId);
+      validateExecuteGate(parsed.execute, parsed.approvalId, 'text-wo', parsed.message);
       const result = await textFromWorkOrder(srId, woId, recipient, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
@@ -1155,7 +1222,7 @@ async function main() {
         console.error('Usage: text-vendor --vendor-id <id> --message <text> [--execute --approval-id <id>]');
         process.exit(1);
       }
-      validateExecuteGate(parsed.execute, parsed.approvalId);
+      validateExecuteGate(parsed.execute, parsed.approvalId, 'text-vendor', parsed.message);
       const result = await textVendor(vendorId, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
