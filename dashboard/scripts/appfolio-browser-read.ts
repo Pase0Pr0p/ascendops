@@ -406,13 +406,8 @@ function validatePhone(phone: string): boolean {
   return digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
 }
 
-function sanitizeMessageForEval(msg: string): string {
-  return msg
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '');
+function escapeForEval(value: string): string {
+  return JSON.stringify(value).slice(1, -1);
 }
 
 /**
@@ -505,14 +500,29 @@ async function textTenant(
   `);
   const tenantName = nameResult.output.replace(/^"|"$/g, '').trim();
 
+  // Extract and validate the phone number that will receive the text
+  let selectedPhone = '';
+  if (phones.length > 0) {
+    const phoneDigits = phones[0].label.replace(/\D/g, '');
+    if (!validatePhone(phoneDigits)) {
+      ab('close');
+      return { error: 'invalid_phone', message: `Phone number from dropdown fails validation: ${phones[0].label}` };
+    }
+    selectedPhone = phones[0].label;
+  } else {
+    ab('close');
+    return { error: 'no_phone', message: 'No phone numbers found in dropdown on tenant page. Cannot send without a validated recipient.' };
+  }
+
   if (!live) {
     ab('close');
     return {
       dry_run: true,
-      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute only after human approval via cortextos approval gate.',
+      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> after human approval.',
       tenant_name: tenantName,
       occupancy_id: occupancyId,
       tenant_id: tenantId,
+      validated_phone: selectedPhone,
       phones_found: phones,
       text_inputs_found: textAreas,
       message_preview: messageText.slice(0, 100) + (messageText.length > 100 ? '...' : ''),
@@ -521,31 +531,27 @@ async function textTenant(
   }
 
   // LIVE SEND: select phone, type message, click send
-  // Select first phone from dropdown if multiple available
-  if (phones.length > 0) {
-    const phoneVal = phones[0].value.replace(/'/g, "\\'");
-    const selectPhone = abEval(`
-      var selects = document.querySelectorAll('select');
-      var sel = null;
-      selects.forEach(function(s) {
-        Array.from(s.options).forEach(function(o) {
-          if (/mobile|cell|\\d{3}/i.test(o.textContent)) sel = s;
-        });
+  const phoneVal = escapeForEval(phones[0].value);
+  const selectPhone = abEval(`
+    var selects = document.querySelectorAll('select');
+    var sel = null;
+    selects.forEach(function(s) {
+      Array.from(s.options).forEach(function(o) {
+        if (/mobile|cell|\\d{3}/i.test(o.textContent)) sel = s;
       });
-      if (sel) {
-        sel.value = '${phoneVal}';
-        sel.dispatchEvent(new Event('change', {bubbles: true}));
-        'selected';
-      } else { 'no_phone_dropdown'; }
-    `);
-    if (selectPhone.output.includes('no_phone_dropdown')) {
-      ab('close');
-      return { error: 'phone_select_failed', message: 'Could not find phone dropdown on tenant page' };
-    }
+    });
+    if (sel) {
+      sel.value = "${phoneVal}";
+      sel.dispatchEvent(new Event('change', {bubbles: true}));
+      'selected';
+    } else { 'no_phone_dropdown'; }
+  `);
+  if (selectPhone.output.includes('no_phone_dropdown')) {
+    ab('close');
+    return { error: 'phone_select_failed', message: 'Could not find phone dropdown on tenant page' };
   }
 
-  // Type the message — target the SMS input by placeholder pattern
-  const sanitized = sanitizeMessageForEval(messageText);
+  const sanitized = escapeForEval(messageText);
   const fillResult = abEval(`
     var input = null;
     var candidates = document.querySelectorAll('textarea, input[type="text"]');
@@ -559,7 +565,7 @@ async function textTenant(
     }
     if (input) {
       input.focus();
-      input.value = '${sanitized}';
+      input.value = "${sanitized}";
       input.dispatchEvent(new Event('input', {bubbles: true}));
       input.dispatchEvent(new Event('change', {bubbles: true}));
       'filled';
@@ -571,7 +577,6 @@ async function textTenant(
     return { error: 'text_input_not_found', message: 'Could not locate text message input field on tenant page', fill_output: fillResult.output };
   }
 
-  // Click Send — look for send-style button near the texting area
   const sendResult = abEval(`
     var candidates = Array.from(document.querySelectorAll('button, input[type="submit"]'));
     var sendBtn = candidates.find(function(b) {
@@ -595,7 +600,7 @@ async function textTenant(
     tenant_name: tenantName,
     occupancy_id: occupancyId,
     tenant_id: tenantId,
-    phone: phones.length > 0 ? phones[0].label : 'default',
+    validated_phone: selectedPhone,
     message_length: messageText.length,
     message_preview: messageText.slice(0, 100),
   };
@@ -676,15 +681,39 @@ async function textFromWorkOrder(
   let textSections: Array<Record<string, string>> = [];
   try { textSections = JSON.parse(textSectionResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
 
+  // Extract and validate the recipient phone from the WO text section
+  const recipientPhoneResult = abEval(`
+    var phones = [];
+    var links = Array.from(document.querySelectorAll('a'));
+    links.forEach(function(a) {
+      var t = a.textContent.trim();
+      if (/\\(\\d{3}\\)\\s*\\d{3}-\\d{4}/.test(t) || /\\d{3}-\\d{3}-\\d{4}/.test(t)) {
+        phones.push(t);
+      }
+    });
+    var tds = Array.from(document.querySelectorAll('td, span, div'));
+    tds.forEach(function(el) {
+      var t = el.textContent.trim();
+      if (/^\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}$/.test(t) && phones.indexOf(t) === -1) {
+        phones.push(t);
+      }
+    });
+    JSON.stringify(phones);
+  `);
+
+  let recipientPhones: string[] = [];
+  try { recipientPhones = JSON.parse(recipientPhoneResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
+
   if (!live) {
     ab('close');
     return {
       dry_run: true,
-      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute only after human approval.',
+      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> after human approval.',
       recipient,
       sr_id: srId,
       wo_id: woId,
       wo_state: woState,
+      phones_on_page: recipientPhones,
       text_sections_found: textSections,
       message_preview: messageText.slice(0, 100) + (messageText.length > 100 ? '...' : ''),
       message_length: messageText.length,
@@ -692,9 +721,6 @@ async function textFromWorkOrder(
   }
 
   // LIVE: Navigate to the Texts section on the WO page
-  // WO pages have: "Text" button in top action bar, and a Texts section with conversation tabs
-  // For tenant text: Tenant-PM conversation requires tenant selected on SR
-  // For vendor text: Vendor-PM conversation requires vendor assigned to WO
   const clickTextResult = abEval(`
     var btns = Array.from(document.querySelectorAll('button, a'));
     var textBtn = btns.find(function(b) {
@@ -706,7 +732,6 @@ async function textFromWorkOrder(
   `);
 
   if (clickTextResult.output.includes('no_text_button')) {
-    // Try scrolling to the Texts section and clicking the right conversation type
     const scrollResult = abEval(`
       var headings = Array.from(document.querySelectorAll('h2, h3, h4, [class*="heading"], [class*="section-title"]'));
       var textsSection = headings.find(function(h) { return /^texts$/i.test(h.textContent.trim()); });
@@ -722,7 +747,6 @@ async function textFromWorkOrder(
 
   await new Promise(r => setTimeout(r, 1000));
 
-  // If targeting vendor, try to switch to Vendor-PM conversation tab
   if (recipient === 'vendor') {
     abEval(`
       var tabs = Array.from(document.querySelectorAll('[role="tab"], button, a'));
@@ -733,8 +757,7 @@ async function textFromWorkOrder(
     await new Promise(r => setTimeout(r, 500));
   }
 
-  // Fill message — same pattern as tenant text
-  const sanitized = sanitizeMessageForEval(messageText);
+  const sanitized = escapeForEval(messageText);
   const fillResult = abEval(`
     var input = null;
     var candidates = document.querySelectorAll('textarea, input[type="text"]');
@@ -748,7 +771,7 @@ async function textFromWorkOrder(
     }
     if (input) {
       input.focus();
-      input.value = '${sanitized}';
+      input.value = "${sanitized}";
       input.dispatchEvent(new Event('input', {bubbles: true}));
       input.dispatchEvent(new Event('change', {bubbles: true}));
       'filled';
@@ -760,7 +783,6 @@ async function textFromWorkOrder(
     return { error: 'text_input_not_found', message: 'Could not locate text message input on WO page', fill_output: fillResult.output };
   }
 
-  // Click Send
   const sendResult = abEval(`
     var candidates = Array.from(document.querySelectorAll('button, input[type="submit"]'));
     var sendBtn = candidates.find(function(b) {
@@ -785,6 +807,7 @@ async function textFromWorkOrder(
     sr_id: srId,
     wo_id: woId,
     wo_state: woState,
+    phones_on_page: recipientPhones,
     message_length: messageText.length,
     message_preview: messageText.slice(0, 100),
   };
@@ -846,20 +869,33 @@ async function textVendor(
   let vendorState: Record<string, unknown> = {};
   try { vendorState = JSON.parse(vendorStateResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
 
+  // Validate vendor has a phone number
+  const vendorPhones = (vendorState.phones as string[]) ?? [];
+  let validatedVendorPhone = '';
+  for (const p of vendorPhones) {
+    const digits = p.replace(/\D/g, '');
+    if (validatePhone(digits)) { validatedVendorPhone = p; break; }
+  }
+
   if (!live) {
     ab('close');
     return {
       dry_run: true,
-      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute only after human approval.',
+      guardrail: 'TEXT BLOCKED — dry-run mode. Pass --execute --approval-id <id> after human approval.',
       vendor_id: vendorId,
       vendor_state: vendorState,
+      validated_phone: validatedVendorPhone || 'NONE — vendor may not have a valid mobile number',
       message_preview: messageText.slice(0, 100) + (messageText.length > 100 ? '...' : ''),
       message_length: messageText.length,
     };
   }
 
+  if (!validatedVendorPhone) {
+    ab('close');
+    return { error: 'no_valid_phone', message: 'No valid phone number found on vendor page. Cannot send without a validated recipient.', vendor_state: vendorState };
+  }
+
   // LIVE: Click the "text" link next to the vendor's phone number
-  // AppFolio vendor pages have a "text" link in the Contact section near each mobile number
   const clickResult = abEval(`
     var links = Array.from(document.querySelectorAll('a'));
     var textLink = links.find(function(a) {
@@ -877,8 +913,7 @@ async function textVendor(
 
   await new Promise(r => setTimeout(r, 1500));
 
-  // Fill message — same SMS input pattern
-  const sanitized = sanitizeMessageForEval(messageText);
+  const sanitized = escapeForEval(messageText);
   const fillResult = abEval(`
     var input = null;
     var candidates = document.querySelectorAll('textarea, input[type="text"]');
@@ -892,7 +927,7 @@ async function textVendor(
     }
     if (input) {
       input.focus();
-      input.value = '${sanitized}';
+      input.value = "${sanitized}";
       input.dispatchEvent(new Event('input', {bubbles: true}));
       input.dispatchEvent(new Event('change', {bubbles: true}));
       'filled';
@@ -904,7 +939,6 @@ async function textVendor(
     return { error: 'text_input_not_found', message: 'Could not locate text input on vendor texting page', fill_output: fillResult.output };
   }
 
-  // Click Send
   const sendResult = abEval(`
     var candidates = Array.from(document.querySelectorAll('button, input[type="submit"]'));
     var sendBtn = candidates.find(function(b) {
@@ -927,9 +961,56 @@ async function textVendor(
     sent: true,
     vendor_id: vendorId,
     vendor_state: vendorState,
+    validated_phone: validatedVendorPhone,
     message_length: messageText.length,
     message_preview: messageText.slice(0, 100),
   };
+}
+
+// ─── CLI arg parsing ─────────────────────────────────────────────────────────
+
+function parseTextArgs(args: string[]): {
+  flags: Record<string, string>;
+  execute: boolean;
+  approvalId: string;
+  message: string;
+} {
+  const flags: Record<string, string> = {};
+  let execute = false;
+  let approvalId = '';
+  let message = '';
+  const knownFlags = ['--occupancy-id', '--tenant-id', '--vendor-id', '--sr-id', '--wo-id', '--recipient'];
+
+  const msgIdx = args.indexOf('--message');
+  if (msgIdx !== -1) {
+    message = args.slice(msgIdx + 1).join(' ');
+  }
+
+  const argsBeforeMessage = msgIdx !== -1 ? args.slice(0, msgIdx) : args;
+  let i = 0;
+  while (i < argsBeforeMessage.length) {
+    if (argsBeforeMessage[i] === '--execute') {
+      execute = true;
+      i++;
+    } else if (argsBeforeMessage[i] === '--approval-id' && i + 1 < argsBeforeMessage.length) {
+      approvalId = argsBeforeMessage[i + 1];
+      i += 2;
+    } else if (knownFlags.includes(argsBeforeMessage[i]) && i + 1 < argsBeforeMessage.length) {
+      flags[argsBeforeMessage[i]] = argsBeforeMessage[i + 1];
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+
+  return { flags, execute, approvalId, message };
+}
+
+function validateExecuteGate(execute: boolean, approvalId: string): void {
+  if (execute && !approvalId) {
+    console.error('ERROR: --execute requires --approval-id <id>. Get approval via cortextos bus create-approval first.');
+    process.exit(1);
+  }
 }
 
 // ─── CLI dispatch ────────────────────────────────────────────────────────────
@@ -980,69 +1061,48 @@ async function main() {
       break;
     }
     case 'text-tenant': {
-      const occIdx = cmdArgs.indexOf('--occupancy-id');
-      const tenIdx = cmdArgs.indexOf('--tenant-id');
-      const msgIdx = cmdArgs.indexOf('--message');
-      const live = cmdArgs.includes('--execute');
-      if (occIdx === -1 || tenIdx === -1 || msgIdx === -1) {
-        console.error('Usage: text-tenant --occupancy-id <id> --tenant-id <id> --message <text> [--execute]');
-        console.error('  Default is dry-run. --execute sends the text (requires prior human approval).');
+      const parsed = parseTextArgs(cmdArgs);
+      const occId = parsed.flags['--occupancy-id'];
+      const tenId = parsed.flags['--tenant-id'];
+      if (!occId || !tenId || !parsed.message) {
+        console.error('Usage: text-tenant --occupancy-id <id> --tenant-id <id> --message <text> [--execute --approval-id <id>]');
+        console.error('  Default is dry-run. --execute requires --approval-id from cortextos approval gate.');
         process.exit(1);
       }
-      const occId = cmdArgs[occIdx + 1];
-      const tenId = cmdArgs[tenIdx + 1];
-      const msg = cmdArgs.slice(msgIdx + 1).filter(a => a !== '--execute').join(' ');
-      if (!occId || !tenId || !msg) {
-        console.error('text-tenant: --occupancy-id, --tenant-id, and --message are all required');
-        process.exit(1);
-      }
-      const result = await textTenant(occId, tenId, msg, live);
+      validateExecuteGate(parsed.execute, parsed.approvalId);
+      const result = await textTenant(occId, tenId, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
       break;
     }
     case 'text-wo': {
-      const srIdx = cmdArgs.indexOf('--sr-id');
-      const woIdx = cmdArgs.indexOf('--wo-id');
-      const recIdx = cmdArgs.indexOf('--recipient');
-      const msgIdx = cmdArgs.indexOf('--message');
-      const live = cmdArgs.includes('--execute');
-      if (srIdx === -1 || woIdx === -1 || recIdx === -1 || msgIdx === -1) {
-        console.error('Usage: text-wo --sr-id <id> --wo-id <id> --recipient <tenant|vendor> --message <text> [--execute]');
+      const parsed = parseTextArgs(cmdArgs);
+      const srId = parsed.flags['--sr-id'];
+      const woId = parsed.flags['--wo-id'];
+      const recipient = parsed.flags['--recipient'] as 'tenant' | 'vendor';
+      if (!srId || !woId || !recipient || !parsed.message) {
+        console.error('Usage: text-wo --sr-id <id> --wo-id <id> --recipient <tenant|vendor> --message <text> [--execute --approval-id <id>]');
         process.exit(1);
       }
-      const srId = cmdArgs[srIdx + 1];
-      const woId = cmdArgs[woIdx + 1];
-      const recipient = cmdArgs[recIdx + 1] as 'tenant' | 'vendor';
       if (recipient !== 'tenant' && recipient !== 'vendor') {
         console.error('text-wo: --recipient must be "tenant" or "vendor"');
         process.exit(1);
       }
-      const msg = cmdArgs.slice(msgIdx + 1).filter(a => a !== '--execute').join(' ');
-      if (!srId || !woId || !msg) {
-        console.error('text-wo: --sr-id, --wo-id, --recipient, and --message are all required');
-        process.exit(1);
-      }
-      const result = await textFromWorkOrder(srId, woId, recipient, msg, live);
+      validateExecuteGate(parsed.execute, parsed.approvalId);
+      const result = await textFromWorkOrder(srId, woId, recipient, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
       break;
     }
     case 'text-vendor': {
-      const vidIdx = cmdArgs.indexOf('--vendor-id');
-      const msgIdx = cmdArgs.indexOf('--message');
-      const live = cmdArgs.includes('--execute');
-      if (vidIdx === -1 || msgIdx === -1) {
-        console.error('Usage: text-vendor --vendor-id <id> --message <text> [--execute]');
+      const parsed = parseTextArgs(cmdArgs);
+      const vendorId = parsed.flags['--vendor-id'];
+      if (!vendorId || !parsed.message) {
+        console.error('Usage: text-vendor --vendor-id <id> --message <text> [--execute --approval-id <id>]');
         process.exit(1);
       }
-      const vendorId = cmdArgs[vidIdx + 1];
-      const msg = cmdArgs.slice(msgIdx + 1).filter(a => a !== '--execute').join(' ');
-      if (!vendorId || !msg) {
-        console.error('text-vendor: --vendor-id and --message are required');
-        process.exit(1);
-      }
-      const result = await textVendor(vendorId, msg, live);
+      validateExecuteGate(parsed.execute, parsed.approvalId);
+      const result = await textVendor(vendorId, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
       break;
