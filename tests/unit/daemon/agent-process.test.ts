@@ -390,18 +390,18 @@ describe('AgentProcess - crashCount NaN-guard (bug-hunt #8)', () => {
 });
 
 describe('AgentProcess onboarding fallback', () => {
-  it('keeps the fresh-start back-online instruction for a lone start', () => {
+  it('defers to AGENTS.md for session-start instructions', () => {
     const ap = new AgentProcess('alice', mockEnv, {});
     const prompt = (ap as any).buildStartupPrompt(null) as string;
 
-    expect(prompt).toContain('Send a Telegram message to the user saying you are back online.');
+    expect(prompt).toContain('Read AGENTS.md and follow its session-start instructions.');
   });
 
-  it('omits the fresh-start back-online instruction during a fleet start batch', () => {
+  it('defers to AGENTS.md even during a fleet start batch', () => {
     const ap = new AgentProcess('alice', mockEnv, {});
     const prompt = (ap as any).buildStartupPrompt(null, { partOfFleetStart: true }) as string;
 
-    expect(prompt).not.toContain('Send a Telegram message to the user saying you are back online.');
+    expect(prompt).toContain('Read AGENTS.md and follow its session-start instructions.');
   });
 
   it('retro-writes .onboarded when bootstrap files have real content', () => {

@@ -1039,19 +1039,10 @@ export class AgentProcess {
     const handoffBlock = this.consumeHandoffBlock();
     const isHandoffRestart = handoffBlock.length > 0;
     this.lastSpawnWasHandoff = isHandoffRestart;
-    // HANDOFF UX: the pickup message MUST be the first action after reading the handoff doc —
-    // before cron restoration, before heartbeat, before anything else. Placing this instruction
-    // immediately after the handoffBlock in the prompt ensures it is not buried.
-    const handoffUxOverride = isHandoffRestart && !this.config.suppress_boot_notify
-      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely).'
-      : '';
-    const onlineMessage = isHandoffRestart || options.partOfFleetStart || this.config.suppress_boot_notify
-      ? ''
-      : ' Send a Telegram message to the user saying you are back online.';
     const suppressBootBlock = this.config.suppress_boot_notify
-      ? ' SUPPRESS_BOOT_NOTIFY: skip AGENTS.md step 1 (boot message) and step 14 (online status message). Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
+      ? ' SUPPRESS_BOOT_NOTIFY: skip AGENTS.md cold-boot steps 1 and 13, fast-path step 6, and the CONTEXT HANDOFF pickup message. Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
       : '';
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${suppressBootBlock}${onboardingAppend}${recoveryBlock}${rateLimitBlock}`;
+    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and follow its session-start instructions. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${suppressBootBlock}${onboardingAppend}${recoveryBlock}${rateLimitBlock}`;
   }
 
   private hasCompletedBootstrapContent(identityPath: string, memoryPath: string): boolean {
@@ -1096,13 +1087,10 @@ export class AgentProcess {
     const deliverablesBlock = this.buildDeliverablesBlock();
     // Session refresh (--continue) is never a handoff restart.
     this.lastSpawnWasHandoff = false;
-    const backOnlineInstruction = options.partOfFleetStart || this.config.suppress_boot_notify
-      ? ''
-      : ' After checking inbox, send a Telegram message to the user saying you are back online.';
     const suppressBootBlock = this.config.suppress_boot_notify
-      ? ' SUPPRESS_BOOT_NOTIFY: skip AGENTS.md step 1 (boot message) and step 14 (online status message). Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
+      ? ' SUPPRESS_BOOT_NOTIFY: skip AGENTS.md cold-boot steps 1 and 13, fast-path step 6, and the CONTEXT HANDOFF pickup message. Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
       : '';
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${backOnlineInstruction}${suppressBootBlock}${recoveryBlock}${rateLimitBlock}`;
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Read AGENTS.md and follow its session-start instructions. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${suppressBootBlock}${recoveryBlock}${rateLimitBlock}`;
   }
 
   /**
