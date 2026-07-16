@@ -19,6 +19,7 @@
  */
 
 import { execSync, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { join, resolve } from 'node:path';
@@ -785,44 +786,45 @@ async function textFromWorkOrder(
     await new Promise(r => setTimeout(r, 500));
   }
 
-  // Secondary phone check: verify a valid phone is visible in the active text interface
+  // Secondary phone check: verify the SELECTED/ACTIVE destination phone matches the scoped phone.
+  // Only checks the selected option in dropdowns (not all options) and header-level displayed phones.
   const interfacePhoneCheck = abEval(`
     var phoneRe = /\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}/;
+    var result = {selected: '', displayed: []};
     var panels = document.querySelectorAll('[role="tabpanel"], .text-panel, .sms-panel, [class*="message"], [class*="conversation"], [class*="text"]');
-    var found = [];
     var searchIn = panels.length > 0 ? panels : [document.body];
     for (var i = 0; i < searchIn.length; i++) {
       var selects = searchIn[i].querySelectorAll('select');
       for (var j = 0; j < selects.length; j++) {
-        var opts = selects[j].options;
-        for (var k = 0; k < opts.length; k++) {
-          if (phoneRe.test(opts[k].textContent)) found.push(opts[k].textContent.trim());
+        var sel = selects[j];
+        var active = sel.options[sel.selectedIndex];
+        if (active && phoneRe.test(active.textContent)) {
+          result.selected = active.textContent.trim();
         }
       }
-      var els = searchIn[i].querySelectorAll('span, label, div, td');
-      for (var j = 0; j < els.length; j++) {
-        var t = els[j].textContent.trim();
-        if (/^\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}$/.test(t) && found.indexOf(t) === -1) found.push(t);
+      if (!result.selected) {
+        var headers = searchIn[i].querySelectorAll('h1, h2, h3, h4, .recipient, .phone-number, [class*="header"], [class*="recipient"]');
+        for (var j = 0; j < headers.length; j++) {
+          var t = headers[j].textContent.trim();
+          if (phoneRe.test(t)) result.displayed.push(t);
+        }
       }
     }
-    JSON.stringify(found);
+    JSON.stringify(result);
   `);
-  let interfacePhones: string[] = [];
-  try { interfacePhones = JSON.parse(interfacePhoneCheck.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
-  let verifiedInterfacePhone = '';
-  for (const p of interfacePhones) {
-    const digits = p.replace(/\D/g, '');
-    if (validatePhone(digits)) { verifiedInterfacePhone = p; break; }
-  }
-  if (!verifiedInterfacePhone) {
+  let interfaceResult = { selected: '', displayed: [] as string[] };
+  try { interfaceResult = JSON.parse(interfacePhoneCheck.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
+  // Use the selected dropdown phone first, then fall back to header-displayed phone
+  const activePhone = interfaceResult.selected || interfaceResult.displayed[0] || '';
+  const activeDigits = activePhone.replace(/\D/g, '');
+  if (!activePhone || !validatePhone(activeDigits)) {
     ab('close');
-    return { error: 'no_recipient_phone_in_interface', message: `No valid phone found in the active text interface for ${recipient}. The recipient may not have a mobile number on file.`, interface_phones: interfacePhones, wo_state: woState };
+    return { error: 'no_active_destination_phone', message: `No valid phone found as the active/selected destination in the text interface for ${recipient}.`, interface_result: interfaceResult, wo_state: woState };
   }
   const validatedDigits = validatedWoPhone.replace(/\D/g, '');
-  const interfaceDigits = verifiedInterfacePhone.replace(/\D/g, '');
-  if (validatedDigits !== interfaceDigits) {
+  if (validatedDigits !== activeDigits) {
     ab('close');
-    return { error: 'phone_mismatch', message: `Interface phone (${verifiedInterfacePhone}) does not match recipient-scoped phone (${validatedWoPhone}). Refusing to send to unverified recipient.`, validated_phone: validatedWoPhone, interface_phone: verifiedInterfacePhone, wo_state: woState };
+    return { error: 'phone_mismatch', message: `Active destination phone (${activePhone}) does not match recipient-scoped phone (${validatedWoPhone}). Refusing to send to unverified recipient.`, validated_phone: validatedWoPhone, active_phone: activePhone, wo_state: woState };
   }
 
   const sanitized = escapeForEval(messageText);
@@ -876,7 +878,7 @@ async function textFromWorkOrder(
     wo_id: woId,
     wo_state: woState,
     validated_phone: validatedWoPhone,
-    verified_interface_phone: verifiedInterfacePhone,
+    verified_interface_phone: activePhone,
     message_length: messageText.length,
     message_preview: messageText.slice(0, 100),
   };
@@ -1058,7 +1060,7 @@ function parseTextArgs(args: string[]): {
   let execute = false;
   let approvalId = '';
   let message = '';
-  const knownFlags = ['--occupancy-id', '--tenant-id', '--vendor-id', '--sr-id', '--wo-id', '--recipient'];
+  const knownFlags = ['--occupancy-id', '--tenant-id', '--vendor-id', '--sr-id', '--wo-id', '--recipient', '--phone'];
 
   const msgIdx = args.indexOf('--message');
   if (msgIdx !== -1) {
@@ -1105,6 +1107,7 @@ function loadApprovalFile(approvalId: string): Record<string, unknown> | null {
 interface ApprovalContext {
   command: string;
   message: string;
+  phone: string;
   targetIds: Record<string, string>;
 }
 
@@ -1116,6 +1119,10 @@ function validateExecuteGate(
   if (!execute) return;
   if (!approvalId) {
     console.error('ERROR: --execute requires --approval-id <id>. Get approval via cortextos bus create-approval first.');
+    process.exit(1);
+  }
+  if (!context.phone) {
+    console.error('ERROR: --execute requires --phone <number> (the validated destination phone from the dry-run output).');
     process.exit(1);
   }
   const approval = loadApprovalFile(approvalId);
@@ -1144,9 +1151,14 @@ function validateExecuteGate(
       process.exit(1);
     }
   }
-  const msgPrefix = context.message.slice(0, 80);
-  if (!combined.includes(msgPrefix)) {
-    console.error(`ERROR: approval ${approvalId} message content does not match. This approval may have been created for a different message.`);
+  const phoneDigits = context.phone.replace(/\D/g, '');
+  if (!combined.includes(phoneDigits)) {
+    console.error(`ERROR: approval ${approvalId} does not contain destination phone "${phoneDigits}". This approval was created for a different recipient.`);
+    process.exit(1);
+  }
+  const msgHash = createHash('sha256').update(context.message).digest('hex').slice(0, 16);
+  if (!combined.includes(msgHash)) {
+    console.error(`ERROR: approval ${approvalId} message hash does not match (expected ${msgHash}). This approval was created for a different message.`);
     process.exit(1);
   }
 }
@@ -1202,14 +1214,16 @@ async function main() {
       const parsed = parseTextArgs(cmdArgs);
       const occId = parsed.flags['--occupancy-id'];
       const tenId = parsed.flags['--tenant-id'];
+      const phone = parsed.flags['--phone'] || '';
       if (!occId || !tenId || !parsed.message) {
-        console.error('Usage: text-tenant --occupancy-id <id> --tenant-id <id> --message <text> [--execute --approval-id <id>]');
-        console.error('  Default is dry-run. --execute requires --approval-id from cortextos approval gate.');
+        console.error('Usage: text-tenant --occupancy-id <id> --tenant-id <id> --phone <number> --message <text> [--execute --approval-id <id>]');
+        console.error('  Default is dry-run. --execute requires --approval-id and --phone from cortextos approval gate.');
         process.exit(1);
       }
       validateExecuteGate(parsed.execute, parsed.approvalId, {
         command: 'text-tenant',
         message: parsed.message,
+        phone,
         targetIds: { 'occupancy-id': occId, 'tenant-id': tenId },
       });
       const result = await textTenant(occId, tenId, parsed.message, parsed.execute);
@@ -1222,8 +1236,9 @@ async function main() {
       const srId = parsed.flags['--sr-id'];
       const woId = parsed.flags['--wo-id'];
       const recipient = parsed.flags['--recipient'] as 'tenant' | 'vendor';
+      const phone = parsed.flags['--phone'] || '';
       if (!srId || !woId || !recipient || !parsed.message) {
-        console.error('Usage: text-wo --sr-id <id> --wo-id <id> --recipient <tenant|vendor> --message <text> [--execute --approval-id <id>]');
+        console.error('Usage: text-wo --sr-id <id> --wo-id <id> --recipient <tenant|vendor> --phone <number> --message <text> [--execute --approval-id <id>]');
         process.exit(1);
       }
       if (recipient !== 'tenant' && recipient !== 'vendor') {
@@ -1233,6 +1248,7 @@ async function main() {
       validateExecuteGate(parsed.execute, parsed.approvalId, {
         command: 'text-wo',
         message: parsed.message,
+        phone,
         targetIds: { 'sr-id': srId, 'wo-id': woId, recipient },
       });
       const result = await textFromWorkOrder(srId, woId, recipient, parsed.message, parsed.execute);
@@ -1243,13 +1259,16 @@ async function main() {
     case 'text-vendor': {
       const parsed = parseTextArgs(cmdArgs);
       const vendorId = parsed.flags['--vendor-id'];
+      const phone = parsed.flags['--phone'] || '';
       if (!vendorId || !parsed.message) {
-        console.error('Usage: text-vendor --vendor-id <id> --message <text> [--execute --approval-id <id>]');
+        console.error('Usage: text-vendor --vendor-id <id> --phone <number> --message <text> [--execute --approval-id <id>]');
+        console.error('  Default is dry-run. --execute requires --approval-id and --phone from cortextos approval gate.');
         process.exit(1);
       }
       validateExecuteGate(parsed.execute, parsed.approvalId, {
         command: 'text-vendor',
         message: parsed.message,
+        phone,
         targetIds: { 'vendor-id': vendorId },
       });
       const result = await textVendor(vendorId, parsed.message, parsed.execute);
