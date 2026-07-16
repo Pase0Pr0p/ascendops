@@ -1040,7 +1040,7 @@ export class AgentProcess {
     const isHandoffRestart = handoffBlock.length > 0;
     this.lastSpawnWasHandoff = isHandoffRestart;
     const suppressBootBlock = this.config.suppress_boot_notify
-      ? ' SUPPRESS_BOOT_NOTIFY: skip AGENTS.md cold-boot steps 1 and 13, fast-path step 6, and the CONTEXT HANDOFF pickup message. Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
+      ? ' SUPPRESS_BOOT_NOTIFY: skip the cold-boot boot message and online status message, the fast-path status message, and the CONTEXT HANDOFF pickup message. Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
       : '';
     return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and follow its session-start instructions. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${suppressBootBlock}${onboardingAppend}${recoveryBlock}${rateLimitBlock}`;
   }
@@ -1088,7 +1088,7 @@ export class AgentProcess {
     // Session refresh (--continue) is never a handoff restart.
     this.lastSpawnWasHandoff = false;
     const suppressBootBlock = this.config.suppress_boot_notify
-      ? ' SUPPRESS_BOOT_NOTIFY: skip AGENTS.md cold-boot steps 1 and 13, fast-path step 6, and the CONTEXT HANDOFF pickup message. Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
+      ? ' SUPPRESS_BOOT_NOTIFY: skip the cold-boot boot message and online status message, the fast-path status message, and the CONTEXT HANDOFF pickup message. Do NOT send any boot/restart/online notification via Telegram. Still reply to incoming Telegrams and send real deliverables.'
       : '';
     return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Read AGENTS.md and follow its session-start instructions. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${suppressBootBlock}${recoveryBlock}${rateLimitBlock}`;
   }
