@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test:playwright": "npx playwright test",
-    "prebuild": "npm run typecheck"
+    "prebuild": "bash scripts/prebuild-guard.sh && npm run typecheck"
   },
   "keywords": [
     "claude",
