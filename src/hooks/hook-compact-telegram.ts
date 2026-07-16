@@ -11,12 +11,23 @@
  * Telegram call must never abort compaction.
  */
 
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { loadEnv } from './index.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
 
   if (!env.botToken || !env.chatId) return;
+
+  const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
+  try {
+    const configPath = join(agentDir, 'config.json');
+    if (existsSync(configPath)) {
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+      if (config.suppress_boot_notify) return;
+    }
+  } catch { /* read failure = don't suppress */ }
 
   const agentName = env.agentName || 'agent';
 
