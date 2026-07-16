@@ -18,7 +18,7 @@
  * All output is JSON to stdout; errors to stderr.
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { resolve } from 'node:path';
@@ -74,6 +74,22 @@ function abReadOnly(...args: string[]): string {
     `agent-browser --session ${SESSION_NAME} --restore --restore-save never ${args.join(' ')}`,
     { encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] },
   ).trim();
+}
+
+// Uses execFileSync so the JS script is passed as a proper argv entry, not shell-interpreted.
+// This avoids semicolons, quotes, and special chars in the eval body breaking the shell.
+function abEval(script: string): { ok: boolean; output: string } {
+  try {
+    const output = execFileSync(
+      'agent-browser',
+      ['--session', SESSION_NAME, '--restore', 'eval', script],
+      { encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] },
+    ).trim();
+    return { ok: true, output };
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    return { ok: false, output: e.stdout ?? e.stderr ?? e.message ?? String(err) };
+  }
 }
 
 function abSafe(...args: string[]): { ok: boolean; output: string } {
@@ -252,6 +268,176 @@ async function lookupUnit(query: string): Promise<object> {
 }
 
 /**
+ * Assign a vendor to a work order via the AppFolio edit form.
+ *
+ * Safe by default: --execute flag is required for real submission.
+ * Dry-run (default) validates CSRF + idempotency preflight and prints the PATCH without submitting.
+ *
+ * Params:
+ *   srId             — AppFolio service_request ID (numeric digits only)
+ *   woId             — AppFolio work_order ID (numeric digits only)
+ *   appfolioVendorId — Vendor's AppFolio numeric ID (contacts.appfolio_vendor_id, digits only).
+ *                      party field = v_{appfolioVendorId} — confirmed from live WO edit-form
+ *                      inspection (party="v_1089" for Murray, Patrick / vendor 1089).
+ *   live             — if true, submits the PATCH (requires explicit --execute flag at CLI)
+ */
+async function assignVendor(
+  srId: string,
+  woId: string,
+  appfolioVendorId: string,
+  live: boolean,
+): Promise<{ error?: string; [key: string]: unknown }> {
+  // [fix-1] Validate all IDs are numeric before use in paths or eval scripts
+  if (!/^\d+$/.test(srId) || !/^\d+$/.test(woId) || !/^\d+$/.test(appfolioVendorId)) {
+    return { error: 'invalid_ids', message: 'srId, woId, and appfolioVendorId must be numeric digits only' };
+  }
+
+  const partyValue = `v_${appfolioVendorId}`;
+
+  const sessionCheck = await checkSession();
+  if (!sessionCheck.authenticated) {
+    return { error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
+  }
+
+  const woUrl = `${APPFOLIO_URL}/maintenance/service_requests/${srId}/work_orders/${woId}`;
+
+  const opened = abSafe('open', woUrl);
+  if (!opened.ok) return { error: 'navigation_failed', message: opened.output };
+  abSafe('wait', '--load', 'networkidle');
+
+  const currentUrl = abSafe('get', 'url').output.trim();
+  if (/account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(currentUrl)) {
+    ab('close');
+    return { error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
+  }
+
+  // Extract CSRF token (execFileSync — no shell interpretation)
+  const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  const csrfToken = csrfResult.output.replace(/^"|"$/g, '').trim();
+  if (!csrfToken) {
+    ab('close');
+    return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
+  }
+
+  // [fix-2] Enforce CSRF functional check — block if GraphQL returns non-200.
+  // srId/woId/appfolioVendorId are digits-only (validated above) — safe to interpolate.
+  // csrfToken: AppFolio tokens are base64url (A-Z a-z 0-9 _ - =), no shell-special chars.
+  const csrfCheckScript = `fetch("/graphql",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":"${csrfToken}"},body:JSON.stringify({query:"{workOrderSmartMaintenanceDetails(workOrderId:\\"${woId}\\"){id}}"})}).then(function(r){return JSON.stringify({status:r.status});})`;
+  const csrfCheckResult = abEval(csrfCheckScript);
+  let csrfStatus = 0;
+  try {
+    // abEval returns the value JSON-stringified by the browser, so unwrap one level
+    const raw = csrfCheckResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"');
+    csrfStatus = (JSON.parse(raw) as { status?: number }).status ?? 0;
+  } catch { /* stays 0, triggers error below */ }
+  if (csrfStatus !== 200) {
+    ab('close');
+    return { error: 'csrf_check_failed', message: `CSRF functional check returned status ${csrfStatus || 'unknown'}, expected 200`, raw: csrfCheckResult.output };
+  }
+
+  // [fix-3] Idempotency preflight — read current party before posting
+  // Fetch the edit form and extract the current party value
+  // [fix-3] Idempotency preflight — fail-closed.
+  // Script returns {ok, party} on success or {error} on any failure including non-ok HTTP,
+  // missing selector, or DOM parse failure. Null party is an error, not unassigned.
+  // srId/woId are digits-only (validated above); csrfToken is base64url — safe to interpolate.
+  const editPath = `/maintenance/service_requests/${srId}/work_orders/${woId}/edit`;
+  const currentPartyScript = `fetch("${editPath}",{headers:{"Accept":"text/html","X-Requested-With":"XMLHttpRequest","X-CSRF-Token":"${csrfToken}"}}).then(function(r){if(!r.ok){return JSON.stringify({error:"http_"+r.status});}return r.json().then(function(d){var p=new DOMParser();var doc=p.parseFromString(d.edit_body||"","text/html");var f=doc.querySelector('[name="maintenance_work_order[party]"]');if(!f){return JSON.stringify({error:"field_not_found"});}return JSON.stringify({ok:true,party:f.value});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const currentPartyResult = abEval(currentPartyScript);
+
+  // Any abEval failure, parse failure, missing field, non-ok HTTP, or null party → block; never fail open
+  if (!currentPartyResult.ok) {
+    ab('close');
+    return { error: 'idempotency_check_failed', reason: 'abEval error', raw: currentPartyResult.output };
+  }
+  let currentPartyParsed: { ok?: boolean; party?: string; error?: string } = {};
+  try {
+    const raw = currentPartyResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"');
+    currentPartyParsed = JSON.parse(raw) as typeof currentPartyParsed;
+  } catch {
+    ab('close');
+    return { error: 'idempotency_check_failed', reason: 'JSON parse error', raw: currentPartyResult.output };
+  }
+  if (currentPartyParsed.error || !currentPartyParsed.ok || typeof currentPartyParsed.party !== 'string') {
+    ab('close');
+    return { error: 'idempotency_check_failed', reason: currentPartyParsed.error ?? 'missing party field or ok flag', raw: currentPartyResult.output };
+  }
+  const currentParty = currentPartyParsed.party;
+
+  // Only empty string may proceed to POST. All other states are explicit decisions.
+  if (currentParty === partyValue) {
+    ab('close');
+    return { already_assigned: true, party_value: partyValue, appfolio_vendor_id: appfolioVendorId, sr_id: srId, wo_id: woId, message: 'Vendor already assigned — no POST sent.' };
+  }
+  if (currentParty !== '') {
+    ab('close');
+    return { error: 'different_vendor_assigned', current_party: currentParty, requested_party: partyValue, message: 'A different vendor is already assigned. Override requires explicit approval — this command does not support override.' };
+  }
+
+  const patchUrl = `/maintenance/service_requests/${srId}/work_orders/${woId}`;
+  const patchParams: Record<string, string> = {
+    '_method': 'patch',
+    'authenticity_token': csrfToken,
+    'maintenance_work_order[party]': partyValue,
+  };
+  const patchBody = Object.entries(patchParams)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+
+  // [fix-0] Dry-run is the default (safe). Live requires --execute flag explicitly.
+  if (!live) {
+    ab('close');
+    return {
+      dry_run: true,
+      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute only after chief + Albie greenlight on this specific WO+vendor.',
+      would_patch: patchUrl,
+      csrf_token_extracted: true,
+      csrf_token_prefix: csrfToken.slice(0, 8) + '…',
+      csrf_status: csrfStatus,
+      current_party: currentParty,
+      appfolio_vendor_id: appfolioVendorId,
+      party_value: partyValue,
+      patch_body: patchParams,
+    };
+  }
+
+  // ── LIVE SUBMIT — requires explicit --execute flag + per-WO chief + Albie greenlight ──────────
+  // patchUrl contains only validated numeric IDs; patchBody is URL-encoded (no JS special chars);
+  // csrfToken is base64url — all safe for direct JS interpolation via execFileSync argv.
+  const bodyLiteral = JSON.stringify(patchBody); // URL-encoded string → safe JSON literal for JS
+  const submitScript = `fetch("${patchUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral}}).then(function(r){return r.text().then(function(){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const submitResult = abEval(submitScript);
+
+  ab('close');
+
+  let submitJson: Record<string, unknown> = {};
+  try { submitJson = JSON.parse(submitResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* use raw */ }
+
+  // [fix-4] Return error and non-zero exit on submit failure
+  const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && submitJson.status < 400));
+  if (!submitOk) {
+    return {
+      error: 'submit_failed',
+      appfolio_vendor_id: appfolioVendorId,
+      party_value: partyValue,
+      sr_id: srId,
+      wo_id: woId,
+      submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
+    };
+  }
+
+  return {
+    live: true,
+    appfolio_vendor_id: appfolioVendorId,
+    party_value: partyValue,
+    sr_id: srId,
+    wo_id: woId,
+    csrf_token_prefix: csrfToken.slice(0, 8) + '…',
+    submit_result: submitJson,
+  };
+}
+
+/**
  * Lookup a work order by ID or search term.
  */
 async function lookupWorkOrder(query: string): Promise<object> {
@@ -426,6 +612,33 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
       break;
     }
+    case 'assign-vendor': {
+      // Default: dry-run (safe). Pass --execute to actually submit.
+      // assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--execute]
+      // vendor-id = contacts.appfolio_vendor_id (numeric, e.g. 1089 → party field = v_1089)
+      const srIdIdx = cmdArgs.indexOf('--sr-id');
+      const woIdIdx = cmdArgs.indexOf('--wo-id');
+      const vendorIdIdx = cmdArgs.indexOf('--vendor-id');
+      const live = cmdArgs.includes('--execute'); // --execute is the deliberate-action flag for live submit
+
+      if (srIdIdx === -1 || woIdIdx === -1 || vendorIdIdx === -1) {
+        console.error('Usage: assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--execute]');
+        console.error('  Default is dry-run. Pass --execute only with chief + Albie greenlight on the specific WO+vendor.');
+        process.exit(1);
+      }
+      const srId = cmdArgs[srIdIdx + 1];
+      const woId = cmdArgs[woIdIdx + 1];
+      const appfolioVendorId = cmdArgs[vendorIdIdx + 1];
+      if (!srId || !woId || !appfolioVendorId) {
+        console.error('assign-vendor: --sr-id, --wo-id, and --vendor-id are all required');
+        process.exit(1);
+      }
+      const result = await assignVendor(srId, woId, appfolioVendorId, live);
+      console.log(JSON.stringify(result, null, 2));
+      // Non-zero exit on any error or submit failure
+      process.exit(result.error ? 1 : 0);
+      break;
+    }
     default: {
       console.error([
         'Usage: appfolio-browser-read.ts <command> [args]',
@@ -437,6 +650,8 @@ async function main() {
         '  lookup-tenant <name>          — search tenants by name',
         '  lookup-unit <address>         — search units by address or ID',
         '  lookup-work-order <id|term>   — search work orders',
+        '  assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--execute]',
+        '                                — assign a vendor to a WO (party=v_<id>); default=dry-run, --execute submits',
       ].join('\n'));
       process.exit(1);
     }
