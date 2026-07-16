@@ -19,9 +19,9 @@
  */
 
 import { execSync, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 dotenvConfig({ path: resolve(process.cwd(), '../orgs/paseo-pm/secrets.env'), override: false });
 dotenvConfig({ path: resolve(process.cwd(), '.env.local'), override: false });
@@ -704,6 +704,13 @@ async function textFromWorkOrder(
   let recipientPhones: string[] = [];
   try { recipientPhones = JSON.parse(recipientPhoneResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* empty */ }
 
+  // Validate recipient has a phone number (fail-closed)
+  let validatedWoPhone = '';
+  for (const p of recipientPhones) {
+    const digits = p.replace(/\D/g, '');
+    if (validatePhone(digits)) { validatedWoPhone = p; break; }
+  }
+
   if (!live) {
     ab('close');
     return {
@@ -713,11 +720,17 @@ async function textFromWorkOrder(
       sr_id: srId,
       wo_id: woId,
       wo_state: woState,
+      validated_phone: validatedWoPhone || 'NONE — no valid phone found on WO page for this recipient',
       phones_on_page: recipientPhones,
       text_sections_found: textSections,
       message_preview: messageText.slice(0, 100) + (messageText.length > 100 ? '...' : ''),
       message_length: messageText.length,
     };
+  }
+
+  if (!validatedWoPhone) {
+    ab('close');
+    return { error: 'no_valid_phone', message: `No valid phone number found on WO page for ${recipient}. Cannot send without a validated recipient.`, phones_on_page: recipientPhones, wo_state: woState };
   }
 
   // LIVE: Navigate to the Texts section on the WO page
@@ -895,20 +908,30 @@ async function textVendor(
     return { error: 'no_valid_phone', message: 'No valid phone number found on vendor page. Cannot send without a validated recipient.', vendor_state: vendorState };
   }
 
-  // LIVE: Click the "text" link next to the vendor's phone number
+  // LIVE: Click the "text" link tied to the validated phone number
+  const escapedPhone = escapeForEval(validatedVendorPhone);
   const clickResult = abEval(`
-    var links = Array.from(document.querySelectorAll('a'));
-    var textLink = links.find(function(a) {
-      var t = a.textContent.trim().toLowerCase();
-      return t === 'text' || t === 'send text';
-    });
-    if (textLink) { textLink.click(); 'clicked'; }
-    else { 'no_text_link'; }
+    var targetPhone = "${escapedPhone}";
+    var found = null;
+    var rows = document.querySelectorAll('tr, div, li, dd, span');
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (row.textContent.indexOf(targetPhone) !== -1) {
+        var links = row.querySelectorAll('a');
+        for (var j = 0; j < links.length; j++) {
+          var t = links[j].textContent.trim().toLowerCase();
+          if (t === 'text' || t === 'send text') { found = links[j]; break; }
+        }
+        if (found) break;
+      }
+    }
+    if (found) { found.click(); 'clicked'; }
+    else { 'no_text_link_for_phone'; }
   `);
 
   if (clickResult.output.includes('no_text_link')) {
     ab('close');
-    return { error: 'no_text_surface', message: 'No text link found on vendor page. Vendor may not have a mobile number on file.', vendor_state: vendorState };
+    return { error: 'no_text_surface', message: `No text link found adjacent to validated phone ${validatedVendorPhone}. Vendor page layout may have changed.`, vendor_state: vendorState };
   }
 
   await new Promise(r => setTimeout(r, 1500));
@@ -1006,9 +1029,40 @@ function parseTextArgs(args: string[]): {
   return { flags, execute, approvalId, message };
 }
 
+function loadApprovalFile(approvalId: string): Record<string, unknown> | null {
+  const instanceId = process.env.CTX_INSTANCE_ID || 'default';
+  const org = process.env.CTX_ORG || '';
+  const home = process.env.HOME || '';
+  const ctxRoot = join(home, '.cortextos', instanceId);
+  const orgBase = org ? join(ctxRoot, 'orgs', org) : ctxRoot;
+  const approvalDir = join(orgBase, 'approvals');
+
+  for (const sub of ['resolved', 'pending']) {
+    const file = join(approvalDir, sub, `${approvalId}.json`);
+    if (existsSync(file)) {
+      return JSON.parse(readFileSync(file, 'utf-8'));
+    }
+  }
+  return null;
+}
+
 function validateExecuteGate(execute: boolean, approvalId: string): void {
-  if (execute && !approvalId) {
+  if (!execute) return;
+  if (!approvalId) {
     console.error('ERROR: --execute requires --approval-id <id>. Get approval via cortextos bus create-approval first.');
+    process.exit(1);
+  }
+  const approval = loadApprovalFile(approvalId);
+  if (!approval) {
+    console.error(`ERROR: approval ${approvalId} not found.`);
+    process.exit(1);
+  }
+  if (approval.status !== 'approved') {
+    console.error(`ERROR: approval ${approvalId} status is "${approval.status}", not "approved".`);
+    process.exit(1);
+  }
+  if (approval.category !== 'external-comms') {
+    console.error(`ERROR: approval ${approvalId} category is "${approval.category}", expected "external-comms".`);
     process.exit(1);
   }
 }
