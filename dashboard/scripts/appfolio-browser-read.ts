@@ -424,6 +424,7 @@ async function textTenant(
   tenantId: string,
   messageText: string,
   live: boolean,
+  approvedPhone: string,
 ): Promise<TextResult> {
   if (!/^\d+$/.test(occupancyId) || !/^\d+$/.test(tenantId)) {
     return { error: 'invalid_ids', message: 'occupancyId and tenantId must be numeric digits only' };
@@ -531,6 +532,14 @@ async function textTenant(
     };
   }
 
+  // Cross-check: approved phone must match browser-discovered phone
+  const approvedDigits = approvedPhone.replace(/\D/g, '');
+  const discoveredDigits = selectedPhone.replace(/\D/g, '');
+  if (approvedDigits !== discoveredDigits) {
+    ab('close');
+    return { error: 'approved_phone_mismatch', message: `Approved phone (${approvedPhone}) does not match browser-discovered phone (${selectedPhone}). Refusing to send.` };
+  }
+
   // LIVE SEND: select phone, type message, click send
   const phoneVal = escapeForEval(phones[0].value);
   const selectPhone = abEval(`
@@ -620,6 +629,7 @@ async function textFromWorkOrder(
   recipient: 'tenant' | 'vendor',
   messageText: string,
   live: boolean,
+  approvedPhone: string,
 ): Promise<TextResult> {
   if (!/^\d+$/.test(srId) || !/^\d+$/.test(woId)) {
     return { error: 'invalid_ids', message: 'srId and woId must be numeric digits only' };
@@ -827,6 +837,13 @@ async function textFromWorkOrder(
     return { error: 'phone_mismatch', message: `Active destination phone (${activePhone}) does not match recipient-scoped phone (${validatedWoPhone}). Refusing to send to unverified recipient.`, validated_phone: validatedWoPhone, active_phone: activePhone, wo_state: woState };
   }
 
+  // Cross-check: approved phone must match browser-discovered scoped phone
+  const approvedDigits = approvedPhone.replace(/\D/g, '');
+  if (approvedDigits !== validatedDigits) {
+    ab('close');
+    return { error: 'approved_phone_mismatch', message: `Approved phone (${approvedPhone}) does not match browser-discovered phone (${validatedWoPhone}). Refusing to send.` };
+  }
+
   const sanitized = escapeForEval(messageText);
   const fillResult = abEval(`
     var input = null;
@@ -892,6 +909,7 @@ async function textVendor(
   vendorId: string,
   messageText: string,
   live: boolean,
+  approvedPhone: string,
 ): Promise<TextResult> {
   if (!/^\d+$/.test(vendorId)) {
     return { error: 'invalid_id', message: 'vendorId must be numeric digits only' };
@@ -964,6 +982,14 @@ async function textVendor(
   if (!validatedVendorPhone) {
     ab('close');
     return { error: 'no_valid_phone', message: 'No valid phone number found on vendor page. Cannot send without a validated recipient.', vendor_state: vendorState };
+  }
+
+  // Cross-check: approved phone must match browser-discovered phone
+  const approvedDigits = approvedPhone.replace(/\D/g, '');
+  const vendorDigits = validatedVendorPhone.replace(/\D/g, '');
+  if (approvedDigits !== vendorDigits) {
+    ab('close');
+    return { error: 'approved_phone_mismatch', message: `Approved phone (${approvedPhone}) does not match browser-discovered phone (${validatedVendorPhone}). Refusing to send.` };
   }
 
   // LIVE: Click the "text" link tied to the validated phone number
@@ -1226,7 +1252,7 @@ async function main() {
         phone,
         targetIds: { 'occupancy-id': occId, 'tenant-id': tenId },
       });
-      const result = await textTenant(occId, tenId, parsed.message, parsed.execute);
+      const result = await textTenant(occId, tenId, parsed.message, parsed.execute, phone);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
       break;
@@ -1251,7 +1277,7 @@ async function main() {
         phone,
         targetIds: { 'sr-id': srId, 'wo-id': woId, recipient },
       });
-      const result = await textFromWorkOrder(srId, woId, recipient, parsed.message, parsed.execute);
+      const result = await textFromWorkOrder(srId, woId, recipient, parsed.message, parsed.execute, phone);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
       break;
@@ -1271,7 +1297,7 @@ async function main() {
         phone,
         targetIds: { 'vendor-id': vendorId },
       });
-      const result = await textVendor(vendorId, parsed.message, parsed.execute);
+      const result = await textVendor(vendorId, parsed.message, parsed.execute, phone);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
       break;
