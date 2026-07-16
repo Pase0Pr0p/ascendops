@@ -818,6 +818,12 @@ async function textFromWorkOrder(
     ab('close');
     return { error: 'no_recipient_phone_in_interface', message: `No valid phone found in the active text interface for ${recipient}. The recipient may not have a mobile number on file.`, interface_phones: interfacePhones, wo_state: woState };
   }
+  const validatedDigits = validatedWoPhone.replace(/\D/g, '');
+  const interfaceDigits = verifiedInterfacePhone.replace(/\D/g, '');
+  if (validatedDigits !== interfaceDigits) {
+    ab('close');
+    return { error: 'phone_mismatch', message: `Interface phone (${verifiedInterfacePhone}) does not match recipient-scoped phone (${validatedWoPhone}). Refusing to send to unverified recipient.`, validated_phone: validatedWoPhone, interface_phone: verifiedInterfacePhone, wo_state: woState };
+  }
 
   const sanitized = escapeForEval(messageText);
   const fillResult = abEval(`
@@ -1096,11 +1102,16 @@ function loadApprovalFile(approvalId: string): Record<string, unknown> | null {
   return null;
 }
 
+interface ApprovalContext {
+  command: string;
+  message: string;
+  targetIds: Record<string, string>;
+}
+
 function validateExecuteGate(
   execute: boolean,
   approvalId: string,
-  command: string,
-  messageText: string,
+  context: ApprovalContext,
 ): void {
   if (!execute) return;
   if (!approvalId) {
@@ -1123,11 +1134,17 @@ function validateExecuteGate(
   const title = String(approval.title || '');
   const desc = String(approval.description || '');
   const combined = title + ' ' + desc;
-  if (!combined.includes(command)) {
-    console.error(`ERROR: approval ${approvalId} does not match command "${command}". Title: "${title}"`);
+  if (!combined.includes(context.command)) {
+    console.error(`ERROR: approval ${approvalId} does not match command "${context.command}". Title: "${title}"`);
     process.exit(1);
   }
-  const msgPrefix = messageText.slice(0, 80);
+  for (const [key, value] of Object.entries(context.targetIds)) {
+    if (!combined.includes(value)) {
+      console.error(`ERROR: approval ${approvalId} does not match ${key}="${value}". This approval was created for a different target.`);
+      process.exit(1);
+    }
+  }
+  const msgPrefix = context.message.slice(0, 80);
   if (!combined.includes(msgPrefix)) {
     console.error(`ERROR: approval ${approvalId} message content does not match. This approval may have been created for a different message.`);
     process.exit(1);
@@ -1190,7 +1207,11 @@ async function main() {
         console.error('  Default is dry-run. --execute requires --approval-id from cortextos approval gate.');
         process.exit(1);
       }
-      validateExecuteGate(parsed.execute, parsed.approvalId, 'text-tenant', parsed.message);
+      validateExecuteGate(parsed.execute, parsed.approvalId, {
+        command: 'text-tenant',
+        message: parsed.message,
+        targetIds: { 'occupancy-id': occId, 'tenant-id': tenId },
+      });
       const result = await textTenant(occId, tenId, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
@@ -1209,7 +1230,11 @@ async function main() {
         console.error('text-wo: --recipient must be "tenant" or "vendor"');
         process.exit(1);
       }
-      validateExecuteGate(parsed.execute, parsed.approvalId, 'text-wo', parsed.message);
+      validateExecuteGate(parsed.execute, parsed.approvalId, {
+        command: 'text-wo',
+        message: parsed.message,
+        targetIds: { 'sr-id': srId, 'wo-id': woId, recipient },
+      });
       const result = await textFromWorkOrder(srId, woId, recipient, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
@@ -1222,7 +1247,11 @@ async function main() {
         console.error('Usage: text-vendor --vendor-id <id> --message <text> [--execute --approval-id <id>]');
         process.exit(1);
       }
-      validateExecuteGate(parsed.execute, parsed.approvalId, 'text-vendor', parsed.message);
+      validateExecuteGate(parsed.execute, parsed.approvalId, {
+        command: 'text-vendor',
+        message: parsed.message,
+        targetIds: { 'vendor-id': vendorId },
+      });
       const result = await textVendor(vendorId, parsed.message, parsed.execute);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error ? 1 : 0);
