@@ -334,6 +334,13 @@ export interface AgentConfig {
   telegram_polling?: boolean;
   /** Per-agent comms-lint config. Overrides org-level and hardcoded defaults. */
   comms_lint?: CommsLintConfig;
+  /**
+   * Suppress automatic boot/restart Telegram notifications for this agent.
+   * When true, the daemon skips the "Agent X is back online" notify AND
+   * omits the prompt instruction to send a back-online Telegram. The agent
+   * still replies to incoming Telegrams and sends real deliverables.
+   */
+  suppress_boot_notify?: boolean;
 }
 
 export interface CronEntry {
