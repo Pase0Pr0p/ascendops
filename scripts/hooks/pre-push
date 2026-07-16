@@ -13,12 +13,23 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-echo "[pre-push] Running build..."
-if ! npm run build --silent; then
-  echo ""
-  echo "[pre-push] Build failed. Fix the error before pushing." >&2
-  echo "[pre-push] Push aborted." >&2
-  exit 1
+BRANCH="$(git branch --show-current 2>/dev/null)"
+if [ "$BRANCH" = "main" ]; then
+  echo "[pre-push] Running build (main branch)..."
+  if ! npm run build --silent; then
+    echo ""
+    echo "[pre-push] Build failed. Fix the error before pushing." >&2
+    echo "[pre-push] Push aborted." >&2
+    exit 1
+  fi
+else
+  echo "[pre-push] Running typecheck (feature branch: $BRANCH)..."
+  if ! npx tsc --noEmit; then
+    echo ""
+    echo "[pre-push] Typecheck failed. Fix the error before pushing." >&2
+    echo "[pre-push] Push aborted." >&2
+    exit 1
+  fi
 fi
 
 echo "[pre-push] Running tests..."

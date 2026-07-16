@@ -3,6 +3,11 @@
 # The daemon loads dist/daemon.js into memory at startup; a feature-branch
 # build silently overwrites it, and the next restart reverts the deploy.
 
+if [ "$CI" = "true" ] || [ -n "$GITHUB_ACTIONS" ]; then
+  echo "prebuild-guard: CI environment detected, allowing build (ephemeral runner, no shared dist)."
+  exit 0
+fi
+
 BRANCH=$(git branch --show-current 2>/dev/null)
 
 if [ "$ALLOW_FEATURE_BUILD" = "1" ]; then
