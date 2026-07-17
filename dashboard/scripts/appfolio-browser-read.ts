@@ -7,7 +7,8 @@
  *   npx tsx scripts/appfolio-browser-read.ts login
  *   npx tsx scripts/appfolio-browser-read.ts lookup-tenant "John Smith"
  *   npx tsx scripts/appfolio-browser-read.ts lookup-unit "123 Main St Apt 1"
- *   npx tsx scripts/appfolio-browser-read.ts lookup-work-order "WO-12345"
+ *   npx tsx scripts/appfolio-browser-read.ts read-work-order "8014"
+ *   npx tsx scripts/appfolio-browser-read.ts batch-work-orders "8014" "7994" "8015"
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -437,32 +438,302 @@ async function assignVendor(
   };
 }
 
-/**
- * Lookup a work order by ID or search term.
- */
-async function lookupWorkOrder(query: string): Promise<object> {
-  const sessionCheck = await checkSession();
-  if (!sessionCheck.authenticated) {
-    return { error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
+interface WorkOrderDetail {
+  sr_number: string;
+  wo_number: string;
+  status: string;
+  property: string;
+  owner: string;
+  tenant: string;
+  description: string;
+  vendor_trade: string;
+  assignee: string;
+  submitted_by: string;
+  created_on: string;
+  created_by: string;
+  permission_to_enter: string;
+  recent_open_wos: string;
+  invoices: string;
+  sr_id: string;
+  wo_id: string;
+  url: string;
+  error?: string;
+  message?: string;
+}
+
+const WO_QUERY_RE = /^\d+(?:-\d+)?$/;
+const WO_HREF_RE = /^https?:\/\/[^/]+\/maintenance\/service_requests\/\d+(?:\?work_order_id=\d+)?$/;
+
+function findWoLinkFromAutocomplete(query: string): { text: string; href: string } | { error: string } {
+  const result = abEval(`
+    var links = document.querySelectorAll("a");
+    var found = [];
+    for (var i = 0; i < links.length; i++) {
+      var t = links[i].textContent.trim();
+      var h = links[i].getAttribute("href") || "";
+      if (/^\\d+-\\d+$/.test(t) && h.includes("/service_requests/")) {
+        found.push({text: t, href: h});
+      }
+    }
+    JSON.stringify(found);
+  `);
+  if (!result.ok) return { error: 'eval_failed' };
+
+  let links: Array<{ text: string; href: string }> = [];
+  try {
+    const raw = result.output.replace(/^"|"$/g, '').replace(/\\\\"/g, '"').replace(/\\"/g, '"');
+    links = JSON.parse(raw) as typeof links;
+  } catch { return { error: 'parse_failed' }; }
+
+  // Match: if query includes dash (e.g. "8014-1"), require exact text match.
+  // If query is base number (e.g. "8014"), require prefix match (text starts with "8014-").
+  const hasDash = query.includes('-');
+  const matches = links.filter(l =>
+    hasDash ? l.text === query : l.text.startsWith(`${query}-`)
+  );
+
+  if (matches.length === 0) return { error: 'not_found' };
+
+  // Deduplicate by href (autocomplete renders the same link in heading + anchor)
+  const seen = new Set<string>();
+  const unique = matches.filter(m => {
+    if (seen.has(m.href)) return false;
+    seen.add(m.href);
+    return true;
+  });
+
+  if (unique.length > 1) {
+    const texts = unique.map(m => m.text).join(', ');
+    return { error: `ambiguous_match: ${texts}` };
   }
 
-  const searchUrl = `${APPFOLIO_URL}/maintenance_requests?search=${encodeURIComponent(query)}`;
-  abSafe('--restore', 'open', searchUrl);
-  abSafe('wait', '--load', 'networkidle');
+  const match = unique[0];
+  if (!WO_HREF_RE.test(match.href)) {
+    return { error: `invalid_href: ${match.href.substring(0, 100)}` };
+  }
 
-  const tableData = abSafe('eval', `
-    const rows = Array.from(document.querySelectorAll('table tbody tr'));
-    JSON.stringify(rows.map(row => {
-      const cells = Array.from(row.querySelectorAll('td'));
-      return cells.map(c => c.innerText.trim());
-    }).filter(r => r.length > 0).slice(0, 20));
+  return match;
+}
+
+function extractWoDetailFields(): WorkOrderDetail {
+  const result = abEval(`
+    var statusLabel = (document.querySelector(".js-status-label") || {}).textContent || "";
+    var srHeader = (document.querySelector("h2") || {}).textContent || "";
+    var srMatch = srHeader.match(/#(\\d+)/);
+
+    function textAfterH3(label) {
+      var h3s = document.querySelectorAll("h3");
+      for (var i = 0; i < h3s.length; i++) {
+        if (new RegExp("^" + label + "$", "i").test(h3s[i].textContent.trim())) {
+          var sib = h3s[i].nextElementSibling;
+          while (sib && sib.tagName !== "H3" && sib.tagName !== "H2") {
+            var txt = sib.textContent.trim();
+            if (txt.length > 1) return txt;
+            sib = sib.nextElementSibling;
+          }
+        }
+      }
+      return "";
+    }
+
+    var contactLinks = document.querySelectorAll("a.js-contact-card-name-link");
+    var property = "", owner = "", tenant = "";
+    for (var i = 0; i < contactLinks.length; i++) {
+      var href = contactLinks[i].getAttribute("href") || "";
+      var txt = contactLinks[i].textContent.trim();
+      if (href.includes("/units/")) property = txt;
+      else if (href.includes("/owners/")) owner = txt;
+      else if (href.includes("/occupancies/") || href.includes("/tenants/")) tenant = txt;
+    }
+
+    var createdEl = document.querySelector(".js-service-request-header-created-label");
+    var createdBlock = createdEl ? createdEl.parentElement.textContent.trim() : "";
+    var createdOn = (createdBlock.match(/Created on:\\s*([\\d\\/]+)/) || [])[1] || "";
+    var createdBy = (createdBlock.match(/Created by:\\s*([^\\n]+)/) || [])[1] || "";
+    var permissionRaw = (createdBlock.match(/Permission to enter:\\s*([^\\n]+)/) || [])[1] || "";
+    var recentWos = (createdBlock.match(/Recent Work Orders for Unit:\\s*([^\\n]+)/) || [])[1] || "";
+
+    var invoiceText = "";
+    var h3s = document.querySelectorAll("h3");
+    for (var i = 0; i < h3s.length; i++) {
+      if (/^Invoices$/i.test(h3s[i].textContent.trim())) {
+        var next = h3s[i].parentElement || h3s[i].nextElementSibling;
+        if (next) {
+          var noInv = next.querySelector("td");
+          invoiceText = noInv ? noInv.textContent.trim() : "";
+        }
+      }
+    }
+
+    var submittedBy = (document.querySelector(".js-service-request-header-submitted-by-tenant") || {}).textContent || "";
+
+    var assigneeRaw = textAfterH3("Assignee");
+    var assignee = assigneeRaw.split("\\n")[0].trim();
+
+    JSON.stringify({
+      sr_number: srMatch ? srMatch[1] : "",
+      status: statusLabel.trim(),
+      property: property,
+      owner: owner,
+      tenant: tenant,
+      description: textAfterH3("Job Description").substring(0, 1000),
+      vendor_trade: textAfterH3("Vendor Trade"),
+      assignee: assignee,
+      submitted_by: submittedBy.trim(),
+      created_on: createdOn.trim(),
+      created_by: createdBy.trim(),
+      permission_to_enter: permissionRaw.trim(),
+      recent_open_wos: recentWos.trim(),
+      invoices: invoiceText
+    });
   `);
 
-  ab('close');
+  const empty: WorkOrderDetail = {
+    sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
+    description: '', vendor_trade: '', assignee: '', submitted_by: '',
+    created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
+    invoices: '', sr_id: '', wo_id: '', url: '',
+  };
+  if (!result.ok) return { ...empty, error: 'eval_failed', message: result.output };
 
-  let rows: string[][] = [];
-  try { rows = JSON.parse(tableData.output ?? '[]'); } catch { /* empty */ }
-  return { query, results: rows, count: rows.length };
+  try {
+    const raw = result.output.replace(/^"|"$/g, '').replace(/\\"/g, '"');
+    const parsed = JSON.parse(raw) as Partial<WorkOrderDetail>;
+    return { ...empty, ...parsed };
+  } catch {
+    return { ...empty, error: 'parse_failed', message: result.output };
+  }
+}
+
+async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrderDetail> {
+  const empty: WorkOrderDetail = {
+    sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
+    description: '', vendor_trade: '', assignee: '', submitted_by: '',
+    created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
+    invoices: '', sr_id: '', wo_id: '', url: '',
+  };
+
+  // [fix-1] Validate WO query: digits only, optionally with dash suffix (e.g. "8014" or "8014-1")
+  if (!WO_QUERY_RE.test(query)) {
+    return { ...empty, error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${query.substring(0, 50)}").` };
+  }
+
+  const sessionCheck = await checkSession();
+  if (!sessionCheck.authenticated) {
+    return { ...empty, error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
+  }
+
+  // Navigate to dashboard and search
+  abSafe('open', APPFOLIO_URL);
+  abSafe('wait', '--load', 'networkidle');
+
+  // Find the search box ref from snapshot, then fill by ref
+  const snapResult = abSafe('snapshot', '-i', '--json');
+  let searchRef = '';
+  if (snapResult.ok) {
+    try {
+      const snapData = JSON.parse(snapResult.output) as { data?: { refs?: Record<string, { name?: string; role?: string }> } };
+      const refs = snapData.data?.refs ?? {};
+      for (const [ref, info] of Object.entries(refs)) {
+        if (info.role === 'searchbox' && info.name === 'Search') {
+          searchRef = ref;
+          break;
+        }
+      }
+    } catch { /* fall back to text match */ }
+    if (!searchRef) {
+      const refMatch = snapResult.output.match(/searchbox "Search" \[ref=(e\d+)\]/);
+      if (refMatch) searchRef = refMatch[1];
+    }
+  }
+  if (!searchRef) {
+    if (!keepOpen) ab('close');
+    return { ...empty, error: 'search_box_not_found', message: 'Could not find global search box in snapshot.' };
+  }
+
+  // [fix-1] query is validated digits-only above, safe for shell-backed abSafe
+  abSafe('fill', `ref=${searchRef}`, query);
+
+  // Wait for autocomplete to populate
+  await new Promise(r => setTimeout(r, 4000));
+
+  // [fix-2] Pass query for exact/prefix match; fail closed on ambiguity
+  const woLinkResult = findWoLinkFromAutocomplete(query);
+  if ('error' in woLinkResult) {
+    if (!keepOpen) ab('close');
+    return { ...empty, error: 'wo_lookup_failed', message: `WO lookup for "${query}": ${woLinkResult.error}` };
+  }
+
+  const woNumber = woLinkResult.text;
+
+  // [fix-1] href already validated by findWoLinkFromAutocomplete against WO_HREF_RE
+  abSafe('open', woLinkResult.href);
+  abSafe('wait', '--load', 'networkidle');
+
+  // Verify we landed on the detail page, not the auth page
+  const currentUrl = abSafe('get', 'url').output.trim();
+  if (/account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(currentUrl)) {
+    if (!keepOpen) ab('close');
+    return { ...empty, error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
+  }
+
+  // Extract SR ID and WO ID from the final URL
+  const urlMatch = currentUrl.match(/service_requests\/(\d+)\/work_orders\/(\d+)/);
+  const srId = urlMatch?.[1] ?? '';
+  const woId = urlMatch?.[2] ?? '';
+
+  // Extract all fields from the detail page
+  const detail = extractWoDetailFields();
+  detail.wo_number = woNumber;
+  detail.sr_id = srId;
+  detail.wo_id = woId;
+  detail.url = currentUrl;
+
+  // [fix-3] Fail closed on missing critical fields — blank status is UNKNOWN, not success
+  const missingFields: string[] = [];
+  if (!detail.status) missingFields.push('status');
+  if (!detail.sr_id) missingFields.push('sr_id');
+  if (!detail.wo_id) missingFields.push('wo_id');
+  if (!detail.wo_number) missingFields.push('wo_number');
+  if (missingFields.length > 0) {
+    detail.error = 'incomplete_extraction';
+    detail.message = `Critical fields missing after extraction: ${missingFields.join(', ')}. Status is UNKNOWN.`;
+  }
+
+  if (!keepOpen) ab('close');
+  return detail;
+}
+
+async function batchWorkOrders(queries: string[]): Promise<WorkOrderDetail[]> {
+  const empty: WorkOrderDetail = {
+    sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
+    description: '', vendor_trade: '', assignee: '', submitted_by: '',
+    created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
+    invoices: '', sr_id: '', wo_id: '', url: '',
+  };
+
+  // Validate all queries before starting the browser session
+  for (const q of queries) {
+    if (!WO_QUERY_RE.test(q)) {
+      return [{ ...empty, error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${q.substring(0, 50)}").` }];
+    }
+  }
+
+  const sessionCheck = await checkSession();
+  if (!sessionCheck.authenticated) {
+    return [{ ...empty, error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' }];
+  }
+
+  const results: WorkOrderDetail[] = [];
+  try {
+    for (const q of queries) {
+      const detail = await readWorkOrder(q, true);
+      results.push(detail);
+    }
+  } finally {
+    ab('close');
+  }
+  return results;
 }
 
 // ─── Self-heal helpers ───────────────────────────────────────────────────────
@@ -606,10 +877,20 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
       break;
     }
-    case 'lookup-work-order': {
-      if (!cmdArgs[0]) { console.error('Usage: lookup-work-order <id-or-term>'); process.exit(1); }
-      const result = await lookupWorkOrder(cmdArgs.join(' '));
+    case 'lookup-work-order':
+    case 'read-work-order': {
+      if (!cmdArgs[0]) { console.error('Usage: read-work-order <WO-number>'); process.exit(1); }
+      const result = await readWorkOrder(cmdArgs[0]);
       console.log(JSON.stringify(result, null, 2));
+      process.exit(result.error ? 1 : 0);
+      break;
+    }
+    case 'batch-work-orders': {
+      if (!cmdArgs[0]) { console.error('Usage: batch-work-orders <WO1> <WO2> ...'); process.exit(1); }
+      const results = await batchWorkOrders(cmdArgs);
+      console.log(JSON.stringify(results, null, 2));
+      const anyError = results.some(r => r.error);
+      process.exit(anyError ? 1 : 0);
       break;
     }
     case 'assign-vendor': {
@@ -649,7 +930,9 @@ async function main() {
         '  reset-failures                — clear failure state after manual relogin',
         '  lookup-tenant <name>          — search tenants by name',
         '  lookup-unit <address>         — search units by address or ID',
-        '  lookup-work-order <id|term>   — search work orders',
+        '  read-work-order <WO-number>   — read WO detail page (status badge, property, vendor, description, etc.)',
+        '  lookup-work-order <WO-number> — alias for read-work-order',
+        '  batch-work-orders <WO1> ...   — read multiple WOs in sequence',
         '  assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--execute]',
         '                                — assign a vendor to a WO (party=v_<id>); default=dry-run, --execute submits',
       ].join('\n'));

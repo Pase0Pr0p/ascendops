@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # pre-push hook — installed by scripts/setup-hooks.sh
 #
-# Runs npm run build && npm test before any push.
-# Fails the push if either step fails, so broken code never reaches CI.
+# main: runs npm run build && npm test before push.
+# feature branches: runs typecheck (npx tsc --noEmit) && npm test.
+# Fails the push if any step fails, so broken code never reaches CI.
 #
 # To bypass in an emergency (last resort):
 #   git push --no-verify

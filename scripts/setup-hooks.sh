@@ -6,7 +6,7 @@
 #
 # Installs local hooks. The pre-commit hook catches declared shared skill drift
 # before template/runtime changes leave the working tree; the pre-push hook runs
-# npm run build && npm test before any push.
+# build (main) or typecheck (feature branches) + tests before any push.
 
 set -euo pipefail
 
