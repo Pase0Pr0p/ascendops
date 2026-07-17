@@ -327,9 +327,9 @@ async function assignVendor(
   const csrfCheckResult = abEval(csrfCheckScript);
   let csrfStatus = 0;
   try {
-    // abEval returns the value JSON-stringified by the browser, so unwrap one level
-    const raw = csrfCheckResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"');
-    csrfStatus = (JSON.parse(raw) as { status?: number }).status ?? 0;
+    let inner = csrfCheckResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    csrfStatus = (JSON.parse(inner) as { status?: number }).status ?? 0;
   } catch { /* stays 0, triggers error below */ }
   if (csrfStatus !== 200) {
     ab('close');
@@ -353,8 +353,9 @@ async function assignVendor(
   }
   let currentPartyParsed: { ok?: boolean; party?: string; error?: string } = {};
   try {
-    const raw = currentPartyResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"');
-    currentPartyParsed = JSON.parse(raw) as typeof currentPartyParsed;
+    let inner2 = currentPartyResult.output;
+    if (inner2.startsWith('"') && inner2.endsWith('"')) inner2 = JSON.parse(inner2) as string;
+    currentPartyParsed = JSON.parse(inner2) as typeof currentPartyParsed;
   } catch {
     ab('close');
     return { error: 'idempotency_check_failed', reason: 'JSON parse error', raw: currentPartyResult.output };
@@ -412,7 +413,7 @@ async function assignVendor(
   ab('close');
 
   let submitJson: Record<string, unknown> = {};
-  try { submitJson = JSON.parse(submitResult.output.replace(/^"|"$/g, '').replace(/\\"/g, '"')); } catch { /* use raw */ }
+  try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
 
   // [fix-4] Return error and non-zero exit on submit failure
   const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && submitJson.status < 400));
@@ -494,8 +495,9 @@ function findWoLinkFromAutocomplete(query: string): { text: string; href: string
 
   let links: Array<{ text: string; href: string }> = [];
   try {
-    const raw = result.output.replace(/^"|"$/g, '').replace(/\\\\"/g, '"').replace(/\\"/g, '"');
-    links = JSON.parse(raw) as typeof links;
+    let inner3 = result.output;
+    if (inner3.startsWith('"') && inner3.endsWith('"')) inner3 = JSON.parse(inner3) as string;
+    links = JSON.parse(inner3) as typeof links;
   } catch { return { error: 'parse_failed' }; }
 
   // Match: if query includes dash (e.g. "8014-1"), require exact text match.
@@ -714,8 +716,9 @@ function extractWoDetailFields(): WorkOrderDetail {
   if (!result.ok) return { ...empty, error: 'eval_failed', message: result.output };
 
   try {
-    const raw = result.output.replace(/^"|"$/g, '').replace(/\\"/g, '"');
-    const parsed = JSON.parse(raw) as Partial<WorkOrderDetail>;
+    let inner = result.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    const parsed = JSON.parse(inner) as Partial<WorkOrderDetail>;
     return { ...empty, ...parsed };
   } catch {
     return { ...empty, error: 'parse_failed', message: result.output };
