@@ -594,9 +594,13 @@ function extractWoDetailFields(): WorkOrderDetail {
       }
     }
     var logText = actionsLog.join(" | ").substring(0, 2000);
-    if (/Vendor Accepted/i.test(logText)) vendorStatus = "Accepted";
-    else if (/Vendor Declined/i.test(logText)) vendorStatus = "Declined";
-    else if (/texted to vendor|emailed.*vendor|sent.*vendor/i.test(logText)) vendorStatus = "Dispatched";
+    // Parse vendor status per-entry, taking the LATEST (first in page order = reverse-chron)
+    for (var vi = 0; vi < actionsLog.length; vi++) {
+      var entry = actionsLog[vi];
+      if (/Vendor Accepted/i.test(entry)) { vendorStatus = "Accepted"; break; }
+      if (/Vendor Declined/i.test(entry)) { vendorStatus = "Declined"; break; }
+      if (/Vendor Dispatched|Dispatched to vendor|texted to vendor|emailed.*vendor|sent.*vendor/i.test(entry)) { vendorStatus = "Dispatched"; break; }
+    }
 
     // SR header fields via js-* selectors
     var createdOn = qt(".js-service-request-header-created-on");
