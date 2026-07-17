@@ -792,11 +792,17 @@ async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrder
   abSafe('open', woLinkResult.href);
   abSafe('wait', '--load', 'networkidle');
 
-  // Verify we landed on the detail page, not the auth page
+  // Verify we landed on the detail page, not the auth page or dashboard
   const currentUrl = abSafe('get', 'url').output.trim();
   if (/account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(currentUrl)) {
     if (!keepOpen) ab('close');
     return { ...empty, error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
+  }
+
+  // Guard: detect redirect to dashboard (no WO detail page rendered)
+  if (!/\/service_requests\/\d+/.test(currentUrl)) {
+    if (!keepOpen) ab('close');
+    return { ...empty, wo_number: woNumber, error: 'navigation_redirected', message: `WO detail page not accessible — redirected to: ${currentUrl}. Possible permission issue or WO not viewable by this account.` };
   }
 
   // Extract SR ID and WO ID from the final URL
@@ -805,13 +811,28 @@ async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrder
   const woId = urlMatch?.[2] ?? '';
 
   // Extract all fields from the detail page
-  const detail = extractWoDetailFields();
+  let detail = extractWoDetailFields();
+
+  // Retry once if critical fields are empty (AppFolio async-loads content after page shell)
+  if (!detail.status && !detail.description && !detail.property) {
+    await new Promise(r => setTimeout(r, 5000));
+    detail = extractWoDetailFields();
+  }
+
   detail.wo_number = woNumber;
   detail.sr_id = srId;
   detail.wo_id = woId;
   detail.url = currentUrl;
 
   // [fix-3] Fail closed on missing critical fields — blank status is UNKNOWN, not success
+  if (!detail.status && !detail.description && !detail.property) {
+    if (!keepOpen) ab('close');
+    return {
+      ...empty, wo_number: woNumber, sr_id: srId, wo_id: woId, url: currentUrl,
+      error: 'content_not_loaded',
+      message: 'WO detail page loaded (URL correct) but content never rendered. Likely a Scheduled-status WO with a different page layout, or a permission issue.',
+    };
+  }
   const missingFields: string[] = [];
   if (!detail.status) missingFields.push('status');
   if (!detail.sr_id) missingFields.push('sr_id');
