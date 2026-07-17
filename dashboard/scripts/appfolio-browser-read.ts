@@ -777,16 +777,22 @@ async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrder
   }
 
   // [fix-1] query is validated digits-only above, safe for shell-backed abSafe
-  abSafe('fill', `ref=${searchRef}`, query);
-
-  // Wait for autocomplete to populate
-  await new Promise(r => setTimeout(r, 4000));
-
-  // [fix-2] Pass query for exact/prefix match; fail closed on ambiguity
-  const woLinkResult = findWoLinkFromAutocomplete(query);
+  // Retry-with-backoff: autocomplete can be slow to populate for some WOs
+  let woLinkResult: ReturnType<typeof findWoLinkFromAutocomplete> = { error: 'not_found' };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      // Clear search and retype on retry
+      abSafe('fill', `ref=${searchRef}`, '');
+      await new Promise(r => setTimeout(r, 500));
+    }
+    abSafe('fill', `ref=${searchRef}`, query);
+    await new Promise(r => setTimeout(r, attempt === 0 ? 4000 : 6000));
+    woLinkResult = findWoLinkFromAutocomplete(query);
+    if (!('error' in woLinkResult) || woLinkResult.error !== 'not_found') break;
+  }
   if ('error' in woLinkResult) {
     if (!keepOpen) ab('close');
-    return { ...empty, error: 'wo_lookup_failed', message: `WO lookup for "${query}": ${woLinkResult.error}` };
+    return { ...empty, error: 'wo_lookup_failed', message: `WO lookup for "${query}": ${woLinkResult.error} (after 3 attempts)` };
   }
 
   const woNumber = woLinkResult.text;
