@@ -447,13 +447,26 @@ interface WorkOrderDetail {
   tenant: string;
   description: string;
   vendor_trade: string;
+  vendor_name: string;
+  vendor_phone: string;
+  vendor_email: string;
+  vendor_status: string;
   assignee: string;
   submitted_by: string;
   created_on: string;
   created_by: string;
+  priority: string;
   permission_to_enter: string;
   recent_open_wos: string;
+  owner_approved: string;
+  maintenance_limit: string;
+  vendor_instructions: string;
+  scheduled: string;
+  follow_up_date: string;
+  wo_adjustments: string;
+  actions_log: string;
   invoices: string;
+  notes: string;
   sr_id: string;
   wo_id: string;
   url: string;
@@ -517,25 +530,14 @@ function findWoLinkFromAutocomplete(query: string): { text: string; href: string
 
 function extractWoDetailFields(): WorkOrderDetail {
   const result = abEval(`
-    var statusLabel = (document.querySelector(".js-status-label") || {}).textContent || "";
-    var srHeader = (document.querySelector("h2") || {}).textContent || "";
-    var srMatch = srHeader.match(/#(\\d+)/);
+    function q(sel) { return (document.querySelector(sel) || {}).textContent || ""; }
+    function qt(sel) { return q(sel).trim(); }
 
-    function textAfterH3(label) {
-      var h3s = document.querySelectorAll("h3");
-      for (var i = 0; i < h3s.length; i++) {
-        if (new RegExp("^" + label + "$", "i").test(h3s[i].textContent.trim())) {
-          var sib = h3s[i].nextElementSibling;
-          while (sib && sib.tagName !== "H3" && sib.tagName !== "H2") {
-            var txt = sib.textContent.trim();
-            if (txt.length > 1) return txt;
-            sib = sib.nextElementSibling;
-          }
-        }
-      }
-      return "";
-    }
+    var statusLabel = qt(".js-status-label");
+    var srTitle = qt(".js-service-request-title");
+    var srMatch = srTitle.match(/#(\\d+)/);
 
+    // Contact cards: property, owner, tenant
     var contactLinks = document.querySelectorAll("a.js-contact-card-name-link");
     var property = "", owner = "", tenant = "";
     for (var i = 0; i < contactLinks.length; i++) {
@@ -546,53 +548,168 @@ function extractWoDetailFields(): WorkOrderDetail {
       else if (href.includes("/occupancies/") || href.includes("/tenants/")) tenant = txt;
     }
 
-    var createdEl = document.querySelector(".js-service-request-header-created-label");
-    var createdBlock = createdEl ? createdEl.parentElement.textContent.trim() : "";
-    var createdOn = (createdBlock.match(/Created on:\\s*([\\d\\/]+)/) || [])[1] || "";
-    var createdBy = (createdBlock.match(/Created by:\\s*([^\\n]+)/) || [])[1] || "";
-    var permissionRaw = (createdBlock.match(/Permission to enter:\\s*([^\\n]+)/) || [])[1] || "";
-    var recentWos = (createdBlock.match(/Recent Work Orders for Unit:\\s*([^\\n]+)/) || [])[1] || "";
-
-    var invoiceText = "";
-    var h3s = document.querySelectorAll("h3");
-    for (var i = 0; i < h3s.length; i++) {
-      if (/^Invoices$/i.test(h3s[i].textContent.trim())) {
-        var next = h3s[i].parentElement || h3s[i].nextElementSibling;
-        if (next) {
-          var noInv = next.querySelector("td");
-          invoiceText = noInv ? noInv.textContent.trim() : "";
-        }
+    // Vendor contact card (js-vendor-contact-card)
+    var vendorCard = document.querySelector(".js-vendor-contact-card");
+    var vendorName = "", vendorPhone = "", vendorEmail = "";
+    if (vendorCard) {
+      var vNameLink = vendorCard.querySelector("a.js-contact-card-name-link");
+      vendorName = vNameLink ? vNameLink.textContent.trim() : "";
+      if (!vendorName) {
+        var vNameEl = vendorCard.querySelector(".contact-card__name");
+        vendorName = vNameEl ? vNameEl.textContent.trim() : "";
+      }
+      if (!vendorName) {
+        var vText = vendorCard.textContent || "";
+        var vMatch = vText.match(/Vendor[\\s\\n]+([^\\n]+)/);
+        vendorName = vMatch ? vMatch[1].trim() : "";
+      }
+      var phoneEl = vendorCard.querySelector("[href^='tel:']");
+      if (phoneEl) vendorPhone = phoneEl.textContent.trim();
+      if (!vendorPhone) {
+        var pMatch = (vendorCard.textContent || "").match(/Phone:\\s*([^\\n]+)/);
+        vendorPhone = pMatch ? pMatch[1].trim() : "";
+      }
+      var emailEl = vendorCard.querySelector("[href^='mailto:']");
+      if (emailEl) vendorEmail = emailEl.textContent.trim();
+      if (!vendorEmail) {
+        var eMatch = (vendorCard.textContent || "").match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/);
+        vendorEmail = eMatch ? eMatch[0] : "";
       }
     }
 
-    var submittedBy = (document.querySelector(".js-service-request-header-submitted-by-tenant") || {}).textContent || "";
+    // Vendor status from actions log
+    var vendorStatus = "";
+    var actionsLog = [];
+    var logH3 = null;
+    var h3s = document.querySelectorAll("h3");
+    for (var hi = 0; hi < h3s.length; hi++) {
+      if (/Actions Log/i.test(h3s[hi].textContent.trim())) { logH3 = h3s[hi]; break; }
+    }
+    if (logH3) {
+      var sib = logH3.nextElementSibling;
+      while (sib && sib.tagName !== "H3" && sib.tagName !== "H2") {
+        var lines = sib.textContent.trim().split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;});
+        for (var li = 0; li < lines.length; li++) actionsLog.push(lines[li]);
+        sib = sib.nextElementSibling;
+      }
+    }
+    var logText = actionsLog.join(" | ").substring(0, 2000);
+    // Parse vendor status per-entry, taking the LATEST (first in page order = reverse-chron)
+    for (var vi = 0; vi < actionsLog.length; vi++) {
+      var entry = actionsLog[vi];
+      if (/Vendor Accepted/i.test(entry)) { vendorStatus = "Accepted"; break; }
+      if (/Vendor Declined/i.test(entry)) { vendorStatus = "Declined"; break; }
+      if (/Vendor Dispatched|Dispatched to vendor|texted to vendor|emailed.*vendor|sent.*vendor/i.test(entry)) { vendorStatus = "Dispatched"; break; }
+    }
 
-    var assigneeRaw = textAfterH3("Assignee");
-    var assignee = assigneeRaw.split("\\n")[0].trim();
+    // SR header fields via js-* selectors
+    var createdOn = qt(".js-service-request-header-created-on");
+    var createdBy = qt(".js-service-request-header-created-by");
+    var priority = qt(".js-service-request-header-priority");
+    var permissionToEnter = qt(".js-service-request-header-permission-to-enter");
+    var recentWosEl = document.querySelector(".js-recent-work-orders-link");
+    var recentWos = recentWosEl ? recentWosEl.textContent.trim() : "";
+
+    // WO body fields
+    var description = qt(".js-work-order-description");
+    var vendorTrade = qt(".js-vendor-trade");
+    var vendorInstructions = qt(".js-work-order-vendor-instructions");
+    var assigneeName = qt(".js-assignee-name");
+
+    // Owner approval
+    var ownerApproved = "";
+    var peArea = document.querySelector(".service-request__work-order-pe-area");
+    if (peArea) {
+      var oaMatch = peArea.textContent.match(/Owner approved:\\s*([^\\n]+)/);
+      ownerApproved = oaMatch ? oaMatch[1].trim() : "";
+    }
+
+    // Maintenance limit
+    var maintenanceLimit = qt(".js-service-request__property-card__maintenance-limit");
+
+    // Scheduling
+    var scheduledWarn = document.querySelector(".js-work-order-not-scheduled-warning");
+    var scheduled = scheduledWarn ? scheduledWarn.textContent.trim() : "Scheduled";
+
+    // Follow-up date
+    var followUpDate = qt(".js-work-order-follow-up-date");
+
+    // WO adjustments
+    var woAdjustments = qt(".js-work-order-adjustments");
+
+    // Submitted by
+    var submittedBy = qt(".js-service-request-header-submitted-by-tenant");
+
+    // Invoices table
+    var invoiceText = "";
+    var invContainer = document.querySelector(".js-work-order-invoices-container");
+    if (invContainer) {
+      var tds = invContainer.querySelectorAll("td");
+      var invParts = [];
+      for (var ti = 0; ti < tds.length; ti++) {
+        var tdText = tds[ti].textContent.trim();
+        if (tdText.length > 0) invParts.push(tdText);
+      }
+      invoiceText = invParts.join(" | ").substring(0, 1000);
+    }
+
+    // Notes section
+    var notesText = "";
+    var notesH2 = null;
+    var h2s = document.querySelectorAll("h2");
+    for (var ni = 0; ni < h2s.length; ni++) {
+      if (/^Notes$/i.test(h2s[ni].textContent.trim())) { notesH2 = h2s[ni]; break; }
+    }
+    if (notesH2) {
+      var nsib = notesH2.nextElementSibling;
+      var noteLines = [];
+      while (nsib && nsib.tagName !== "H2") {
+        var nt = nsib.textContent.trim();
+        if (nt.length > 0) noteLines.push(nt);
+        nsib = nsib.nextElementSibling;
+      }
+      notesText = noteLines.join(" | ").substring(0, 2000);
+    }
 
     JSON.stringify({
       sr_number: srMatch ? srMatch[1] : "",
-      status: statusLabel.trim(),
+      status: statusLabel,
       property: property,
       owner: owner,
       tenant: tenant,
-      description: textAfterH3("Job Description").substring(0, 1000),
-      vendor_trade: textAfterH3("Vendor Trade"),
-      assignee: assignee,
-      submitted_by: submittedBy.trim(),
-      created_on: createdOn.trim(),
-      created_by: createdBy.trim(),
-      permission_to_enter: permissionRaw.trim(),
-      recent_open_wos: recentWos.trim(),
-      invoices: invoiceText
+      description: description.substring(0, 1000),
+      vendor_trade: vendorTrade,
+      vendor_name: vendorName,
+      vendor_phone: vendorPhone,
+      vendor_email: vendorEmail,
+      vendor_status: vendorStatus,
+      assignee: assigneeName,
+      submitted_by: submittedBy,
+      created_on: createdOn,
+      created_by: createdBy,
+      priority: priority,
+      permission_to_enter: permissionToEnter,
+      recent_open_wos: recentWos,
+      owner_approved: ownerApproved,
+      maintenance_limit: maintenanceLimit,
+      vendor_instructions: vendorInstructions.substring(0, 1000),
+      scheduled: scheduled,
+      follow_up_date: followUpDate,
+      wo_adjustments: woAdjustments,
+      actions_log: logText,
+      invoices: invoiceText,
+      notes: notesText
     });
   `);
 
   const empty: WorkOrderDetail = {
     sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
-    description: '', vendor_trade: '', assignee: '', submitted_by: '',
-    created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
-    invoices: '', sr_id: '', wo_id: '', url: '',
+    description: '', vendor_trade: '', vendor_name: '', vendor_phone: '', vendor_email: '',
+    vendor_status: '', assignee: '', submitted_by: '',
+    created_on: '', created_by: '', priority: '', permission_to_enter: '', recent_open_wos: '',
+    owner_approved: '', maintenance_limit: '', vendor_instructions: '', scheduled: '',
+    follow_up_date: '', wo_adjustments: '', actions_log: '', invoices: '', notes: '',
+    sr_id: '', wo_id: '', url: '',
   };
   if (!result.ok) return { ...empty, error: 'eval_failed', message: result.output };
 
@@ -605,13 +722,18 @@ function extractWoDetailFields(): WorkOrderDetail {
   }
 }
 
+const WO_EMPTY: WorkOrderDetail = {
+  sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
+  description: '', vendor_trade: '', vendor_name: '', vendor_phone: '', vendor_email: '',
+  vendor_status: '', assignee: '', submitted_by: '',
+  created_on: '', created_by: '', priority: '', permission_to_enter: '', recent_open_wos: '',
+  owner_approved: '', maintenance_limit: '', vendor_instructions: '', scheduled: '',
+  follow_up_date: '', wo_adjustments: '', actions_log: '', invoices: '', notes: '',
+  sr_id: '', wo_id: '', url: '',
+};
+
 async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrderDetail> {
-  const empty: WorkOrderDetail = {
-    sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
-    description: '', vendor_trade: '', assignee: '', submitted_by: '',
-    created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
-    invoices: '', sr_id: '', wo_id: '', url: '',
-  };
+  const empty = { ...WO_EMPTY };
 
   // [fix-1] Validate WO query: digits only, optionally with dash suffix (e.g. "8014" or "8014-1")
   if (!WO_QUERY_RE.test(query)) {
@@ -705,12 +827,7 @@ async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrder
 }
 
 async function batchWorkOrders(queries: string[]): Promise<WorkOrderDetail[]> {
-  const empty: WorkOrderDetail = {
-    sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
-    description: '', vendor_trade: '', assignee: '', submitted_by: '',
-    created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
-    invoices: '', sr_id: '', wo_id: '', url: '',
-  };
+  const empty = { ...WO_EMPTY };
 
   // Validate all queries before starting the browser session
   for (const q of queries) {
