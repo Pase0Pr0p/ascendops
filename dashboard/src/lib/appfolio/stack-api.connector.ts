@@ -184,11 +184,19 @@ function httpRequest(opts: RequestOptions & { body?: string }): Promise<HttpResp
   });
 }
 
-class AppFolioApiError extends Error {
+export class AppFolioApiError extends Error {
   constructor(readonly status: number, readonly body: string) {
     super(`AppFolio API ${status}: ${body.slice(0, 300)}`);
     this.name = 'AppFolioApiError';
   }
+}
+
+export function isApiErrorBody(data: unknown): boolean {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const obj = data as Record<string, unknown>;
+  if ('error' in obj || 'Error' in obj) return true;
+  if ('message' in obj && !('results' in obj)) return true;
+  return false;
 }
 
 async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
@@ -397,11 +405,8 @@ export class StackApiConnector implements AppFolioConnector {
         try { data = JSON.parse(res.body); } catch {
           throw new AppFolioApiError(res.status, `Non-JSON response: ${res.body.slice(0, 300)}`);
         }
-        if (data && typeof data === 'object' && !Array.isArray(data)) {
-          const obj = data as Record<string, unknown>;
-          if ('error' in obj || 'Error' in obj || 'message' in obj && !('results' in obj)) {
-            throw new AppFolioApiError(res.status, res.body.slice(0, 500));
-          }
+        if (isApiErrorBody(data)) {
+          throw new AppFolioApiError(res.status, res.body.slice(0, 500));
         }
         const pageItems: T[] = Array.isArray(data)
           ? data
