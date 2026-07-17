@@ -393,10 +393,21 @@ export class StackApiConnector implements AppFolioConnector {
           );
         }
         if (res.status >= 400) throw new AppFolioApiError(res.status, res.body);
-        const data = JSON.parse(res.body) as { results?: T[]; next_page_url?: string } | T[];
-        const pageItems: T[] = Array.isArray(data) ? data : (data.results ?? []);
+        let data: unknown;
+        try { data = JSON.parse(res.body); } catch {
+          throw new AppFolioApiError(res.status, `Non-JSON response: ${res.body.slice(0, 300)}`);
+        }
+        if (data && typeof data === 'object' && !Array.isArray(data)) {
+          const obj = data as Record<string, unknown>;
+          if ('error' in obj || 'Error' in obj || 'message' in obj && !('results' in obj)) {
+            throw new AppFolioApiError(res.status, res.body.slice(0, 500));
+          }
+        }
+        const pageItems: T[] = Array.isArray(data)
+          ? data
+          : ((data as { results?: T[] }).results ?? []);
         results.push(...pageItems);
-        nextUrl = Array.isArray(data) ? null : (data.next_page_url ?? null);
+        nextUrl = Array.isArray(data) ? null : ((data as { next_page_url?: string }).next_page_url ?? null);
       });
     };
 
