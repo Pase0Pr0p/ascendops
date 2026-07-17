@@ -19,6 +19,7 @@
  * All output is JSON to stdout; errors to stderr.
  */
 
+import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
@@ -282,12 +283,19 @@ async function lookupUnit(query: string): Promise<object> {
  *                      inspection (party="v_1089" for Murray, Patrick / vendor 1089).
  *   live             — if true, submits the PATCH (requires explicit --execute flag at CLI)
  */
+function computeApprovalHash(srId: string, woId: string, vendorId: string, dispatch: { emailLink: boolean; textLink: boolean; requireAccept: boolean }, woStatus: string, currentParty: string): string {
+  const payload = JSON.stringify({ srId, woId, vendorId, emailLink: dispatch.emailLink, textLink: dispatch.textLink, requireAccept: dispatch.requireAccept, woStatus, currentParty });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
 async function assignVendor(
   srId: string,
   woId: string,
   appfolioVendorId: string,
   live: boolean,
-): Promise<{ error?: string; [key: string]: unknown }> {
+  dispatch: { emailLink: boolean; textLink: boolean; requireAccept: boolean } = { emailLink: false, textLink: false, requireAccept: false },
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
   // [fix-1] Validate all IDs are numeric before use in paths or eval scripts
   if (!/^\d+$/.test(srId) || !/^\d+$/.test(woId) || !/^\d+$/.test(appfolioVendorId)) {
     return { error: 'invalid_ids', message: 'srId, woId, and appfolioVendorId must be numeric digits only' };
@@ -312,9 +320,33 @@ async function assignVendor(
     return { error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
   }
 
+  // Status precondition: gate on WO status, not Assign button presence.
+  // Assign reappears on Completed/Canceled/Ready-to-Bill as a silent re-assign.
+  const statusResult = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+  let woStatus = '';
+  try {
+    let sv = statusResult.output;
+    if (sv.startsWith('"') && sv.endsWith('"')) sv = JSON.parse(sv) as string;
+    woStatus = sv.trim();
+  } catch { /* stays empty, triggers fail-closed below */ }
+
+  if (!woStatus) {
+    ab('close');
+    return { error: 'status_unreadable', message: 'Could not read WO status from .js-status-label — fail closed.' };
+  }
+  if (/^(Completed|Completed No Need to Bill|Canceled|Cancelled|Ready to Bill|Ready-to-Bill|Closed)$/i.test(woStatus)) {
+    ab('close');
+    return { error: 'terminal_status', wo_status: woStatus, message: `WO is "${woStatus}" — assign-vendor blocked. The Assign button may still appear but this would be a silent re-assign.` };
+  }
+
   // Extract CSRF token (execFileSync — no shell interpretation)
   const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
-  const csrfToken = csrfResult.output.replace(/^"|"$/g, '').trim();
+  let csrfToken = '';
+  try {
+    let ct = csrfResult.output;
+    if (ct.startsWith('"') && ct.endsWith('"')) ct = JSON.parse(ct) as string;
+    csrfToken = ct.trim();
+  } catch { /* stays empty, triggers error below */ }
   if (!csrfToken) {
     ab('close');
     return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
@@ -381,26 +413,48 @@ async function assignVendor(
     '_method': 'patch',
     'authenticity_token': csrfToken,
     'maintenance_work_order[party]': partyValue,
+    'maintenance_work_order[send_vendor_wo_link]': dispatch.emailLink ? '1' : '0',
+    'maintenance_work_order[send_vendor_text]': dispatch.textLink ? '1' : '0',
+    'maintenance_work_order[require_vendor_accept_wo]': dispatch.requireAccept ? '1' : '0',
   };
   const patchBody = Object.entries(patchParams)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&');
 
   // [fix-0] Dry-run is the default (safe). Live requires --execute flag explicitly.
+  const expectedHash = computeApprovalHash(srId, woId, appfolioVendorId, dispatch, woStatus, currentParty);
+
   if (!live) {
     ab('close');
     return {
       dry_run: true,
-      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute only after chief + Albie greenlight on this specific WO+vendor.',
+      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only after chief + Albie greenlight on this specific WO+vendor.',
+      approval_hash: expectedHash,
       would_patch: patchUrl,
+      wo_status: woStatus,
       csrf_token_extracted: true,
       csrf_token_prefix: csrfToken.slice(0, 8) + '…',
       csrf_status: csrfStatus,
       current_party: currentParty,
       appfolio_vendor_id: appfolioVendorId,
       party_value: partyValue,
+      dispatch: {
+        email_link: dispatch.emailLink,
+        text_link: dispatch.textLink,
+        require_accept: dispatch.requireAccept,
+      },
       patch_body: patchParams,
     };
+  }
+
+  // Approval-packet binding: live path requires a matching hash from a prior dry-run
+  if (!approvalHash) {
+    ab('close');
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run. Run without --execute first to get the hash.' };
+  }
+  if (approvalHash !== expectedHash) {
+    ab('close');
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters (srId, woId, vendorId, dispatch flags). Re-run dry-run to get a fresh hash.' };
   }
 
   // ── LIVE SUBMIT — requires explicit --execute flag + per-WO chief + Albie greenlight ──────────
@@ -410,14 +464,12 @@ async function assignVendor(
   const submitScript = `fetch("${patchUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral}}).then(function(r){return r.text().then(function(){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
   const submitResult = abEval(submitScript);
 
-  ab('close');
-
   let submitJson: Record<string, unknown> = {};
   try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
 
-  // [fix-4] Return error and non-zero exit on submit failure
   const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && submitJson.status < 400));
   if (!submitOk) {
+    ab('close');
     return {
       error: 'submit_failed',
       appfolio_vendor_id: appfolioVendorId,
@@ -428,14 +480,74 @@ async function assignVendor(
     };
   }
 
+  // Post-assign verification: re-read WO detail, check Actions Log + vendor contact card
+  await new Promise(r => setTimeout(r, 2000));
+  abSafe('open', woUrl);
+  abSafe('wait', '--load', 'networkidle');
+
+  const verifyResult = abEval(`
+    var vendorCard = document.querySelector(".js-vendor-contact-card");
+    var vendorLink = vendorCard ? vendorCard.querySelector("a[href*='/vendors/']") : null;
+    var vendorHref = vendorLink ? vendorLink.getAttribute("href") : "";
+    var vendorIdMatch = vendorHref.match(/\\/vendors\\/(\\d+)/);
+    var assignedVendorId = vendorIdMatch ? vendorIdMatch[1] : "";
+
+    var logH3 = null;
+    var h3s = document.querySelectorAll("h3");
+    for (var i = 0; i < h3s.length; i++) {
+      if (/Actions Log/i.test(h3s[i].textContent.trim())) { logH3 = h3s[i]; break; }
+    }
+    var logEntries = [];
+    if (logH3) {
+      var sib = logH3.nextElementSibling;
+      while (sib && sib.tagName !== "H3" && sib.tagName !== "H2") {
+        var lines = sib.textContent.trim().split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;});
+        for (var li = 0; li < lines.length; li++) logEntries.push(lines[li]);
+        sib = sib.nextElementSibling;
+      }
+    }
+    var recentLog = logEntries.slice(0, 5).join(" | ");
+
+    JSON.stringify({
+      assigned_vendor_id: assignedVendorId,
+      recent_log: recentLog,
+      has_assigned_phrase: /Assigned \\(pending accept\\)/i.test(recentLog),
+      has_email_phrase: /Work order link emailed to vendor/i.test(recentLog),
+      has_text_phrase: /Work order details with link texted to vendor/i.test(recentLog),
+    });
+  `);
+
+  ab('close');
+
+  let verification: Record<string, unknown> = {};
+  try {
+    let vi = verifyResult.output;
+    if (vi.startsWith('"') && vi.endsWith('"')) vi = JSON.parse(vi) as string;
+    verification = JSON.parse(vi) as Record<string, unknown>;
+  } catch { verification = { parse_error: true, raw: verifyResult.output }; }
+
+  const vendorIdVerified = String(verification.assigned_vendor_id) === appfolioVendorId;
+  const assignPhraseVerified = verification.has_assigned_phrase === true;
+  const emailPhraseVerified = !dispatch.emailLink || verification.has_email_phrase === true;
+  const textPhraseVerified = !dispatch.textLink || verification.has_text_phrase === true;
+  const allVerified = vendorIdVerified && assignPhraseVerified && emailPhraseVerified && textPhraseVerified;
+
   return {
     live: true,
+    verified: allVerified,
     appfolio_vendor_id: appfolioVendorId,
     party_value: partyValue,
     sr_id: srId,
     wo_id: woId,
+    wo_status: woStatus,
     csrf_token_prefix: csrfToken.slice(0, 8) + '…',
     submit_result: submitJson,
+    verification,
+    dispatch: {
+      email_link: dispatch.emailLink,
+      text_link: dispatch.textLink,
+      require_accept: dispatch.requireAccept,
+    },
   };
 }
 
@@ -1042,16 +1154,26 @@ async function main() {
     }
     case 'assign-vendor': {
       // Default: dry-run (safe). Pass --execute to actually submit.
-      // assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--execute]
-      // vendor-id = contacts.appfolio_vendor_id (numeric, e.g. 1089 → party field = v_1089)
+      // assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--email-link] [--text-link] [--require-accept] [--execute]
       const srIdIdx = cmdArgs.indexOf('--sr-id');
       const woIdIdx = cmdArgs.indexOf('--wo-id');
       const vendorIdIdx = cmdArgs.indexOf('--vendor-id');
-      const live = cmdArgs.includes('--execute'); // --execute is the deliberate-action flag for live submit
+      const approvalHashIdx = cmdArgs.indexOf('--approval-hash');
+      const live = cmdArgs.includes('--execute');
+      const dispatchFlags = {
+        emailLink: cmdArgs.includes('--email-link'),
+        textLink: cmdArgs.includes('--text-link'),
+        requireAccept: cmdArgs.includes('--require-accept'),
+      };
+      const approvalHashVal = approvalHashIdx !== -1 ? cmdArgs[approvalHashIdx + 1] : undefined;
 
       if (srIdIdx === -1 || woIdIdx === -1 || vendorIdIdx === -1) {
-        console.error('Usage: assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--execute]');
-        console.error('  Default is dry-run. Pass --execute only with chief + Albie greenlight on the specific WO+vendor.');
+        console.error('Usage: assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--email-link] [--text-link] [--require-accept] [--execute --approval-hash <hash>]');
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  --email-link       Send vendor a secure WO link via email');
+        console.error('  --text-link        Send vendor a secure WO link via text');
+        console.error('  --require-accept   Require vendor to confirm receipt');
+        console.error('  --approval-hash    Hash from dry-run output (required with --execute)');
         process.exit(1);
       }
       const srId = cmdArgs[srIdIdx + 1];
@@ -1061,10 +1183,9 @@ async function main() {
         console.error('assign-vendor: --sr-id, --wo-id, and --vendor-id are all required');
         process.exit(1);
       }
-      const result = await assignVendor(srId, woId, appfolioVendorId, live);
+      const result = await assignVendor(srId, woId, appfolioVendorId, live, dispatchFlags, approvalHashVal);
       console.log(JSON.stringify(result, null, 2));
-      // Non-zero exit on any error or submit failure
-      process.exit(result.error ? 1 : 0);
+      process.exit(result.error || result.verified === false ? 1 : 0);
       break;
     }
     default: {
@@ -1080,8 +1201,8 @@ async function main() {
         '  read-work-order <WO-number>   — read WO detail page (status badge, property, vendor, description, etc.)',
         '  lookup-work-order <WO-number> — alias for read-work-order',
         '  batch-work-orders <WO1> ...   — read multiple WOs in sequence',
-        '  assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--execute]',
-        '                                — assign a vendor to a WO (party=v_<id>); default=dry-run, --execute submits',
+        '  assign-vendor --sr-id <id> --wo-id <id> --vendor-id <id> [--email-link] [--text-link] [--require-accept] [--execute --approval-hash <hash>]',
+        '                                — assign vendor to WO; dry-run default, --execute + hash submits PATCH',
       ].join('\n'));
       process.exit(1);
     }
