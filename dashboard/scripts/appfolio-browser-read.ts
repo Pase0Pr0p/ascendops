@@ -461,7 +461,10 @@ interface WorkOrderDetail {
   message?: string;
 }
 
-function findWoLinkFromAutocomplete(): { text: string; href: string } | null {
+const WO_QUERY_RE = /^\d+(?:-\d+)?$/;
+const WO_HREF_RE = /^https?:\/\/[^/]+\/maintenance\/service_requests\/\d+(?:\?work_order_id=\d+)?$/;
+
+function findWoLinkFromAutocomplete(query: string): { text: string; href: string } | { error: string } {
   const result = abEval(`
     var links = document.querySelectorAll("a");
     var found = [];
@@ -474,12 +477,42 @@ function findWoLinkFromAutocomplete(): { text: string; href: string } | null {
     }
     JSON.stringify(found);
   `);
-  if (!result.ok) return null;
+  if (!result.ok) return { error: 'eval_failed' };
+
+  let links: Array<{ text: string; href: string }> = [];
   try {
     const raw = result.output.replace(/^"|"$/g, '').replace(/\\\\"/g, '"').replace(/\\"/g, '"');
-    const links = JSON.parse(raw) as Array<{ text: string; href: string }>;
-    return links[0] ?? null;
-  } catch { return null; }
+    links = JSON.parse(raw) as typeof links;
+  } catch { return { error: 'parse_failed' }; }
+
+  // Match: if query includes dash (e.g. "8014-1"), require exact text match.
+  // If query is base number (e.g. "8014"), require prefix match (text starts with "8014-").
+  const hasDash = query.includes('-');
+  const matches = links.filter(l =>
+    hasDash ? l.text === query : l.text.startsWith(`${query}-`)
+  );
+
+  if (matches.length === 0) return { error: 'not_found' };
+
+  // Deduplicate by href (autocomplete renders the same link in heading + anchor)
+  const seen = new Set<string>();
+  const unique = matches.filter(m => {
+    if (seen.has(m.href)) return false;
+    seen.add(m.href);
+    return true;
+  });
+
+  if (unique.length > 1) {
+    const texts = unique.map(m => m.text).join(', ');
+    return { error: `ambiguous_match: ${texts}` };
+  }
+
+  const match = unique[0];
+  if (!WO_HREF_RE.test(match.href)) {
+    return { error: `invalid_href: ${match.href.substring(0, 100)}` };
+  }
+
+  return match;
 }
 
 function extractWoDetailFields(): WorkOrderDetail {
@@ -580,6 +613,11 @@ async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrder
     invoices: '', sr_id: '', wo_id: '', url: '',
   };
 
+  // [fix-1] Validate WO query: digits only, optionally with dash suffix (e.g. "8014" or "8014-1")
+  if (!WO_QUERY_RE.test(query)) {
+    return { ...empty, error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${query.substring(0, 50)}").` };
+  }
+
   const sessionCheck = await checkSession();
   if (!sessionCheck.authenticated) {
     return { ...empty, error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
@@ -613,24 +651,23 @@ async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrder
     return { ...empty, error: 'search_box_not_found', message: 'Could not find global search box in snapshot.' };
   }
 
-  // Fill search box with the WO number (fill triggers native input events)
+  // [fix-1] query is validated digits-only above, safe for shell-backed abSafe
   abSafe('fill', `ref=${searchRef}`, query);
 
   // Wait for autocomplete to populate
   await new Promise(r => setTimeout(r, 4000));
 
-  const woLink = findWoLinkFromAutocomplete();
-  if (!woLink) {
+  // [fix-2] Pass query for exact/prefix match; fail closed on ambiguity
+  const woLinkResult = findWoLinkFromAutocomplete(query);
+  if ('error' in woLinkResult) {
     if (!keepOpen) ab('close');
-    return { ...empty, error: 'not_found', message: `No work order found for "${query}" in search autocomplete.` };
+    return { ...empty, error: 'wo_lookup_failed', message: `WO lookup for "${query}": ${woLinkResult.error}` };
   }
 
-  // Extract WO number from link text (e.g., "8014-1")
-  const woNumber = woLink.text;
+  const woNumber = woLinkResult.text;
 
-  // Navigate to the WO detail page
-  const fullUrl = woLink.href.startsWith('http') ? woLink.href : `${APPFOLIO_URL}${woLink.href}`;
-  abSafe('open', fullUrl);
+  // [fix-1] href already validated by findWoLinkFromAutocomplete against WO_HREF_RE
+  abSafe('open', woLinkResult.href);
   abSafe('wait', '--load', 'networkidle');
 
   // Verify we landed on the detail page, not the auth page
@@ -652,27 +689,50 @@ async function readWorkOrder(query: string, keepOpen = false): Promise<WorkOrder
   detail.wo_id = woId;
   detail.url = currentUrl;
 
+  // [fix-3] Fail closed on missing critical fields — blank status is UNKNOWN, not success
+  const missingFields: string[] = [];
+  if (!detail.status) missingFields.push('status');
+  if (!detail.sr_id) missingFields.push('sr_id');
+  if (!detail.wo_id) missingFields.push('wo_id');
+  if (!detail.wo_number) missingFields.push('wo_number');
+  if (missingFields.length > 0) {
+    detail.error = 'incomplete_extraction';
+    detail.message = `Critical fields missing after extraction: ${missingFields.join(', ')}. Status is UNKNOWN.`;
+  }
+
   if (!keepOpen) ab('close');
   return detail;
 }
 
 async function batchWorkOrders(queries: string[]): Promise<WorkOrderDetail[]> {
+  const empty: WorkOrderDetail = {
+    sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
+    description: '', vendor_trade: '', assignee: '', submitted_by: '',
+    created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
+    invoices: '', sr_id: '', wo_id: '', url: '',
+  };
+
+  // Validate all queries before starting the browser session
+  for (const q of queries) {
+    if (!WO_QUERY_RE.test(q)) {
+      return [{ ...empty, error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${q.substring(0, 50)}").` }];
+    }
+  }
+
   const sessionCheck = await checkSession();
   if (!sessionCheck.authenticated) {
-    return [{ sr_number: '', wo_number: '', status: '', property: '', owner: '', tenant: '',
-      description: '', vendor_trade: '', assignee: '', submitted_by: '',
-      created_on: '', created_by: '', permission_to_enter: '', recent_open_wos: '',
-      invoices: '', sr_id: '', wo_id: '', url: '',
-      error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' }];
+    return [{ ...empty, error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' }];
   }
 
   const results: WorkOrderDetail[] = [];
-  for (const q of queries) {
-    const detail = await readWorkOrder(q, true);
-    results.push(detail);
+  try {
+    for (const q of queries) {
+      const detail = await readWorkOrder(q, true);
+      results.push(detail);
+    }
+  } finally {
+    ab('close');
   }
-
-  ab('close');
   return results;
 }
 
