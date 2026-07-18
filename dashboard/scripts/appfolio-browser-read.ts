@@ -314,25 +314,42 @@ async function assignVendor(
   if (!opened.ok) return { error: 'navigation_failed', message: opened.output };
   abSafe('wait', '--load', 'networkidle');
 
-  const currentUrl = abSafe('get', 'url').output.trim();
+  let currentUrl = abSafe('get', 'url').output.trim();
   if (/account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(currentUrl)) {
     ab('close');
     return { error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
   }
 
+  // Dashboard-redirect guard: AppFolio sometimes redirects WO direct-nav back to dashboard.
+  // Re-navigate once if we're not on the expected WO detail page.
+  if (!/\/service_requests\/\d+/.test(currentUrl)) {
+    abSafe('open', woUrl);
+    abSafe('wait', '--load', 'networkidle');
+    currentUrl = abSafe('get', 'url').output.trim();
+    if (!/\/service_requests\/\d+/.test(currentUrl)) {
+      ab('close');
+      return { error: 'navigation_redirected', message: `WO detail page not accessible — redirected to: ${currentUrl}` };
+    }
+  }
+
   // Status precondition: gate on WO status, not Assign button presence.
   // Assign reappears on Completed/Canceled/Ready-to-Bill as a silent re-assign.
-  const statusResult = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+  // Retry once if status empty (AppFolio async-renders content after page shell).
   let woStatus = '';
-  try {
-    let sv = statusResult.output;
-    if (sv.startsWith('"') && sv.endsWith('"')) sv = JSON.parse(sv) as string;
-    woStatus = sv.trim();
-  } catch { /* stays empty, triggers fail-closed below */ }
+  for (let statusAttempt = 0; statusAttempt < 2; statusAttempt++) {
+    if (statusAttempt > 0) abSafe('wait', '--timeout', '5000');
+    const statusResult = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+    try {
+      let sv = statusResult.output;
+      if (sv.startsWith('"') && sv.endsWith('"')) sv = JSON.parse(sv) as string;
+      woStatus = sv.trim();
+    } catch { /* stays empty */ }
+    if (woStatus) break;
+  }
 
   if (!woStatus) {
     ab('close');
-    return { error: 'status_unreadable', message: 'Could not read WO status from .js-status-label — fail closed.' };
+    return { error: 'status_unreadable', message: 'Could not read WO status from .js-status-label after retry — fail closed.' };
   }
   if (/^(Completed|Completed No Need to Bill|Canceled|Cancelled|Ready to Bill|Ready-to-Bill|Closed)$/i.test(woStatus)) {
     ab('close');
