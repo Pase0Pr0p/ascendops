@@ -831,6 +831,7 @@ async function createWorkOrder(
     return {
       error: 'submit_failed',
       hash_consumed: true,
+      message: 'POST failed but approval hash is consumed (non-idempotent guard). Run a new dry-run for a fresh hash before retrying.',
       submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
     };
   }
