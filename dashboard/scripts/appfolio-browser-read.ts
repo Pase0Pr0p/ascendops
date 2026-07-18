@@ -1681,11 +1681,12 @@ function computeMessageApprovalHash(
 
 /**
  * Open the messaging panel on a WO detail page and select the Resident thread.
- * Targets button[data-messaging-launcher-trigger="true"] (header Send Message),
- * NOT the visible Text/Email buttons (those are vendor-notify: js-work-order-action-notify_vendor).
- * Assumes browser is already on the WO detail page.
+ * Panel is a PARTY-TYPE picker: "Name (Resident)" / "Name (Vendor)" / "Name (Owner)".
+ * Scoped to LI.list-group-item inside .js-communication-inbox-container.
+ * Primary guard: regex targets (Resident) suffix only — Vendor/Owner rows excluded deterministically.
+ * Secondary guard: verifyTenantNameMatch confirms clicked row matches WO tenant.
  */
-function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: string; error?: string; count?: number; labels?: string[] } {
+function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: string; error?: string; count?: number; labels?: string[]; message?: string } {
   const launcherResult = abEval(
     'var btn=document.querySelector(\'button[data-messaging-launcher-trigger="true"]\');' +
     'if(btn){btn.click();JSON.stringify({ok:true});}' +
@@ -1703,14 +1704,18 @@ function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: 
 
   abSafe('wait', '3000');
 
-  // Find Resident rows, then select: single = click it; multiple + tenantName = disambiguate by name match
+  // Find party-type picker rows: LI.list-group-item inside .js-communication-inbox-container
+  // Real format is "Name (Resident)" / "Name (Vendor)" / "Name (Owner)" — match (Resident) suffix only
   const residentResult = abEval(
     'var matches=[];' +
-    'var els=document.querySelectorAll("a,button,div,li,tr,td,[role=\\"listitem\\"]");' +
-    'for(var i=0;i<els.length;i++){' +
-    '  var t=els[i].textContent.trim();' +
-    '  if(/^Resident/i.test(t)&&els[i].offsetHeight>0&&t.length<300){' +
-    '    matches.push(els[i]);' +
+    'var container=document.querySelector(".js-communication-inbox-container");' +
+    'if(container){' +
+    '  var els=container.querySelectorAll("li.list-group-item");' +
+    '  for(var i=0;i<els.length;i++){' +
+    '    var t=els[i].textContent.trim();' +
+    '    if(/\\(Resident\\)\\s*$/.test(t)&&els[i].offsetHeight>0){' +
+    '      matches.push(els[i]);' +
+    '    }' +
     '  }' +
     '}' +
     'JSON.stringify({count:matches.length,' +
@@ -1753,14 +1758,17 @@ function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: 
     return { ok: false, error: 'resident_ambiguous', count, labels: labels.slice(0, 5) };
   }
 
-  // Click the selected Resident row by index
+  // Click the selected Resident row by index (same scoped selector as discovery)
   const clickResult = abEval(
     'var matches=[];' +
-    'var els=document.querySelectorAll("a,button,div,li,tr,td,[role=\\"listitem\\"]");' +
-    'for(var i=0;i<els.length;i++){' +
-    '  var t=els[i].textContent.trim();' +
-    '  if(/^Resident/i.test(t)&&els[i].offsetHeight>0&&t.length<300){' +
-    '    matches.push(els[i]);' +
+    'var container=document.querySelector(".js-communication-inbox-container");' +
+    'if(container){' +
+    '  var els=container.querySelectorAll("li.list-group-item");' +
+    '  for(var i=0;i<els.length;i++){' +
+    '    var t=els[i].textContent.trim();' +
+    '    if(/\\(Resident\\)\\s*$/.test(t)&&els[i].offsetHeight>0){' +
+    '      matches.push(els[i]);' +
+    '    }' +
     '  }' +
     '}' +
     `var idx=${targetIndex};` +
