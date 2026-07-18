@@ -1858,7 +1858,7 @@ function extractComposerContract(): { ok: boolean; contract?: ComposerContract; 
     '  var container=null;var p=ta;' +
     '  for(var i=0;i<15&&p.parentElement;i++){' +
     '    p=p.parentElement;' +
-    '    if(p.querySelector&&p.querySelector("select")&&' +
+    '    if(p.querySelector&&' +
     '       p.querySelector(".btn-primary,button[type=submit]")){' +
     '      container=p;break;' +
     '    }' +
@@ -1871,6 +1871,13 @@ function extractComposerContract(): { ok: boolean; contract?: ComposerContract; 
     '    if(sel.options[j].selected){ch=sel.options[j].text.trim();break;}' +
     '  }}' +
     '  if(ch==="unknown"&&searchRoot){' +
+    '    var toggles=searchRoot.querySelectorAll(".dropdown-toggle,button,a");' +
+    '    for(var ti=0;ti<toggles.length;ti++){' +
+    '      var tt=toggles[ti].textContent.trim();' +
+    '      if(/^Send via (SMS|Email)/i.test(tt)&&tt.length<40){ch=tt;break;}' +
+    '    }' +
+    '  }' +
+    '  if(ch==="unknown"&&searchRoot){' +
     '    var labels=searchRoot.querySelectorAll("label,span,div");' +
     '    for(var li=0;li<labels.length;li++){' +
     '      var lt=labels[li].textContent.trim();' +
@@ -1878,14 +1885,16 @@ function extractComposerContract(): { ok: boolean; contract?: ComposerContract; 
     '    }' +
     '  }' +
     '  var recipient="";' +
-    '  var skipRe=/^(Send|Message|Conversations|Reply|New|Subject)/i;' +
-    '  if(searchRoot){' +
-    '    var cands=searchRoot.querySelectorAll(' +
+    '  var skipRe=/^(Send|Message|Conversations|Reply|New|Subject|All Conversations|Toggle|Attach|Use Template|View Email)/i;' +
+    '  var recipientScopes=[searchRoot,searchRoot?searchRoot.closest("section"):null,searchRoot?searchRoot.closest(".position-fixed"):null];' +
+    '  for(var rs=0;rs<recipientScopes.length&&!recipient;rs++){' +
+    '    var scope=recipientScopes[rs];if(!scope)continue;' +
+    '    var cands=scope.querySelectorAll(' +
     '      "h1,h2,h3,h4,h5,.name,.recipient,strong,b,' +
     '      [class*=header],[class*=title],[class*=contact]");' +
     '    for(var h=0;h<cands.length;h++){' +
     '      var ht=cands[h].textContent.trim();' +
-    '      if(ht.length>2&&ht.length<200&&!skipRe.test(ht)){' +
+    '      if(ht.length>2&&ht.length<200&&!skipRe.test(ht)&&cands[h].offsetHeight>0){' +
     '        recipient=ht.substring(0,200);break;' +
     '      }' +
     '    }' +
@@ -1902,7 +1911,7 @@ function extractComposerContract(): { ok: boolean; contract?: ComposerContract; 
     '  }' +
     '  var sendBtn=null;var sendBtnText="";var scoped=false;' +
     '  if(form){sendBtn=form.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");scoped=!!sendBtn;}' +
-    '  if(!sendBtn&&container){sendBtn=container.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");scoped=!!sendBtn;}' +
+    '  if(!sendBtn&&container){sendBtn=container.querySelector(".btn-primary,button[type=submit]");scoped=!!sendBtn;}' +
     '  if(sendBtn)sendBtnText=sendBtn.textContent.trim().substring(0,50);' +
     '  JSON.stringify({ok:true,recipient_label:recipient,channel:ch,' +
     '    textarea_name:taName,container_found:containerFound,' +
@@ -2247,6 +2256,35 @@ async function sendWoMessage(
     return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
   }
 
+  // Inject fetch/XHR interceptor to capture outgoing POST body (read-only, capture + let through)
+  abEval(
+    'window.__cdpCaptures=[];' +
+    'function serializeBody(b){' +
+    '  if(!b)return "";' +
+    '  if(b instanceof FormData){var entries=[];b.forEach(function(v,k){entries.push(k+"="+String(v).substring(0,500));});return entries.join("&");}' +
+    '  if(typeof b==="string")return b.substring(0,2000);' +
+    '  try{return JSON.stringify(b).substring(0,2000);}catch(e){return String(b).substring(0,2000);}' +
+    '}' +
+    'var origFetch=window.fetch;' +
+    'window.fetch=function(url,opts){' +
+    '  if(opts&&opts.method&&opts.method.toUpperCase()==="POST"){' +
+    '    var ct=(opts.headers&&(opts.headers["Content-Type"]||opts.headers["content-type"]))||"";' +
+    '    window.__cdpCaptures.push({type:"fetch",url:String(url),body:serializeBody(opts.body),contentType:ct});' +
+    '  }' +
+    '  return origFetch.apply(this,arguments);' +
+    '};' +
+    'var origXhrOpen=XMLHttpRequest.prototype.open;' +
+    'var origXhrSend=XMLHttpRequest.prototype.send;' +
+    'XMLHttpRequest.prototype.open=function(m,u){this.__method=m;this.__url=u;return origXhrOpen.apply(this,arguments);};' +
+    'XMLHttpRequest.prototype.send=function(body){' +
+    '  if(this.__method&&this.__method.toUpperCase()==="POST"){' +
+    '    window.__cdpCaptures.push({type:"xhr",url:String(this.__url),body:serializeBody(body),contentType:""});' +
+    '  }' +
+    '  return origXhrSend.apply(this,arguments);' +
+    '};' +
+    '"interceptor_installed"'
+  );
+
   // Click Send button scoped to the verified messaging container (no document-level fallback)
   const sendResult = abEval(
     'var ta=document.getElementById("messaging-input");' +
@@ -2283,11 +2321,21 @@ async function sendWoMessage(
   }
 
   // Wait for send to process
-  abSafe('wait', '3000');
+  abSafe('wait', '5000');
 
-  // Post-send verification: check if message appears in thread as outbound
+  // Retrieve captured POST bodies from the interceptor
+  let capturedRequests: Array<{ type: string; url: string; body: string; contentType: string }> = [];
+  try {
+    const capResult = abEval('JSON.stringify(window.__cdpCaptures||[])');
+    let capInner = capResult.output;
+    if (capInner.startsWith('"') && capInner.endsWith('"')) capInner = JSON.parse(capInner) as string;
+    capturedRequests = JSON.parse(capInner);
+  } catch { /* capture is best-effort */ }
+
+  // Post-send verification: check if message appears in thread as newest outbound
   const { messages: postSendMessages } = extractThreadMessages();
-  const latestOutbound = postSendMessages.find(m => m.direction === 'outbound');
+  const outbounds = postSendMessages.filter(m => m.direction === 'outbound');
+  const latestOutbound = outbounds.length > 0 ? outbounds[outbounds.length - 1] : null;
   const verified = latestOutbound ? latestOutbound.text.includes(message.substring(0, 50)) : false;
 
   ab('close');
@@ -2296,6 +2344,7 @@ async function sendWoMessage(
     live: true,
     verified,
     hash_consumed: true,
+    cdp_captured_requests: capturedRequests,
     wo_number: woDetail.wo_number,
     sr_id: woDetail.sr_id,
     wo_id: woDetail.wo_id,

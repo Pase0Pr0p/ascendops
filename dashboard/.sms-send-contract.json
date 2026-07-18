@@ -1,0 +1,17 @@
+{
+  "endpoint": "https://paseoproperties.appfolio.com/sms/send_text_message",
+  "method": "POST",
+  "content_type": "multipart/form-data",
+  "textarea_id": "messaging-input",
+  "payload_shape": {
+    "to": "phone_string_formatted",
+    "body": "message_text",
+    "used_suggested_response": "boolean_string",
+    "using_mobile_view": "boolean_string",
+    "latest_inbound_text_message_received_at": "iso_timestamp",
+    "messages_loaded_at": "iso_timestamp",
+    "page_tracking": "string_constant:CRM"
+  },
+  "verified_at": "2026-07-18T23:13:00Z",
+  "verified_by": "live_cdp_capture_formdata_entries"
+}
