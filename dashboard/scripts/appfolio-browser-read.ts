@@ -32,6 +32,8 @@ const SESSION_NAME = 'appfolio-ops';
 const APPFOLIO_URL = process.env.APPFOLIO_WEB_URL ?? '';
 const APPFOLIO_USER = process.env.APPFOLIO_WEB_USERNAME ?? '';
 const APPFOLIO_PASS = process.env.APPFOLIO_WEB_PASSWORD ?? '';
+const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
 const MAX_CONSECUTIVE_FAILURES = 3; // pause after this many consecutive login failures
 const BASE_BACKOFF_HOURS = 4;       // backoff doubles each failure: 4h, 8h, 16h
@@ -283,6 +285,66 @@ async function lookupUnit(query: string): Promise<object> {
  *                      inspection (party="v_1089" for Murray, Patrick / vendor 1089).
  *   live             — if true, submits the PATCH (requires explicit --execute flag at CLI)
  */
+interface VendorResolution {
+  appfolio_vendor_id: string;
+  party: string;
+  company_name: string;
+  display_name: string;
+  is_active: boolean;
+}
+
+async function resolveVendor(name: string): Promise<{ vendor?: VendorResolution; error?: string; candidates?: VendorResolution[] }> {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    return { error: 'missing_supabase_config', };
+  }
+  const trimmed = name.trim();
+  if (!trimmed) return { error: 'empty_vendor_name' };
+
+  const headers: Record<string, string> = {
+    apikey: SUPABASE_KEY,
+    Authorization: `Bearer ${SUPABASE_KEY}`,
+  };
+
+  // Two queries: one on company_name, one on display_name (PostgREST `or` chokes on commas in values)
+  const baseSelect = 'appfolio_vendor_id,vendors!inner(is_active)';
+  const fields = `display_name,company_name,${baseSelect}`;
+
+  const companyUrl = `${SUPABASE_URL}/rest/v1/contacts?select=${encodeURIComponent(fields)}&company_name=ilike.${encodeURIComponent(trimmed)}&appfolio_vendor_id=not.is.null&vendors.is_active=eq.true`;
+  const displayUrl = `${SUPABASE_URL}/rest/v1/contacts?select=${encodeURIComponent(fields)}&display_name=ilike.${encodeURIComponent(trimmed)}&appfolio_vendor_id=not.is.null&vendors.is_active=eq.true`;
+
+  const [companyRes, displayRes] = await Promise.all([
+    fetch(companyUrl, { headers }),
+    fetch(displayUrl, { headers }),
+  ]);
+
+  if (!companyRes.ok && !displayRes.ok) {
+    return { error: `supabase_error: company=${companyRes.status}, display=${displayRes.status}` };
+  }
+
+  const companyRows = companyRes.ok ? (await companyRes.json()) as Array<Record<string, unknown>> : [];
+  const displayRows = displayRes.ok ? (await displayRes.json()) as Array<Record<string, unknown>> : [];
+
+  // Dedupe by appfolio_vendor_id
+  const seen = new Set<string>();
+  const candidates: VendorResolution[] = [];
+  for (const row of [...companyRows, ...displayRows]) {
+    const vid = String(row.appfolio_vendor_id ?? '');
+    if (!vid || seen.has(vid)) continue;
+    seen.add(vid);
+    candidates.push({
+      appfolio_vendor_id: vid,
+      party: `v_${vid}`,
+      company_name: String(row.company_name ?? ''),
+      display_name: String(row.display_name ?? ''),
+      is_active: (row.vendors as { is_active: boolean })?.is_active ?? false,
+    });
+  }
+
+  if (candidates.length === 0) return { error: 'vendor_not_found', candidates: [] };
+  if (candidates.length === 1) return { vendor: candidates[0] };
+  return { error: 'ambiguous_match', candidates };
+}
+
 function computeApprovalHash(srId: string, woId: string, vendorId: string, dispatch: { emailLink: boolean; textLink: boolean; requireAccept: boolean }, woStatus: string, currentParty: string): string {
   const payload = JSON.stringify({ srId, woId, vendorId, emailLink: dispatch.emailLink, textLink: dispatch.textLink, requireAccept: dispatch.requireAccept, woStatus, currentParty });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
@@ -1172,12 +1234,21 @@ async function main() {
       process.exit(anyError ? 1 : 0);
       break;
     }
+    case 'resolve-vendor': {
+      if (!cmdArgs[0]) { console.error('Usage: resolve-vendor "<vendor name>"'); process.exit(1); }
+      const vendorName = cmdArgs.join(' ');
+      const resolved = await resolveVendor(vendorName);
+      console.log(JSON.stringify(resolved, null, 2));
+      process.exit(resolved.error ? 1 : 0);
+      break;
+    }
     case 'assign-vendor': {
       // Default: dry-run (safe). Pass --execute to actually submit.
-      // assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--email-link] [--text-link] [--require-accept] [--execute]
+      // assign-vendor --sr-id <id> --wo-id <id> (--vendor-id <id> | --vendor-name "<name>") [--email-link] [--text-link] [--require-accept] [--execute]
       const srIdIdx = cmdArgs.indexOf('--sr-id');
       const woIdIdx = cmdArgs.indexOf('--wo-id');
       const vendorIdIdx = cmdArgs.indexOf('--vendor-id');
+      const vendorNameIdx = cmdArgs.indexOf('--vendor-name');
       const approvalHashIdx = cmdArgs.indexOf('--approval-hash');
       const live = cmdArgs.includes('--execute');
       const dispatchFlags = {
@@ -1187,9 +1258,11 @@ async function main() {
       };
       const approvalHashVal = approvalHashIdx !== -1 ? cmdArgs[approvalHashIdx + 1] : undefined;
 
-      if (srIdIdx === -1 || woIdIdx === -1 || vendorIdIdx === -1) {
-        console.error('Usage: assign-vendor --sr-id <id> --wo-id <id> --vendor-id <appfolio_vendor_id> [--email-link] [--text-link] [--require-accept] [--execute --approval-hash <hash>]');
+      if (srIdIdx === -1 || woIdIdx === -1 || (vendorIdIdx === -1 && vendorNameIdx === -1)) {
+        console.error('Usage: assign-vendor --sr-id <id> --wo-id <id> (--vendor-id <id> | --vendor-name "<name>") [options]');
         console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  --vendor-id <id>   AppFolio numeric vendor ID (direct)');
+        console.error('  --vendor-name "<n>" Resolve vendor by company or person name via paseo-ops DB');
         console.error('  --email-link       Send vendor a secure WO link via email');
         console.error('  --text-link        Send vendor a secure WO link via text');
         console.error('  --require-accept   Require vendor to confirm receipt');
@@ -1198,9 +1271,24 @@ async function main() {
       }
       const srId = cmdArgs[srIdIdx + 1];
       const woId = cmdArgs[woIdIdx + 1];
-      const appfolioVendorId = cmdArgs[vendorIdIdx + 1];
+
+      let appfolioVendorId: string;
+      if (vendorIdIdx !== -1) {
+        appfolioVendorId = cmdArgs[vendorIdIdx + 1];
+      } else {
+        const vendorNameVal = cmdArgs[vendorNameIdx + 1];
+        if (!vendorNameVal) { console.error('assign-vendor: --vendor-name requires a value'); process.exit(1); }
+        const resolved = await resolveVendor(vendorNameVal);
+        if (resolved.error || !resolved.vendor) {
+          console.log(JSON.stringify({ error: 'vendor_resolution_failed', ...resolved }, null, 2));
+          process.exit(1);
+        }
+        console.error(`Resolved vendor: "${vendorNameVal}" → ${resolved.vendor.company_name} (${resolved.vendor.display_name}), id=${resolved.vendor.appfolio_vendor_id}`);
+        appfolioVendorId = resolved.vendor.appfolio_vendor_id;
+      }
+
       if (!srId || !woId || !appfolioVendorId) {
-        console.error('assign-vendor: --sr-id, --wo-id, and --vendor-id are all required');
+        console.error('assign-vendor: --sr-id, --wo-id, and --vendor-id/--vendor-name are all required');
         process.exit(1);
       }
       const result = await assignVendor(srId, woId, appfolioVendorId, live, dispatchFlags, approvalHashVal);
@@ -1221,8 +1309,10 @@ async function main() {
         '  read-work-order <WO-number>   — read WO detail page (status badge, property, vendor, description, etc.)',
         '  lookup-work-order <WO-number> — alias for read-work-order',
         '  batch-work-orders <WO1> ...   — read multiple WOs in sequence',
-        '  assign-vendor --sr-id <id> --wo-id <id> --vendor-id <id> [--email-link] [--text-link] [--require-accept] [--execute --approval-hash <hash>]',
+        '  resolve-vendor "<name>"     — resolve vendor name to AppFolio ID via paseo-ops DB (company or person name)',
+        '  assign-vendor --sr-id <id> --wo-id <id> (--vendor-id <id> | --vendor-name "<name>") [--email-link] [--text-link] [--require-accept] [--execute --approval-hash <hash>]',
         '                                — assign vendor to WO; dry-run default, --execute + hash submits PATCH',
+        '                                — --vendor-name resolves via paseo-ops DB before assign',
       ].join('\n'));
       process.exit(1);
     }
