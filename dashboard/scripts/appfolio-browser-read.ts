@@ -528,7 +528,8 @@ async function assignVendor(
     JSON.stringify({
       assigned_vendor_id: assignedVendorId,
       recent_log: recentLog,
-      has_assigned_phrase: /Assigned \\(pending accept\\)/i.test(recentLog),
+      has_assigned_phrase: /Assigned/i.test(recentLog),
+      has_pending_accept_phrase: /Assigned \\(pending accept\\)/i.test(recentLog),
       has_email_phrase: /Work order link emailed to vendor/i.test(recentLog),
       has_text_phrase: /Work order details with link texted to vendor/i.test(recentLog),
     });
@@ -544,7 +545,9 @@ async function assignVendor(
   } catch { verification = { parse_error: true, raw: verifyResult.output }; }
 
   const vendorIdVerified = String(verification.assigned_vendor_id) === appfolioVendorId;
-  const assignPhraseVerified = verification.has_assigned_phrase === true;
+  const assignPhraseVerified = dispatch.requireAccept
+    ? verification.has_pending_accept_phrase === true
+    : verification.has_assigned_phrase === true;
   const emailPhraseVerified = !dispatch.emailLink || verification.has_email_phrase === true;
   const textPhraseVerified = !dispatch.textLink || verification.has_text_phrase === true;
   const allVerified = vendorIdVerified && assignPhraseVerified && emailPhraseVerified && textPhraseVerified;
