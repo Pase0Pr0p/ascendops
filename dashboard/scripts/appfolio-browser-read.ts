@@ -1579,6 +1579,7 @@ interface SmsSendContract {
   method: string;
   content_type: string;
   textarea_id: string;
+  payload_shape: Record<string, string>;
   verified_at: string;
   verified_by: string;
 }
@@ -1587,8 +1588,13 @@ function readSmsSendContract(): { ok: boolean; contract?: SmsSendContract; hash?
   try {
     const raw = readFileSync(SMS_SEND_CONTRACT_PATH, 'utf-8');
     const parsed = JSON.parse(raw) as SmsSendContract;
-    if (!parsed.endpoint || !parsed.method || !parsed.textarea_id || !parsed.verified_by) {
-      return { ok: false, error: 'contract_incomplete: requires endpoint, method, textarea_id, verified_by' };
+    const required: (keyof SmsSendContract)[] = ['endpoint', 'method', 'content_type', 'textarea_id', 'payload_shape', 'verified_at', 'verified_by'];
+    const missing = required.filter(k => !parsed[k]);
+    if (missing.length > 0) {
+      return { ok: false, error: `contract_incomplete: missing ${missing.join(', ')}` };
+    }
+    if (typeof parsed.payload_shape !== 'object' || Array.isArray(parsed.payload_shape) || Object.keys(parsed.payload_shape).length === 0) {
+      return { ok: false, error: 'contract_incomplete: payload_shape must be a non-empty object mapping POST body keys to their types' };
     }
     const contentHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
     return { ok: true, contract: parsed, hash: contentHash };
