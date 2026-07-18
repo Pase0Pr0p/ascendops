@@ -16,7 +16,7 @@ import {
 } from './fixtures';
 
 export class MockConnector implements AppFolioConnector {
-  readonly isDemo = true;
+  readonly isDemo: boolean = true;
   async ping() { return { ok: true, latencyMs: 0 }; }
 
   async listWorkOrders(opts?: ListOptions): Promise<WorkOrder[]> {
