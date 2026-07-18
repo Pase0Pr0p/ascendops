@@ -23,7 +23,7 @@
 
 import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { resolve } from 'node:path';
 
@@ -650,16 +650,20 @@ interface CreateWorkOrderParams {
   requestType?: 'internal' | 'tenant_requested' | 'unit_turn';
 }
 
-const CREATE_WO_NONCE_PATH = resolve(process.cwd(), '.create-wo-used-hashes.json');
+const CREATE_WO_NONCE_DIR = resolve(process.cwd(), '.create-wo-nonces');
 
-function readUsedHashes(): string[] {
-  try { return JSON.parse(readFileSync(CREATE_WO_NONCE_PATH, 'utf-8')) as string[]; } catch { return []; }
-}
-
-function markHashUsed(hash: string): boolean {
-  const used = readUsedHashes();
-  used.push(hash);
-  try { writeFileSync(CREATE_WO_NONCE_PATH, JSON.stringify(used)); return true; } catch { return false; }
+function reserveNonce(hash: string): 'reserved' | 'already_used' | 'error' {
+  try { mkdirSync(CREATE_WO_NONCE_DIR, { recursive: true }); } catch { return 'error'; }
+  const noncePath = resolve(CREATE_WO_NONCE_DIR, hash);
+  try {
+    const fd = openSync(noncePath, 'wx');
+    closeSync(fd);
+    return 'reserved';
+  } catch (err: unknown) {
+    const code = (err as { code?: string }).code;
+    if (code === 'EEXIST') return 'already_used';
+    return 'error';
+  }
 }
 
 function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
@@ -804,17 +808,15 @@ async function createWorkOrder(
     return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
   }
 
-  // Once-only guard: create is non-idempotent, a reused hash would create duplicates
-  const usedHashes = readUsedHashes();
-  if (usedHashes.includes(expectedHash)) {
+  // Atomic once-only guard: exclusive file create (wx) is check+reserve in one syscall
+  const nonceResult = reserveNonce(expectedHash);
+  if (nonceResult === 'already_used') {
     ab('close');
-    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to create a WO. Run a new dry-run to get a fresh hash.' };
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to create a WO. Run a new dry-run for a fresh hash.' };
   }
-
-  // Mark hash used BEFORE sending the POST — closes the TOCTOU window between check and submit
-  if (!markHashUsed(expectedHash)) {
+  if (nonceResult === 'error') {
     ab('close');
-    return { error: 'nonce_write_failed', message: 'Could not persist used-hash record. Refusing to POST without once-only guarantee.' };
+    return { error: 'nonce_reservation_failed', message: 'Could not reserve nonce file. Refusing to POST without once-only guarantee.' };
   }
 
   // ── LIVE SUBMIT ──
