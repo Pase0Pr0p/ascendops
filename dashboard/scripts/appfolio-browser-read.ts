@@ -670,8 +670,12 @@ function reserveNonce(hash: string): 'reserved' | 'already_used' | 'error' {
 }
 
 function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
+  const propertyIdToken = params.occupancyId
+    ? `t_${params.occupancyId}`
+    : `p_${params.propertyId}`;
   const payload = JSON.stringify({
     propertyId: params.propertyId,
+    propertyIdToken,
     unitId: params.unitId ?? '',
     occupancyId: params.occupancyId ?? '',
     description: params.description,
@@ -699,6 +703,12 @@ async function createWorkOrder(
   }
   if (params.unitId && !/^\d+$/.test(params.unitId)) {
     return { error: 'invalid_unit_id', message: 'unitId must be numeric digits only' };
+  }
+  if (params.occupancyId && !/^\d+$/.test(params.occupancyId)) {
+    return { error: 'invalid_occupancy_id', message: 'occupancyId must be numeric digits only' };
+  }
+  if (params.occupancyId && !params.unitId) {
+    return { error: 'missing_unit_id', message: 'unitId is required when occupancyId is supplied (tenant-path requires both)' };
   }
   if (!params.description.trim()) {
     return { error: 'empty_description', message: 'description is required' };
@@ -756,10 +766,14 @@ async function createWorkOrder(
   }
 
   // Build POST body with real Rails field names
+  // property_id is polymorphic: t_{occupancyId} for tenant-path, p_{propertyId} for property-path
+  const propertyIdToken = params.occupancyId
+    ? `t_${params.occupancyId}`
+    : `p_${params.propertyId}`;
   const postUrl = `${APPFOLIO_URL}/maintenance/service_requests`;
   const formFields: Record<string, string> = {
     'authenticity_token': csrfToken,
-    'maintenance_service_request[property_id]': params.propertyId,
+    'maintenance_service_request[property_id]': propertyIdToken,
     'maintenance_service_request[unit_id]': params.unitId ?? '',
     'maintenance_service_request[occupancy_id]': params.occupancyId ?? '',
     'maintenance_service_request[description]': params.description,
@@ -797,6 +811,7 @@ async function createWorkOrder(
       form_id_verified: true,
       params: {
         property_id: params.propertyId,
+        property_id_token: propertyIdToken,
         unit_id: params.unitId ?? '',
         occupancy_id: params.occupancyId ?? '',
         description: params.description,
