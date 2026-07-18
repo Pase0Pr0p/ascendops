@@ -337,7 +337,7 @@ async function assignVendor(
   // Retry once if status empty (AppFolio async-renders content after page shell).
   let woStatus = '';
   for (let statusAttempt = 0; statusAttempt < 2; statusAttempt++) {
-    if (statusAttempt > 0) abSafe('wait', '--timeout', '5000');
+    if (statusAttempt > 0) abSafe('wait', '5000');
     const statusResult = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
     try {
       let sv = statusResult.output;
