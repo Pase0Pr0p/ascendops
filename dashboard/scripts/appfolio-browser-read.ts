@@ -1571,6 +1571,20 @@ interface WoThreadMessage {
 }
 
 const MAX_SMS_LENGTH = 910;
+const SEND_MSG_NONCE_DIR = resolve(process.cwd(), '.send-msg-nonces');
+
+function reserveSendMsgNonce(hash: string): 'reserved' | 'already_used' | 'error' {
+  try { mkdirSync(SEND_MSG_NONCE_DIR, { recursive: true }); } catch { return 'error'; }
+  const noncePath = resolve(SEND_MSG_NONCE_DIR, hash);
+  try {
+    const fd = openSync(noncePath, 'wx');
+    closeSync(fd);
+    return 'reserved';
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'already_used';
+    return 'error';
+  }
+}
 
 function computeMessageApprovalHash(srId: string, woId: string, message: string, tenant: string, channel: string): string {
   const payload = JSON.stringify({ srId, woId, message, tenant, channel });
@@ -1830,6 +1844,17 @@ async function sendWoMessage(
     return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
   }
 
+  // Atomic once-only guard: duplicate tenant text is real external harm
+  const nonceResult = reserveSendMsgNonce(expectedHash);
+  if (nonceResult === 'already_used') {
+    ab('close');
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to send a message. Run a new dry-run for a fresh hash.' };
+  }
+  if (nonceResult === 'error') {
+    ab('close');
+    return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
+  }
+
   // Click Send button (.btn-primary)
   const sendResult = abEval(
     'var ta=document.getElementById("messaging-input");' +
@@ -1851,6 +1876,8 @@ async function sendWoMessage(
     return {
       wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
       tenant: woDetail.tenant, error: sendParsed.error ?? 'send_failed',
+      hash_consumed: true,
+      message: 'Send failed but approval hash is consumed (once-only guard). Run a new dry-run for a fresh hash before retrying.',
     };
   }
 
@@ -1867,6 +1894,7 @@ async function sendWoMessage(
   return {
     live: true,
     verified,
+    hash_consumed: true,
     wo_number: woDetail.wo_number,
     sr_id: woDetail.sr_id,
     wo_id: woDetail.wo_id,
