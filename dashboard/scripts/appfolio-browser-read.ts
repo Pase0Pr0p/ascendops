@@ -13,7 +13,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts create-work-order --property-id <id> --description "<text>" [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts read-wo-messages <WO-number>
- *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>] [--capture]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -1991,6 +1991,7 @@ async function sendWoMessage(
   message: string,
   live: boolean,
   approvalHash?: string,
+  capture = false,
 ): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
   if (!WO_QUERY_RE.test(woQuery)) {
     return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
@@ -2256,34 +2257,36 @@ async function sendWoMessage(
     return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
   }
 
-  // Inject fetch/XHR interceptor to capture outgoing POST body (read-only, capture + let through)
-  abEval(
-    'window.__cdpCaptures=[];' +
-    'function serializeBody(b){' +
-    '  if(!b)return "";' +
-    '  if(b instanceof FormData){var entries=[];b.forEach(function(v,k){entries.push(k+"="+String(v).substring(0,500));});return entries.join("&");}' +
-    '  if(typeof b==="string")return b.substring(0,2000);' +
-    '  try{return JSON.stringify(b).substring(0,2000);}catch(e){return String(b).substring(0,2000);}' +
-    '}' +
-    'var origFetch=window.fetch;' +
-    'window.fetch=function(url,opts){' +
-    '  if(opts&&opts.method&&opts.method.toUpperCase()==="POST"){' +
-    '    var ct=(opts.headers&&(opts.headers["Content-Type"]||opts.headers["content-type"]))||"";' +
-    '    window.__cdpCaptures.push({type:"fetch",url:String(url),body:serializeBody(opts.body),contentType:ct});' +
-    '  }' +
-    '  return origFetch.apply(this,arguments);' +
-    '};' +
-    'var origXhrOpen=XMLHttpRequest.prototype.open;' +
-    'var origXhrSend=XMLHttpRequest.prototype.send;' +
-    'XMLHttpRequest.prototype.open=function(m,u){this.__method=m;this.__url=u;return origXhrOpen.apply(this,arguments);};' +
-    'XMLHttpRequest.prototype.send=function(body){' +
-    '  if(this.__method&&this.__method.toUpperCase()==="POST"){' +
-    '    window.__cdpCaptures.push({type:"xhr",url:String(this.__url),body:serializeBody(body),contentType:""});' +
-    '  }' +
-    '  return origXhrSend.apply(this,arguments);' +
-    '};' +
-    '"interceptor_installed"'
-  );
+  // CDP interceptor: only when --capture flag is passed (contract discovery, not production)
+  if (capture) {
+    abEval(
+      'window.__cdpCaptures=[];' +
+      'function serializeBody(b){' +
+      '  if(!b)return "";' +
+      '  if(b instanceof FormData){var entries=[];b.forEach(function(v,k){entries.push(k+"="+String(v).substring(0,500));});return entries.join("&");}' +
+      '  if(typeof b==="string")return b.substring(0,2000);' +
+      '  try{return JSON.stringify(b).substring(0,2000);}catch(e){return String(b).substring(0,2000);}' +
+      '}' +
+      'var origFetch=window.fetch;' +
+      'window.fetch=function(url,opts){' +
+      '  if(opts&&opts.method&&opts.method.toUpperCase()==="POST"){' +
+      '    var ct=(opts.headers&&(opts.headers["Content-Type"]||opts.headers["content-type"]))||"";' +
+      '    window.__cdpCaptures.push({type:"fetch",url:String(url),body:serializeBody(opts.body),contentType:ct});' +
+      '  }' +
+      '  return origFetch.apply(this,arguments);' +
+      '};' +
+      'var origXhrOpen=XMLHttpRequest.prototype.open;' +
+      'var origXhrSend=XMLHttpRequest.prototype.send;' +
+      'XMLHttpRequest.prototype.open=function(m,u){this.__method=m;this.__url=u;return origXhrOpen.apply(this,arguments);};' +
+      'XMLHttpRequest.prototype.send=function(body){' +
+      '  if(this.__method&&this.__method.toUpperCase()==="POST"){' +
+      '    window.__cdpCaptures.push({type:"xhr",url:String(this.__url),body:serializeBody(body),contentType:""});' +
+      '  }' +
+      '  return origXhrSend.apply(this,arguments);' +
+      '};' +
+      '"interceptor_installed"'
+    );
+  }
 
   // Click Send button scoped to the verified messaging container (no document-level fallback)
   const sendResult = abEval(
@@ -2323,14 +2326,16 @@ async function sendWoMessage(
   // Wait for send to process
   abSafe('wait', '5000');
 
-  // Retrieve captured POST bodies from the interceptor
+  // Retrieve captured POST bodies from the interceptor (only when --capture)
   let capturedRequests: Array<{ type: string; url: string; body: string; contentType: string }> = [];
-  try {
-    const capResult = abEval('JSON.stringify(window.__cdpCaptures||[])');
-    let capInner = capResult.output;
-    if (capInner.startsWith('"') && capInner.endsWith('"')) capInner = JSON.parse(capInner) as string;
-    capturedRequests = JSON.parse(capInner);
-  } catch { /* capture is best-effort */ }
+  if (capture) {
+    try {
+      const capResult = abEval('JSON.stringify(window.__cdpCaptures||[])');
+      let capInner = capResult.output;
+      if (capInner.startsWith('"') && capInner.endsWith('"')) capInner = JSON.parse(capInner) as string;
+      capturedRequests = JSON.parse(capInner);
+    } catch { /* capture is best-effort */ }
+  }
 
   // Post-send verification: check if message appears in thread as newest outbound
   const { messages: postSendMessages } = extractThreadMessages();
@@ -2344,7 +2349,7 @@ async function sendWoMessage(
     live: true,
     verified,
     hash_consumed: true,
-    cdp_captured_requests: capturedRequests,
+    ...(capture && capturedRequests.length > 0 ? { cdp_captured_requests: capturedRequests } : {}),
     wo_number: woDetail.wo_number,
     sr_id: woDetail.sr_id,
     wo_id: woDetail.wo_id,
@@ -2685,18 +2690,19 @@ async function main() {
       const msgText = cmdArgs[msgIdx + 1];
       const msgHashVal = msgHashIdx !== -1 ? cmdArgs[msgHashIdx + 1] : undefined;
 
-      // Parse --execute as a standalone flag, excluding positions consumed as values of other flags
+      // Parse --execute and --capture as standalone flags, excluding positions consumed as values of other flags
       const consumedValueIndices = new Set<number>();
       if (msgWoIdx !== -1) consumedValueIndices.add(msgWoIdx + 1);
       if (msgIdx !== -1) consumedValueIndices.add(msgIdx + 1);
       if (msgHashIdx !== -1) consumedValueIndices.add(msgHashIdx + 1);
       const msgLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedValueIndices.has(i));
+      const msgCapture = cmdArgs.some((arg, i) => arg === '--capture' && !consumedValueIndices.has(i));
 
       if (!msgWoQuery || !msgText) {
         console.error('send-wo-message: --wo and --message are required');
         process.exit(1);
       }
-      const result4 = await sendWoMessage(msgWoQuery, msgText, msgLive, msgHashVal);
+      const result4 = await sendWoMessage(msgWoQuery, msgText, msgLive, msgHashVal, msgCapture);
       console.log(JSON.stringify(result4, null, 2));
       process.exit(result4.error || result4.verified === false ? 1 : 0);
       break;
