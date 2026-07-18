@@ -12,6 +12,8 @@
  *   npx tsx scripts/appfolio-browser-read.ts assign-vendor --sr-id <id> --wo-id <id> --vendor-id <id> [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts create-work-order --property-id <id> --description "<text>" [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts read-wo-messages <WO-number>
+ *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -1561,6 +1563,675 @@ async function batchWorkOrders(queries: string[]): Promise<WorkOrderDetail[]> {
   return results;
 }
 
+// ─── A2: WO tenant messaging ────────────────────────────────────────────────
+
+interface WoThreadMessage {
+  direction: 'inbound' | 'outbound' | 'unknown';
+  text: string;
+}
+
+const MAX_SMS_LENGTH = 910;
+const SEND_MSG_NONCE_DIR = resolve(process.cwd(), '.send-msg-nonces');
+const SMS_SEND_CONTRACT_PATH = resolve(process.cwd(), '.sms-send-contract.json');
+
+interface SmsSendContract {
+  endpoint: string;
+  method: string;
+  content_type: string;
+  textarea_id: string;
+  payload_shape: Record<string, string>;
+  verified_at: string;
+  verified_by: string;
+}
+
+function readSmsSendContract(): { ok: boolean; contract?: SmsSendContract; hash?: string; error?: string } {
+  try {
+    const raw = readFileSync(SMS_SEND_CONTRACT_PATH, 'utf-8');
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const stringFields: (keyof Omit<SmsSendContract, 'payload_shape'>)[] = ['endpoint', 'method', 'content_type', 'textarea_id', 'verified_at', 'verified_by'];
+    const badStrings = stringFields.filter(k => typeof obj[k] !== 'string' || (obj[k] as string).trim().length === 0);
+    if (badStrings.length > 0) {
+      return { ok: false, error: `contract_incomplete: ${badStrings.join(', ')} must be non-empty strings` };
+    }
+    if (typeof obj.payload_shape !== 'object' || obj.payload_shape === null || Array.isArray(obj.payload_shape)) {
+      return { ok: false, error: 'contract_incomplete: payload_shape must be a non-empty object mapping POST body keys to their types' };
+    }
+    const shape = obj.payload_shape as Record<string, unknown>;
+    const shapeEntries = Object.entries(shape);
+    if (shapeEntries.length === 0) {
+      return { ok: false, error: 'contract_incomplete: payload_shape must be a non-empty object mapping POST body keys to their types' };
+    }
+    const badShapeKeys = shapeEntries.filter(([k, v]) => k.trim().length === 0 || typeof v !== 'string' || (v as string).trim().length === 0);
+    if (badShapeKeys.length > 0) {
+      return { ok: false, error: 'contract_incomplete: payload_shape keys and values must be non-empty strings' };
+    }
+    const parsed: SmsSendContract = {
+      endpoint: (obj.endpoint as string).trim(),
+      method: (obj.method as string).trim(),
+      content_type: (obj.content_type as string).trim(),
+      textarea_id: (obj.textarea_id as string).trim(),
+      payload_shape: Object.fromEntries(shapeEntries.map(([k, v]) => [k.trim(), (v as string).trim()])),
+      verified_at: (obj.verified_at as string).trim(),
+      verified_by: (obj.verified_by as string).trim(),
+    };
+    const contentHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+    return { ok: true, contract: parsed, hash: contentHash };
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, error: 'contract_not_found: .sms-send-contract.json does not exist. Requires supervised laptop discovery.' };
+    }
+    return { ok: false, error: `contract_read_failed: ${String(err)}` };
+  }
+}
+
+function reserveSendMsgNonce(hash: string): 'reserved' | 'already_used' | 'error' {
+  try { mkdirSync(SEND_MSG_NONCE_DIR, { recursive: true }); } catch { return 'error'; }
+  const noncePath = resolve(SEND_MSG_NONCE_DIR, hash);
+  try {
+    const fd = openSync(noncePath, 'wx');
+    closeSync(fd);
+    return 'reserved';
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'already_used';
+    return 'error';
+  }
+}
+
+function normalizeNameTokens(name: string): string[] {
+  return name.toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/).filter(t => t.length >= 2);
+}
+
+function verifyTenantNameMatch(tenantName: string, label: string): boolean {
+  const tenantTokens = normalizeNameTokens(tenantName);
+  const labelTokens = normalizeNameTokens(label);
+  if (tenantTokens.length === 0 || labelTokens.length === 0) return false;
+  if (tenantTokens.length >= 2) {
+    return tenantTokens.every(t => labelTokens.some(l => l === t));
+  }
+  return labelTokens.includes(tenantTokens[0]);
+}
+
+function computeMessageApprovalHash(
+  srId: string, woId: string, message: string, tenant: string,
+  channel: string, recipientLabel: string, rowLabel: string,
+  formAction: string, formMethod: string, textareaName: string,
+  hiddenFieldNames: string, endpointContractHash: string,
+): string {
+  const payload = JSON.stringify({
+    srId, woId, message, tenant, channel, recipientLabel, rowLabel,
+    formAction, formMethod, textareaName, hiddenFieldNames, endpointContractHash,
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
+/**
+ * Open the messaging panel on a WO detail page and select the Resident thread.
+ * Targets button[data-messaging-launcher-trigger="true"] (header Send Message),
+ * NOT the visible Text/Email buttons (those are vendor-notify: js-work-order-action-notify_vendor).
+ * Assumes browser is already on the WO detail page.
+ */
+function openResidentThread(): { ok: boolean; tenant_label?: string; error?: string; count?: number; labels?: string[] } {
+  const launcherResult = abEval(
+    'var btn=document.querySelector(\'button[data-messaging-launcher-trigger="true"]\');' +
+    'if(btn){btn.click();JSON.stringify({ok:true});}' +
+    'else{JSON.stringify({error:"messaging_launcher_not_found"});}'
+  );
+  let launcherParsed: { ok?: boolean; error?: string } = {};
+  try {
+    let inner = launcherResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    launcherParsed = JSON.parse(inner);
+  } catch { launcherParsed = { error: 'launcher_parse_failed' }; }
+  if (launcherParsed.error || !launcherParsed.ok) {
+    return { ok: false, error: launcherParsed.error ?? 'launcher_click_failed' };
+  }
+
+  abSafe('wait', '3000');
+
+  // Find and click Resident row — must be exactly one (unambiguous)
+  const residentResult = abEval(
+    'var matches=[];' +
+    'var els=document.querySelectorAll("a,button,div,li,tr,td,[role=\\"listitem\\"]");' +
+    'for(var i=0;i<els.length;i++){' +
+    '  var t=els[i].textContent.trim();' +
+    '  if(/^Resident/i.test(t)&&els[i].offsetHeight>0&&t.length<300){' +
+    '    matches.push(els[i]);' +
+    '  }' +
+    '}' +
+    'if(matches.length===0){JSON.stringify({error:"resident_row_not_found"});}' +
+    'else if(matches.length>1){JSON.stringify({error:"resident_ambiguous",count:matches.length,' +
+    '  labels:matches.slice(0,5).map(function(m){return m.textContent.trim().substring(0,100)})});}' +
+    'else{matches[0].click();JSON.stringify({ok:true,label:matches[0].textContent.trim().substring(0,200)});}'
+  );
+  let residentParsed: { ok?: boolean; error?: string; label?: string; count?: number; labels?: string[] } = {};
+  try {
+    let inner = residentResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    residentParsed = JSON.parse(inner);
+  } catch { residentParsed = { error: 'resident_parse_failed' }; }
+  if (residentParsed.error || !residentParsed.ok) {
+    return { ok: false, error: residentParsed.error ?? 'resident_click_failed', ...(residentParsed.count ? { count: residentParsed.count, labels: residentParsed.labels } : {}) };
+  }
+
+  abSafe('wait', '3000');
+
+  return { ok: true, tenant_label: residentParsed.label };
+}
+
+/**
+ * Extract messages from the currently-open tenant message thread.
+ * Thread direction is STRUCTURAL per chief's deep-pass map:
+ *   inbound (from tenant): offset-sm-0 + bg-light
+ *   outbound (to tenant): offset-sm-4 + bg-primary
+ * Key on offset/bg class pair, NOT sender-label (labels vary).
+ */
+function extractThreadMessages(): { messages: WoThreadMessage[]; channel: string } {
+  const msgResult = abEval(
+    'var msgs=[];' +
+    'var allEls=document.querySelectorAll("[class*=\\"col-sm\\"]");' +
+    'for(var i=0;i<allEls.length;i++){' +
+    '  var el=allEls[i];var cls=el.className||"";' +
+    '  if(!/offset-sm-[04]/.test(cls))continue;' +
+    '  var isIn=/offset-sm-0/.test(cls);' +
+    '  var isOut=/offset-sm-4/.test(cls);' +
+    '  var html=el.innerHTML||"";' +
+    '  var bgL=/bg-light/.test(html)||/bg-light/.test(cls);' +
+    '  var bgP=/bg-primary/.test(html)||/bg-primary/.test(cls);' +
+    '  var dir="unknown";' +
+    '  if(isIn&&bgL)dir="inbound";' +
+    '  else if(isOut&&bgP)dir="outbound";' +
+    '  else continue;' +
+    '  var t=el.textContent.trim();' +
+    '  if(t.length>0)msgs.push({direction:dir,text:t.substring(0,500)});' +
+    '}' +
+    'var ch="unknown";' +
+    'var sel=document.querySelector("select");' +
+    'if(sel){for(var j=0;j<sel.options.length;j++){' +
+    '  if(sel.options[j].selected){ch=sel.options[j].text.trim();break;}' +
+    '}}' +
+    'JSON.stringify({count:msgs.length,messages:msgs.slice(0,50),channel:ch});'
+  );
+  let parsed: { count: number; messages: WoThreadMessage[]; channel: string } = { count: 0, messages: [], channel: 'unknown' };
+  try {
+    let inner = msgResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    parsed = JSON.parse(inner);
+  } catch { /* stays empty */ }
+  return { messages: parsed.messages, channel: parsed.channel };
+}
+
+interface ComposerContract {
+  recipient_label: string;
+  channel: string;
+  textarea_name: string;
+  container_found: boolean;
+  send_button_text: string;
+  send_button_scoped: boolean;
+  form_action: string;
+  form_method: string;
+  hidden_fields: string[];
+}
+
+function extractComposerContract(): { ok: boolean; contract?: ComposerContract; error?: string } {
+  const result = abEval(
+    'var ta=document.getElementById("messaging-input");' +
+    'if(!ta){JSON.stringify({ok:false,error:"textarea_not_found"});}' +
+    'else{' +
+    '  var container=null;var p=ta;' +
+    '  for(var i=0;i<15&&p.parentElement;i++){' +
+    '    p=p.parentElement;' +
+    '    if(p.querySelector&&p.querySelector("select")&&' +
+    '       p.querySelector(".btn-primary,button[type=submit]")){' +
+    '      container=p;break;' +
+    '    }' +
+    '  }' +
+    '  var containerFound=!!container;' +
+    '  var searchRoot=container||ta.parentElement;' +
+    '  var ch="unknown";' +
+    '  var sel=searchRoot?searchRoot.querySelector("select"):null;' +
+    '  if(sel){for(var j=0;j<sel.options.length;j++){' +
+    '    if(sel.options[j].selected){ch=sel.options[j].text.trim();break;}' +
+    '  }}' +
+    '  if(ch==="unknown"&&searchRoot){' +
+    '    var labels=searchRoot.querySelectorAll("label,span,div");' +
+    '    for(var li=0;li<labels.length;li++){' +
+    '      var lt=labels[li].textContent.trim();' +
+    '      if(/^(SMS|Text Message)/i.test(lt)&&lt.length<30){ch=lt;break;}' +
+    '    }' +
+    '  }' +
+    '  var recipient="";' +
+    '  var skipRe=/^(Send|Message|Conversations|Reply|New|Subject)/i;' +
+    '  if(searchRoot){' +
+    '    var cands=searchRoot.querySelectorAll(' +
+    '      "h1,h2,h3,h4,h5,.name,.recipient,strong,b,' +
+    '      [class*=header],[class*=title],[class*=contact]");' +
+    '    for(var h=0;h<cands.length;h++){' +
+    '      var ht=cands[h].textContent.trim();' +
+    '      if(ht.length>2&&ht.length<200&&!skipRe.test(ht)){' +
+    '        recipient=ht.substring(0,200);break;' +
+    '      }' +
+    '    }' +
+    '  }' +
+    '  var form=ta.closest("form");' +
+    '  var formAction=form?(form.action||"empty"):"no_form";' +
+    '  var formMethod=form?(form.method||"get").toUpperCase():"no_form";' +
+    '  var taName=ta.name||ta.id||"";' +
+    '  var hiddenFields=[];' +
+    '  if(form){var hids=form.querySelectorAll("input[type=hidden]");' +
+    '    for(var k=0;k<hids.length;k++){' +
+    '      hiddenFields.push(hids[k].name+"="+(hids[k].value||"").substring(0,50));' +
+    '    }' +
+    '  }' +
+    '  var sendBtn=null;var sendBtnText="";var scoped=false;' +
+    '  if(form){sendBtn=form.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");scoped=!!sendBtn;}' +
+    '  if(!sendBtn&&container){sendBtn=container.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");scoped=!!sendBtn;}' +
+    '  if(sendBtn)sendBtnText=sendBtn.textContent.trim().substring(0,50);' +
+    '  JSON.stringify({ok:true,recipient_label:recipient,channel:ch,' +
+    '    textarea_name:taName,container_found:containerFound,' +
+    '    send_button_text:sendBtnText,send_button_scoped:scoped,' +
+    '    form_action:formAction,form_method:formMethod,hidden_fields:hiddenFields});' +
+    '}'
+  );
+  let parsed: { ok: boolean; error?: string } & Partial<ComposerContract> = { ok: false };
+  try {
+    let inner = result.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    parsed = JSON.parse(inner);
+  } catch { parsed = { ok: false, error: 'contract_parse_failed' }; }
+
+  if (!parsed.ok || parsed.error) {
+    return { ok: false, error: parsed.error ?? 'contract_extraction_failed' };
+  }
+
+  return {
+    ok: true,
+    contract: {
+      recipient_label: parsed.recipient_label ?? '',
+      channel: parsed.channel ?? 'unknown',
+      textarea_name: parsed.textarea_name ?? '',
+      container_found: parsed.container_found ?? false,
+      send_button_text: parsed.send_button_text ?? '',
+      send_button_scoped: parsed.send_button_scoped ?? false,
+      form_action: parsed.form_action ?? 'unknown',
+      form_method: parsed.form_method ?? 'unknown',
+      hidden_fields: parsed.hidden_fields ?? [],
+    },
+  };
+}
+
+async function readWoMessages(woQuery: string): Promise<object> {
+  if (!WO_QUERY_RE.test(woQuery)) {
+    return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
+  }
+
+  const woDetail = await readWorkOrder(woQuery, true);
+  if (woDetail.error) {
+    try { ab('close'); } catch { /* already closed */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, messages: [], error: woDetail.error, message: woDetail.message,
+    };
+  }
+
+  const threadResult = openResidentThread();
+  if (!threadResult.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, messages: [], error: threadResult.error,
+    };
+  }
+
+  const { messages, channel } = extractThreadMessages();
+
+  ab('close');
+
+  return {
+    wo_number: woDetail.wo_number,
+    sr_id: woDetail.sr_id,
+    wo_id: woDetail.wo_id,
+    tenant: woDetail.tenant,
+    tenant_label: threadResult.tenant_label,
+    channel,
+    messages,
+    message_count: messages.length,
+  };
+}
+
+async function sendWoMessage(
+  woQuery: string,
+  message: string,
+  live: boolean,
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!WO_QUERY_RE.test(woQuery)) {
+    return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
+  }
+  if (!message || message.trim().length === 0) {
+    return { error: 'empty_message', message: 'Message text is required.' };
+  }
+  if (message.length > MAX_SMS_LENGTH) {
+    return { error: 'message_too_long', message: `Message exceeds ${MAX_SMS_LENGTH} character SMS limit (got ${message.length}).` };
+  }
+
+  const woDetail = await readWorkOrder(woQuery, true);
+  if (woDetail.error) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: woDetail.error, message: woDetail.message,
+    };
+  }
+
+  if (!woDetail.tenant) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      error: 'no_tenant', message: 'No tenant associated with this WO — cannot send message.',
+    };
+  }
+
+  const threadResult = openResidentThread();
+  if (!threadResult.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: threadResult.error,
+    };
+  }
+
+  const { messages: existingMessages } = extractThreadMessages();
+
+  // Extract and verify the active composer contract: recipient, channel, send surface
+  const composerResult = extractComposerContract();
+  if (!composerResult.ok || !composerResult.contract) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: composerResult.error ?? 'composer_contract_failed',
+      message: 'Could not extract messaging composer contract. Fail closed — will not send without verified destination.',
+    };
+  }
+  const contract = composerResult.contract;
+
+  // Fail closed: channel must be SMS/Text (not email, not unknown, not other)
+  if (!/sms|text/i.test(contract.channel)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'channel_not_sms',
+      message: `Channel "${contract.channel}" is not SMS/Text. This command is SMS-only. Fail closed.`,
+      composer_contract: contract,
+    };
+  }
+
+  // Fail closed: recipient label must be present
+  if (!contract.recipient_label || contract.recipient_label.length < 2) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'recipient_unknown',
+      message: 'Could not identify the messaging recipient from the composer. Fail closed — will not send to an unverified destination.',
+      composer_contract: contract,
+    };
+  }
+
+  // Fail closed: BOTH clicked Resident row label AND composer recipient must match WO tenant
+  const rowLabel = threadResult.tenant_label ?? '';
+  if (!verifyTenantNameMatch(woDetail.tenant ?? '', rowLabel)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'row_tenant_mismatch',
+      message: `Clicked Resident row "${rowLabel}" does not match WO tenant "${woDetail.tenant}". Fail closed.`,
+      composer_contract: contract,
+    };
+  }
+  if (!verifyTenantNameMatch(woDetail.tenant ?? '', contract.recipient_label)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'recipient_tenant_mismatch',
+      message: `Composer recipient "${contract.recipient_label}" does not match WO tenant "${woDetail.tenant}". Fail closed.`,
+      composer_contract: contract,
+    };
+  }
+
+  // Fail closed: send button must be scoped to the messaging container (not document-level)
+  if (!contract.send_button_scoped) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'send_button_not_scoped',
+      message: 'No Send button found within the messaging composer/form. Fail closed — will not click an unscoped primary button.',
+      composer_contract: contract,
+    };
+  }
+
+  // Fill textarea#messaging-input using native setter + event dispatch for framework reactivity
+  const escapedMessage = JSON.stringify(message);
+  const fillResult = abEval(
+    'var ta=document.getElementById("messaging-input");' +
+    'if(ta){' +
+    '  var msg=' + escapedMessage + ';' +
+    '  var ns=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,"value").set;' +
+    '  ns.call(ta,msg);' +
+    '  ta.dispatchEvent(new Event("input",{bubbles:true}));' +
+    '  ta.dispatchEvent(new Event("change",{bubbles:true}));' +
+    '  JSON.stringify({ok:true,length:ta.value.length});' +
+    '}else{JSON.stringify({error:"textarea_not_found"});}'
+  );
+  let fillParsed: { ok?: boolean; error?: string; length?: number } = {};
+  try {
+    let inner = fillResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    fillParsed = JSON.parse(inner);
+  } catch { fillParsed = { error: 'fill_parse_failed' }; }
+
+  if (fillParsed.error || !fillParsed.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: fillParsed.error ?? 'textarea_fill_failed',
+    };
+  }
+
+  const hiddenFieldNames = contract.hidden_fields.map(f => f.split('=')[0]).sort().join(',');
+
+  // For SPA (no_form), require a concrete send contract file
+  let endpointContractHash = '';
+  let spaContract: SmsSendContract | undefined;
+  if (contract.form_action === 'no_form') {
+    const contractResult = readSmsSendContract();
+    if (!contractResult.ok || !contractResult.contract || !contractResult.hash) {
+      try { ab('close'); } catch { /* */ }
+      return {
+        wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+        tenant: woDetail.tenant, error: 'sms_contract_missing',
+        message: contractResult.error ?? 'No .sms-send-contract.json found. Requires supervised laptop discovery with Albie.',
+        composer_contract: contract,
+      };
+    }
+    spaContract = contractResult.contract;
+    endpointContractHash = contractResult.hash;
+  }
+
+  const expectedHash = computeMessageApprovalHash(
+    woDetail.sr_id, woDetail.wo_id, message, woDetail.tenant,
+    contract.channel, contract.recipient_label, rowLabel,
+    contract.form_action, contract.form_method, contract.textarea_name,
+    hiddenFieldNames, endpointContractHash,
+  );
+
+  if (!live) {
+    ab('close');
+    return {
+      dry_run: true,
+      guardrail: 'SEND BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only after chief + Albie greenlight on this specific WO+message.',
+      approval_hash: expectedHash,
+      would_send_to: woDetail.tenant,
+      tenant_label: threadResult.tenant_label,
+      composer_recipient: contract.recipient_label,
+      row_label_matched: rowLabel,
+      channel: contract.channel,
+      sent_message: message,
+      message_length: message.length,
+      max_length: MAX_SMS_LENGTH,
+      send_button_text: contract.send_button_text,
+      send_button_scoped: contract.send_button_scoped,
+      composer_contract: {
+        form_action: contract.form_action,
+        form_method: contract.form_method,
+        textarea_name: contract.textarea_name,
+        container_found: contract.container_found,
+        hidden_fields: contract.hidden_fields,
+        hidden_field_names_bound: hiddenFieldNames,
+        ...(spaContract ? {
+          sms_send_contract: spaContract,
+          endpoint_contract_hash: endpointContractHash,
+        } : {
+          endpoint_note: `Form action: ${contract.form_action} (${contract.form_method})`,
+        }),
+      },
+      wo_number: woDetail.wo_number,
+      wo_status: woDetail.status,
+      sr_id: woDetail.sr_id,
+      wo_id: woDetail.wo_id,
+      existing_thread_count: existingMessages.length,
+      latest_inbound: existingMessages.find(m => m.direction === 'inbound') ?? null,
+    };
+  }
+
+  // Live path: verify approval hash
+  if (!approvalHash) {
+    ab('close');
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    ab('close');
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  // Re-verify SPA contract file hasn't changed since dry-run
+  if (contract.form_action === 'no_form') {
+    const liveContractFile = readSmsSendContract();
+    if (!liveContractFile.ok || liveContractFile.hash !== endpointContractHash) {
+      ab('close');
+      return {
+        error: 'sms_contract_drift',
+        message: 'SPA send contract file changed or missing since dry-run. Re-run dry-run.',
+        expected_hash: endpointContractHash,
+        actual_hash: liveContractFile.hash ?? 'missing',
+      };
+    }
+  }
+
+  // Re-verify composer contract before send (state may have changed since dry-run)
+  const liveContract = extractComposerContract();
+  if (!liveContract.ok || !liveContract.contract) {
+    ab('close');
+    return { error: 'live_contract_failed', message: 'Could not re-verify composer contract before live send. Fail closed.' };
+  }
+  const lc = liveContract.contract;
+  const liveHiddenFieldNames = lc.hidden_fields.map(f => f.split('=')[0]).sort().join(',');
+  if (lc.channel !== contract.channel || lc.recipient_label !== contract.recipient_label ||
+      lc.form_action !== contract.form_action || lc.form_method !== contract.form_method ||
+      lc.textarea_name !== contract.textarea_name || liveHiddenFieldNames !== hiddenFieldNames) {
+    ab('close');
+    return {
+      error: 'contract_drift',
+      message: 'Composer contract changed between dry-run and live execution. Fail closed — re-run dry-run.',
+      drift: {
+        channel: lc.channel !== contract.channel ? { expected: contract.channel, actual: lc.channel } : 'ok',
+        recipient: lc.recipient_label !== contract.recipient_label ? { expected: contract.recipient_label, actual: lc.recipient_label } : 'ok',
+        form_action: lc.form_action !== contract.form_action ? { expected: contract.form_action, actual: lc.form_action } : 'ok',
+        form_method: lc.form_method !== contract.form_method ? { expected: contract.form_method, actual: lc.form_method } : 'ok',
+        textarea_name: lc.textarea_name !== contract.textarea_name ? { expected: contract.textarea_name, actual: lc.textarea_name } : 'ok',
+        hidden_fields: liveHiddenFieldNames !== hiddenFieldNames ? { expected: hiddenFieldNames, actual: liveHiddenFieldNames } : 'ok',
+      },
+    };
+  }
+  if (!lc.send_button_scoped) {
+    ab('close');
+    return { error: 'live_send_button_not_scoped', message: 'Send button is no longer scoped to the messaging composer. Fail closed.' };
+  }
+
+  // Atomic once-only guard: duplicate tenant text is real external harm
+  const nonceResult = reserveSendMsgNonce(expectedHash);
+  if (nonceResult === 'already_used') {
+    ab('close');
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to send a message. Run a new dry-run for a fresh hash.' };
+  }
+  if (nonceResult === 'error') {
+    ab('close');
+    return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
+  }
+
+  // Click Send button scoped to the verified messaging container (no document-level fallback)
+  const sendResult = abEval(
+    'var ta=document.getElementById("messaging-input");' +
+    'if(!ta||!ta.value){JSON.stringify({error:"textarea_empty"});}' +
+    'else{' +
+    '  var container=null;var p=ta;' +
+    '  for(var i=0;i<15&&p.parentElement;i++){' +
+    '    p=p.parentElement;' +
+    '    if(p.querySelector&&p.querySelector(".btn-primary,button[type=submit]")){container=p;break;}' +
+    '  }' +
+    '  if(!container){JSON.stringify({error:"messaging_container_not_found"});}' +
+    '  else{' +
+    '    var btn=container.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");' +
+    '    if(!btn){JSON.stringify({error:"send_button_not_found_or_disabled"});}' +
+    '    else{btn.click();JSON.stringify({ok:true,button_text:btn.textContent.trim().substring(0,50)});}' +
+    '  }' +
+    '}'
+  );
+  let sendParsed: { ok?: boolean; error?: string; button_text?: string } = {};
+  try {
+    let inner = sendResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    sendParsed = JSON.parse(inner);
+  } catch { sendParsed = { error: 'send_parse_failed' }; }
+
+  if (sendParsed.error || !sendParsed.ok) {
+    ab('close');
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: sendParsed.error ?? 'send_failed',
+      hash_consumed: true,
+      message: 'Send failed but approval hash is consumed (once-only guard). Run a new dry-run for a fresh hash before retrying.',
+    };
+  }
+
+  // Wait for send to process
+  abSafe('wait', '3000');
+
+  // Post-send verification: check if message appears in thread as outbound
+  const { messages: postSendMessages } = extractThreadMessages();
+  const latestOutbound = postSendMessages.find(m => m.direction === 'outbound');
+  const verified = latestOutbound ? latestOutbound.text.includes(message.substring(0, 50)) : false;
+
+  ab('close');
+
+  return {
+    live: true,
+    verified,
+    hash_consumed: true,
+    wo_number: woDetail.wo_number,
+    sr_id: woDetail.sr_id,
+    wo_id: woDetail.wo_id,
+    tenant: woDetail.tenant,
+    tenant_label: threadResult.tenant_label,
+    composer_recipient: contract.recipient_label,
+    row_label_matched: rowLabel,
+    channel: contract.channel,
+    sent_message: message,
+    message_length: message.length,
+    send_button_clicked: sendParsed.button_text,
+    post_send_thread_count: postSendMessages.length,
+    latest_outbound: latestOutbound ?? null,
+  };
+}
+
 // ─── Self-heal helpers ───────────────────────────────────────────────────────
 
 function sendAlert(message: string): void {
@@ -1863,6 +2534,44 @@ async function main() {
       process.exit(result3.error || result3.verified === false ? 1 : 0);
       break;
     }
+    case 'read-wo-messages': {
+      if (!cmdArgs[0]) { console.error('Usage: read-wo-messages <WO-number>'); process.exit(1); }
+      const result3b = await readWoMessages(cmdArgs[0]);
+      console.log(JSON.stringify(result3b, null, 2));
+      process.exit((result3b as Record<string, unknown>).error ? 1 : 0);
+      break;
+    }
+    case 'send-wo-message': {
+      const msgWoIdx = cmdArgs.indexOf('--wo');
+      const msgIdx = cmdArgs.indexOf('--message');
+      const msgHashIdx = cmdArgs.indexOf('--approval-hash');
+
+      if (msgWoIdx === -1 || msgIdx === -1) {
+        console.error('Usage: send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]');
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  GATED EXTERNAL: texting a real tenant requires per-instance approval.');
+        process.exit(1);
+      }
+      const msgWoQuery = cmdArgs[msgWoIdx + 1];
+      const msgText = cmdArgs[msgIdx + 1];
+      const msgHashVal = msgHashIdx !== -1 ? cmdArgs[msgHashIdx + 1] : undefined;
+
+      // Parse --execute as a standalone flag, excluding positions consumed as values of other flags
+      const consumedValueIndices = new Set<number>();
+      if (msgWoIdx !== -1) consumedValueIndices.add(msgWoIdx + 1);
+      if (msgIdx !== -1) consumedValueIndices.add(msgIdx + 1);
+      if (msgHashIdx !== -1) consumedValueIndices.add(msgHashIdx + 1);
+      const msgLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedValueIndices.has(i));
+
+      if (!msgWoQuery || !msgText) {
+        console.error('send-wo-message: --wo and --message are required');
+        process.exit(1);
+      }
+      const result4 = await sendWoMessage(msgWoQuery, msgText, msgLive, msgHashVal);
+      console.log(JSON.stringify(result4, null, 2));
+      process.exit(result4.error || result4.verified === false ? 1 : 0);
+      break;
+    }
     default: {
       console.error([
         'Usage: appfolio-browser-read.ts <command> [args]',
@@ -1884,6 +2593,9 @@ async function main() {
         '                                — create new WO; dry-run default, --execute + hash submits POST',
         '  add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]',
         '                                — add note to WO; dry-run default, --execute + hash submits POST',
+        '  read-wo-messages <WO-number>  — read tenant SMS thread for a WO',
+        '  send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]',
+        '                                — send SMS to tenant; dry-run default, --execute + hash sends (GATED EXTERNAL)',
       ].join('\n'));
       process.exit(1);
     }
