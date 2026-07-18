@@ -1116,6 +1116,33 @@ describe('FastChecker', () => {
     });
   });
 
+  describe('ctx_handoff_deadline_ms — per-agent configurable handoff grace period', () => {
+    it('getCtxThresholds returns default 5min deadline when config omits ctx_handoff_deadline_ms', () => {
+      const agent = createMockAgent();
+      agent.getAgentDir = vi.fn().mockReturnValue(testDir);
+      agent.getConfig = vi.fn().mockReturnValue({});
+      const checker = new FastChecker(agent, paths, '/tmp/framework') as any;
+      const result = checker.getCtxThresholds();
+      expect(result.deadlineMs).toBe(5 * 60_000);
+    });
+
+    it('getCtxThresholds reads ctx_handoff_deadline_ms from config.json', () => {
+      const agentDir = join(testDir, 'deadline-agent');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'config.json'), JSON.stringify({
+        ctx_warning_threshold: 70,
+        ctx_handoff_threshold: 80,
+        ctx_handoff_deadline_ms: 600000,
+      }));
+      const agent = createMockAgent();
+      agent.getAgentDir = vi.fn().mockReturnValue(agentDir);
+      agent.getConfig = vi.fn().mockReturnValue({ ctx_handoff_threshold: 80 });
+      const checker = new FastChecker(agent, paths, '/tmp/framework') as any;
+      const result = checker.getCtxThresholds();
+      expect(result.deadlineMs).toBe(600000);
+    });
+  });
+
   describe('gmail watch decoupled from pollCycle (F8)', () => {
     beforeEach(() => { vi.useFakeTimers(); });
     afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });

@@ -303,6 +303,8 @@ export interface AgentConfig {
   ctx_handoff_threshold?: number;
   /** Context window % at which to trigger graceful restart (Signal 3). Default: 70. */
   ctx_restart_threshold?: number;
+  /** Handoff-write grace period in ms before force-restart. Default: 300000 (5min). */
+  ctx_handoff_deadline_ms?: number;
   /**
    * Fallback context window cap (tokens) for codex-app-server agents when the
    * server's `thread/tokenUsage/updated` event reports `modelContextWindow=null`.
