@@ -1143,6 +1143,87 @@ describe('FastChecker', () => {
     });
   });
 
+  describe('queue-aware handoff deadline — dequeue flag shifts deadline clock', () => {
+    const DEADLINE_MS = 300_000; // 5 min default
+
+    function setupCheckerForDeadline(agentOverrides: Record<string, unknown> = {}) {
+      const agentDir = join(testDir, 'deadline-queue-agent');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'config.json'), JSON.stringify({
+        ctx_handoff_threshold: 80,
+      }));
+
+      const agent = createMockAgent();
+      agent.getAgentDir = vi.fn().mockReturnValue(agentDir);
+      agent.getConfig = vi.fn().mockReturnValue({ ctx_handoff_threshold: 80, ...agentOverrides });
+      agent.getOutputBuffer = vi.fn().mockReturnValue({ getRecent: () => '' });
+
+      const checker = new FastChecker(agent, paths, '/tmp/framework') as any;
+      vi.spyOn(checker, 'forceContextRestart').mockImplementation(() => {});
+
+      // Write a valid context_status.json with high pct so the method doesn't bail early
+      writeFileSync(
+        join(paths.stateDir, 'context_status.json'),
+        JSON.stringify({
+          used_percentage: 90,
+          exceeds_200k_tokens: false,
+          written_at: new Date().toISOString(),
+        }),
+      );
+
+      return checker;
+    }
+
+    it('flag present with valid dequeue time — deadline shifts to dequeue + deadlineMs', async () => {
+      const now = Date.now();
+      const checker = setupCheckerForDeadline();
+
+      // Handoff fired 10 min ago — injection-time deadline already expired
+      checker.ctxHandoffFiredAt = now - 600_000;
+      checker.ctxHandoffDeadlineAt = checker.ctxHandoffFiredAt + DEADLINE_MS; // now - 300_000 (expired)
+
+      // Dequeue happened 1 min ago — dequeue-based deadline is dequeueTime + 5min = now + 4min (still valid)
+      const dequeueTime = now - 60_000;
+      writeFileSync(join(paths.stateDir, 'handoff_dequeued.flag'), String(dequeueTime));
+
+      await checker.checkContextStatus();
+
+      expect(checker.forceContextRestart).not.toHaveBeenCalled();
+    });
+
+    it('no flag file — falls back to injection-time deadline and force restarts', async () => {
+      const now = Date.now();
+      const checker = setupCheckerForDeadline();
+
+      // Handoff fired 10 min ago — injection-time deadline already expired
+      checker.ctxHandoffFiredAt = now - 600_000;
+      checker.ctxHandoffDeadlineAt = checker.ctxHandoffFiredAt + DEADLINE_MS; // now - 300_000 (expired)
+
+      // No handoff_dequeued.flag — injection-time fallback applies
+
+      await checker.checkContextStatus();
+
+      expect(checker.forceContextRestart).toHaveBeenCalled();
+    });
+
+    it('stale flag (timestamp < ctxHandoffFiredAt) — rejected, uses injection-time fallback', async () => {
+      const now = Date.now();
+      const checker = setupCheckerForDeadline();
+
+      // Handoff fired 10 min ago — injection-time deadline already expired
+      checker.ctxHandoffFiredAt = now - 600_000;
+      checker.ctxHandoffDeadlineAt = checker.ctxHandoffFiredAt + DEADLINE_MS; // now - 300_000 (expired)
+
+      // Flag has a stale timestamp from a previous handoff cycle (older than ctxHandoffFiredAt)
+      const staleDequeueTime = now - 900_000; // 15 min ago, before ctxHandoffFiredAt
+      writeFileSync(join(paths.stateDir, 'handoff_dequeued.flag'), String(staleDequeueTime));
+
+      await checker.checkContextStatus();
+
+      expect(checker.forceContextRestart).toHaveBeenCalled();
+    });
+  });
+
   describe('gmail watch decoupled from pollCycle (F8)', () => {
     beforeEach(() => { vi.useFakeTimers(); });
     afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
