@@ -678,6 +678,10 @@ function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
     permissionToEnter: params.permissionToEnter ?? '',
     specialInstructions: params.specialInstructions ?? '',
     requestType: params.requestType ?? 'internal',
+    party: '',
+    sendVendorWoLink: '0',
+    sendVendorText: '0',
+    requireVendorAcceptWo: '0',
   });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
@@ -760,6 +764,10 @@ async function createWorkOrder(
     'maintenance_service_request[maintenance_work_order][issue_descriptor_id]': params.issueDescriptorId ?? '',
     'maintenance_service_request[priority]': params.priority ?? 'Normal',
     'maintenance_service_request[request_type]': params.requestType ?? 'internal',
+    'maintenance_service_request[maintenance_work_order][party]': '',
+    'maintenance_service_request[maintenance_work_order][send_vendor_wo_link]': '0',
+    'maintenance_service_request[maintenance_work_order][send_vendor_text]': '0',
+    'maintenance_service_request[maintenance_work_order][require_vendor_accept_wo]': '0',
   };
   if (params.permissionToEnter) {
     formFields['maintenance_service_request[permission_to_enter]'] = params.permissionToEnter;
