@@ -1587,15 +1587,33 @@ interface SmsSendContract {
 function readSmsSendContract(): { ok: boolean; contract?: SmsSendContract; hash?: string; error?: string } {
   try {
     const raw = readFileSync(SMS_SEND_CONTRACT_PATH, 'utf-8');
-    const parsed = JSON.parse(raw) as SmsSendContract;
-    const required: (keyof SmsSendContract)[] = ['endpoint', 'method', 'content_type', 'textarea_id', 'payload_shape', 'verified_at', 'verified_by'];
-    const missing = required.filter(k => !parsed[k]);
-    if (missing.length > 0) {
-      return { ok: false, error: `contract_incomplete: missing ${missing.join(', ')}` };
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const stringFields: (keyof Omit<SmsSendContract, 'payload_shape'>)[] = ['endpoint', 'method', 'content_type', 'textarea_id', 'verified_at', 'verified_by'];
+    const badStrings = stringFields.filter(k => typeof obj[k] !== 'string' || (obj[k] as string).trim().length === 0);
+    if (badStrings.length > 0) {
+      return { ok: false, error: `contract_incomplete: ${badStrings.join(', ')} must be non-empty strings` };
     }
-    if (typeof parsed.payload_shape !== 'object' || Array.isArray(parsed.payload_shape) || Object.keys(parsed.payload_shape).length === 0) {
+    if (typeof obj.payload_shape !== 'object' || obj.payload_shape === null || Array.isArray(obj.payload_shape)) {
       return { ok: false, error: 'contract_incomplete: payload_shape must be a non-empty object mapping POST body keys to their types' };
     }
+    const shape = obj.payload_shape as Record<string, unknown>;
+    const shapeEntries = Object.entries(shape);
+    if (shapeEntries.length === 0) {
+      return { ok: false, error: 'contract_incomplete: payload_shape must be a non-empty object mapping POST body keys to their types' };
+    }
+    const badShapeKeys = shapeEntries.filter(([k, v]) => k.trim().length === 0 || typeof v !== 'string' || (v as string).trim().length === 0);
+    if (badShapeKeys.length > 0) {
+      return { ok: false, error: 'contract_incomplete: payload_shape keys and values must be non-empty strings' };
+    }
+    const parsed: SmsSendContract = {
+      endpoint: (obj.endpoint as string).trim(),
+      method: (obj.method as string).trim(),
+      content_type: (obj.content_type as string).trim(),
+      textarea_id: (obj.textarea_id as string).trim(),
+      payload_shape: Object.fromEntries(shapeEntries.map(([k, v]) => [k.trim(), (v as string).trim()])),
+      verified_at: (obj.verified_at as string).trim(),
+      verified_by: (obj.verified_by as string).trim(),
+    };
     const contentHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
     return { ok: true, contract: parsed, hash: contentHash };
   } catch (err: unknown) {
