@@ -1586,8 +1586,8 @@ function reserveSendMsgNonce(hash: string): 'reserved' | 'already_used' | 'error
   }
 }
 
-function computeMessageApprovalHash(srId: string, woId: string, message: string, tenant: string, channel: string): string {
-  const payload = JSON.stringify({ srId, woId, message, tenant, channel });
+function computeMessageApprovalHash(srId: string, woId: string, message: string, tenant: string, channel: string, recipientLabel: string): string {
+  const payload = JSON.stringify({ srId, woId, message, tenant, channel, recipientLabel });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
@@ -1685,6 +1685,105 @@ function extractThreadMessages(): { messages: WoThreadMessage[]; channel: string
   return { messages: parsed.messages, channel: parsed.channel };
 }
 
+interface ComposerContract {
+  recipient_label: string;
+  channel: string;
+  textarea_name: string;
+  container_found: boolean;
+  send_button_text: string;
+  send_button_scoped: boolean;
+  form_action: string;
+  form_method: string;
+  hidden_fields: string[];
+}
+
+function extractComposerContract(): { ok: boolean; contract?: ComposerContract; error?: string } {
+  const result = abEval(
+    'var ta=document.getElementById("messaging-input");' +
+    'if(!ta){JSON.stringify({ok:false,error:"textarea_not_found"});}' +
+    'else{' +
+    '  var container=null;var p=ta;' +
+    '  for(var i=0;i<15&&p.parentElement;i++){' +
+    '    p=p.parentElement;' +
+    '    if(p.querySelector&&p.querySelector("select")&&' +
+    '       p.querySelector(".btn-primary,button[type=submit]")){' +
+    '      container=p;break;' +
+    '    }' +
+    '  }' +
+    '  var containerFound=!!container;' +
+    '  var searchRoot=container||ta.parentElement;' +
+    '  var ch="unknown";' +
+    '  var sel=searchRoot?searchRoot.querySelector("select"):null;' +
+    '  if(sel){for(var j=0;j<sel.options.length;j++){' +
+    '    if(sel.options[j].selected){ch=sel.options[j].text.trim();break;}' +
+    '  }}' +
+    '  if(ch==="unknown"&&searchRoot){' +
+    '    var labels=searchRoot.querySelectorAll("label,span,div");' +
+    '    for(var li=0;li<labels.length;li++){' +
+    '      var lt=labels[li].textContent.trim();' +
+    '      if(/^(SMS|Text Message)/i.test(lt)&&lt.length<30){ch=lt;break;}' +
+    '    }' +
+    '  }' +
+    '  var recipient="";' +
+    '  var skipRe=/^(Send|Message|Conversations|Reply|New|Subject)/i;' +
+    '  if(searchRoot){' +
+    '    var cands=searchRoot.querySelectorAll(' +
+    '      "h1,h2,h3,h4,h5,.name,.recipient,strong,b,' +
+    '      [class*=header],[class*=title],[class*=contact]");' +
+    '    for(var h=0;h<cands.length;h++){' +
+    '      var ht=cands[h].textContent.trim();' +
+    '      if(ht.length>2&&ht.length<200&&!skipRe.test(ht)){' +
+    '        recipient=ht.substring(0,200);break;' +
+    '      }' +
+    '    }' +
+    '  }' +
+    '  var form=ta.closest("form");' +
+    '  var formAction=form?(form.action||"empty"):"no_form";' +
+    '  var formMethod=form?(form.method||"get").toUpperCase():"no_form";' +
+    '  var taName=ta.name||ta.id||"";' +
+    '  var hiddenFields=[];' +
+    '  if(form){var hids=form.querySelectorAll("input[type=hidden]");' +
+    '    for(var k=0;k<hids.length;k++){' +
+    '      hiddenFields.push(hids[k].name+"="+(hids[k].value||"").substring(0,50));' +
+    '    }' +
+    '  }' +
+    '  var sendBtn=null;var sendBtnText="";var scoped=false;' +
+    '  if(form){sendBtn=form.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");scoped=!!sendBtn;}' +
+    '  if(!sendBtn&&container){sendBtn=container.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");scoped=!!sendBtn;}' +
+    '  if(sendBtn)sendBtnText=sendBtn.textContent.trim().substring(0,50);' +
+    '  JSON.stringify({ok:true,recipient_label:recipient,channel:ch,' +
+    '    textarea_name:taName,container_found:containerFound,' +
+    '    send_button_text:sendBtnText,send_button_scoped:scoped,' +
+    '    form_action:formAction,form_method:formMethod,hidden_fields:hiddenFields});' +
+    '}'
+  );
+  let parsed: { ok: boolean; error?: string } & Partial<ComposerContract> = { ok: false };
+  try {
+    let inner = result.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    parsed = JSON.parse(inner);
+  } catch { parsed = { ok: false, error: 'contract_parse_failed' }; }
+
+  if (!parsed.ok || parsed.error) {
+    return { ok: false, error: parsed.error ?? 'contract_extraction_failed' };
+  }
+
+  return {
+    ok: true,
+    contract: {
+      recipient_label: parsed.recipient_label ?? '',
+      channel: parsed.channel ?? 'unknown',
+      textarea_name: parsed.textarea_name ?? '',
+      container_found: parsed.container_found ?? false,
+      send_button_text: parsed.send_button_text ?? '',
+      send_button_scoped: parsed.send_button_scoped ?? false,
+      form_action: parsed.form_action ?? 'unknown',
+      form_method: parsed.form_method ?? 'unknown',
+      hidden_fields: parsed.hidden_fields ?? [],
+    },
+  };
+}
+
 async function readWoMessages(woQuery: string): Promise<object> {
   if (!WO_QUERY_RE.test(woQuery)) {
     return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
@@ -1766,7 +1865,52 @@ async function sendWoMessage(
     };
   }
 
-  const { messages: existingMessages, channel } = extractThreadMessages();
+  const { messages: existingMessages } = extractThreadMessages();
+
+  // Extract and verify the active composer contract: recipient, channel, send surface
+  const composerResult = extractComposerContract();
+  if (!composerResult.ok || !composerResult.contract) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: composerResult.error ?? 'composer_contract_failed',
+      message: 'Could not extract messaging composer contract. Fail closed — will not send without verified destination.',
+    };
+  }
+  const contract = composerResult.contract;
+
+  // Fail closed: channel must not be unknown
+  if (contract.channel === 'unknown') {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'channel_unknown',
+      message: 'Could not determine messaging channel (SMS/email). Fail closed — will not send to an unknown channel.',
+      composer_contract: contract,
+    };
+  }
+
+  // Fail closed: recipient label must be present
+  if (!contract.recipient_label || contract.recipient_label.length < 2) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'recipient_unknown',
+      message: 'Could not identify the messaging recipient from the composer. Fail closed — will not send to an unverified destination.',
+      composer_contract: contract,
+    };
+  }
+
+  // Fail closed: send button must be scoped to the messaging container (not document-level)
+  if (!contract.send_button_scoped) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'send_button_not_scoped',
+      message: 'No Send button found within the messaging composer/form. Fail closed — will not click an unscoped primary button.',
+      composer_contract: contract,
+    };
+  }
 
   // Fill textarea#messaging-input using native setter + event dispatch for framework reactivity
   const escapedMessage = JSON.stringify(message);
@@ -1796,21 +1940,10 @@ async function sendWoMessage(
     };
   }
 
-  // Check Send button readiness (exists + not disabled)
-  const sendBtnCheck = abEval(
-    'var ta=document.getElementById("messaging-input");' +
-    'var form=ta?ta.closest("form"):null;' +
-    'var btn=form?form.querySelector(".btn-primary"):document.querySelector(".btn-primary");' +
-    'JSON.stringify({found:!!btn,disabled:btn?btn.disabled:true});'
+  const expectedHash = computeMessageApprovalHash(
+    woDetail.sr_id, woDetail.wo_id, message, woDetail.tenant,
+    contract.channel, contract.recipient_label,
   );
-  let sendBtnState: { found?: boolean; disabled?: boolean } = {};
-  try {
-    let inner = sendBtnCheck.output;
-    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
-    sendBtnState = JSON.parse(inner);
-  } catch { /* stays empty */ }
-
-  const expectedHash = computeMessageApprovalHash(woDetail.sr_id, woDetail.wo_id, message, woDetail.tenant, channel);
 
   if (!live) {
     ab('close');
@@ -1820,11 +1953,23 @@ async function sendWoMessage(
       approval_hash: expectedHash,
       would_send_to: woDetail.tenant,
       tenant_label: threadResult.tenant_label,
-      channel,
+      composer_recipient: contract.recipient_label,
+      channel: contract.channel,
       sent_message: message,
       message_length: message.length,
       max_length: MAX_SMS_LENGTH,
-      send_button_ready: sendBtnState.found === true && sendBtnState.disabled === false,
+      send_button_text: contract.send_button_text,
+      send_button_scoped: contract.send_button_scoped,
+      composer_contract: {
+        form_action: contract.form_action,
+        form_method: contract.form_method,
+        textarea_name: contract.textarea_name,
+        container_found: contract.container_found,
+        hidden_fields: contract.hidden_fields,
+        endpoint_note: contract.form_action === 'no_form'
+          ? 'SPA form — HTTP endpoint cannot be verified from DOM. First live send is the observed cross-check.'
+          : `Form action: ${contract.form_action} (${contract.form_method})`,
+      },
       wo_number: woDetail.wo_number,
       wo_status: woDetail.status,
       sr_id: woDetail.sr_id,
@@ -1844,6 +1989,27 @@ async function sendWoMessage(
     return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
   }
 
+  // Re-verify composer contract before send (state may have changed since dry-run)
+  const liveContract = extractComposerContract();
+  if (!liveContract.ok || !liveContract.contract) {
+    ab('close');
+    return { error: 'live_contract_failed', message: 'Could not re-verify composer contract before live send. Fail closed.' };
+  }
+  const lc = liveContract.contract;
+  if (lc.channel !== contract.channel || lc.recipient_label !== contract.recipient_label) {
+    ab('close');
+    return {
+      error: 'contract_drift',
+      message: 'Composer state changed between dry-run and live execution. Fail closed — re-run dry-run.',
+      expected_channel: contract.channel, actual_channel: lc.channel,
+      expected_recipient: contract.recipient_label, actual_recipient: lc.recipient_label,
+    };
+  }
+  if (!lc.send_button_scoped) {
+    ab('close');
+    return { error: 'live_send_button_not_scoped', message: 'Send button is no longer scoped to the messaging composer. Fail closed.' };
+  }
+
   // Atomic once-only guard: duplicate tenant text is real external harm
   const nonceResult = reserveSendMsgNonce(expectedHash);
   if (nonceResult === 'already_used') {
@@ -1855,16 +2021,25 @@ async function sendWoMessage(
     return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
   }
 
-  // Click Send button (.btn-primary)
+  // Click Send button scoped to the verified messaging container (no document-level fallback)
   const sendResult = abEval(
     'var ta=document.getElementById("messaging-input");' +
-    'var form=ta?ta.closest("form"):null;' +
-    'var btn=form?form.querySelector(".btn-primary:not([disabled])"):document.querySelector(".btn-primary:not([disabled])");' +
     'if(!ta||!ta.value){JSON.stringify({error:"textarea_empty"});}' +
-    'else if(!btn){JSON.stringify({error:"send_button_not_found_or_disabled"});}' +
-    'else{btn.click();JSON.stringify({ok:true});}'
+    'else{' +
+    '  var container=null;var p=ta;' +
+    '  for(var i=0;i<15&&p.parentElement;i++){' +
+    '    p=p.parentElement;' +
+    '    if(p.querySelector&&p.querySelector(".btn-primary,button[type=submit]")){container=p;break;}' +
+    '  }' +
+    '  if(!container){JSON.stringify({error:"messaging_container_not_found"});}' +
+    '  else{' +
+    '    var btn=container.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");' +
+    '    if(!btn){JSON.stringify({error:"send_button_not_found_or_disabled"});}' +
+    '    else{btn.click();JSON.stringify({ok:true,button_text:btn.textContent.trim().substring(0,50)});}' +
+    '  }' +
+    '}'
   );
-  let sendParsed: { ok?: boolean; error?: string } = {};
+  let sendParsed: { ok?: boolean; error?: string; button_text?: string } = {};
   try {
     let inner = sendResult.output;
     if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
@@ -1900,9 +2075,11 @@ async function sendWoMessage(
     wo_id: woDetail.wo_id,
     tenant: woDetail.tenant,
     tenant_label: threadResult.tenant_label,
-    channel,
+    composer_recipient: contract.recipient_label,
+    channel: contract.channel,
     sent_message: message,
     message_length: message.length,
+    send_button_clicked: sendParsed.button_text,
     post_send_thread_count: postSendMessages.length,
     latest_outbound: latestOutbound ?? null,
   };
@@ -2221,7 +2398,6 @@ async function main() {
       const msgWoIdx = cmdArgs.indexOf('--wo');
       const msgIdx = cmdArgs.indexOf('--message');
       const msgHashIdx = cmdArgs.indexOf('--approval-hash');
-      const msgLive = cmdArgs.includes('--execute');
 
       if (msgWoIdx === -1 || msgIdx === -1) {
         console.error('Usage: send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]');
@@ -2232,6 +2408,13 @@ async function main() {
       const msgWoQuery = cmdArgs[msgWoIdx + 1];
       const msgText = cmdArgs[msgIdx + 1];
       const msgHashVal = msgHashIdx !== -1 ? cmdArgs[msgHashIdx + 1] : undefined;
+
+      // Parse --execute as a standalone flag, excluding positions consumed as values of other flags
+      const consumedValueIndices = new Set<number>();
+      if (msgWoIdx !== -1) consumedValueIndices.add(msgWoIdx + 1);
+      if (msgIdx !== -1) consumedValueIndices.add(msgIdx + 1);
+      if (msgHashIdx !== -1) consumedValueIndices.add(msgHashIdx + 1);
+      const msgLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedValueIndices.has(i));
 
       if (!msgWoQuery || !msgText) {
         console.error('send-wo-message: --wo and --message are required');
