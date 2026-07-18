@@ -1572,6 +1572,33 @@ interface WoThreadMessage {
 
 const MAX_SMS_LENGTH = 910;
 const SEND_MSG_NONCE_DIR = resolve(process.cwd(), '.send-msg-nonces');
+const SMS_SEND_CONTRACT_PATH = resolve(process.cwd(), '.sms-send-contract.json');
+
+interface SmsSendContract {
+  endpoint: string;
+  method: string;
+  content_type: string;
+  textarea_id: string;
+  verified_at: string;
+  verified_by: string;
+}
+
+function readSmsSendContract(): { ok: boolean; contract?: SmsSendContract; hash?: string; error?: string } {
+  try {
+    const raw = readFileSync(SMS_SEND_CONTRACT_PATH, 'utf-8');
+    const parsed = JSON.parse(raw) as SmsSendContract;
+    if (!parsed.endpoint || !parsed.method || !parsed.textarea_id || !parsed.verified_by) {
+      return { ok: false, error: 'contract_incomplete: requires endpoint, method, textarea_id, verified_by' };
+    }
+    const contentHash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+    return { ok: true, contract: parsed, hash: contentHash };
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, error: 'contract_not_found: .sms-send-contract.json does not exist. Requires supervised laptop discovery.' };
+    }
+    return { ok: false, error: `contract_read_failed: ${String(err)}` };
+  }
+}
 
 function reserveSendMsgNonce(hash: string): 'reserved' | 'already_used' | 'error' {
   try { mkdirSync(SEND_MSG_NONCE_DIR, { recursive: true }); } catch { return 'error'; }
@@ -1586,12 +1613,30 @@ function reserveSendMsgNonce(hash: string): 'reserved' | 'already_used' | 'error
   }
 }
 
+function normalizeNameTokens(name: string): string[] {
+  return name.toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/).filter(t => t.length >= 2);
+}
+
+function verifyTenantNameMatch(tenantName: string, label: string): boolean {
+  const tenantTokens = normalizeNameTokens(tenantName);
+  const labelTokens = normalizeNameTokens(label);
+  if (tenantTokens.length === 0 || labelTokens.length === 0) return false;
+  if (tenantTokens.length >= 2) {
+    return tenantTokens.every(t => labelTokens.some(l => l === t));
+  }
+  return labelTokens.includes(tenantTokens[0]);
+}
+
 function computeMessageApprovalHash(
   srId: string, woId: string, message: string, tenant: string,
-  channel: string, recipientLabel: string,
+  channel: string, recipientLabel: string, rowLabel: string,
   formAction: string, formMethod: string, textareaName: string,
+  hiddenFieldNames: string, endpointContractHash: string,
 ): string {
-  const payload = JSON.stringify({ srId, woId, message, tenant, channel, recipientLabel, formAction, formMethod, textareaName });
+  const payload = JSON.stringify({
+    srId, woId, message, tenant, channel, recipientLabel, rowLabel,
+    formAction, formMethod, textareaName, hiddenFieldNames, endpointContractHash,
+  });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
@@ -1834,7 +1879,6 @@ async function sendWoMessage(
   message: string,
   live: boolean,
   approvalHash?: string,
-  endpointVerified?: boolean,
 ): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
   if (!WO_QUERY_RE.test(woQuery)) {
     return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
@@ -1908,21 +1952,23 @@ async function sendWoMessage(
     };
   }
 
-  // Fail closed: recipient must match the WO tenant (proves we're messaging THIS tenant)
-  const tenantLower = (woDetail.tenant ?? '').toLowerCase();
-  const recipientLower = contract.recipient_label.toLowerCase();
-  const tenantFirstName = tenantLower.split(/[\s,]+/)[0];
-  const tenantLastName = tenantLower.split(/[\s,]+/).pop() ?? '';
-  const recipientContainsTenantName = tenantFirstName.length >= 2 && (
-    recipientLower.includes(tenantFirstName) ||
-    (tenantLastName.length >= 2 && recipientLower.includes(tenantLastName))
-  );
-  if (!recipientContainsTenantName) {
+  // Fail closed: BOTH clicked Resident row label AND composer recipient must match WO tenant
+  const rowLabel = threadResult.tenant_label ?? '';
+  if (!verifyTenantNameMatch(woDetail.tenant ?? '', rowLabel)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, error: 'row_tenant_mismatch',
+      message: `Clicked Resident row "${rowLabel}" does not match WO tenant "${woDetail.tenant}". Fail closed.`,
+      composer_contract: contract,
+    };
+  }
+  if (!verifyTenantNameMatch(woDetail.tenant ?? '', contract.recipient_label)) {
     try { ab('close'); } catch { /* */ }
     return {
       wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
       tenant: woDetail.tenant, error: 'recipient_tenant_mismatch',
-      message: `Composer recipient "${contract.recipient_label}" does not match WO tenant "${woDetail.tenant}". Fail closed — will not send to unverified destination.`,
+      message: `Composer recipient "${contract.recipient_label}" does not match WO tenant "${woDetail.tenant}". Fail closed.`,
       composer_contract: contract,
     };
   }
@@ -1966,10 +2012,31 @@ async function sendWoMessage(
     };
   }
 
+  const hiddenFieldNames = contract.hidden_fields.map(f => f.split('=')[0]).sort().join(',');
+
+  // For SPA (no_form), require a concrete send contract file
+  let endpointContractHash = '';
+  let spaContract: SmsSendContract | undefined;
+  if (contract.form_action === 'no_form') {
+    const contractResult = readSmsSendContract();
+    if (!contractResult.ok || !contractResult.contract || !contractResult.hash) {
+      try { ab('close'); } catch { /* */ }
+      return {
+        wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+        tenant: woDetail.tenant, error: 'sms_contract_missing',
+        message: contractResult.error ?? 'No .sms-send-contract.json found. Requires supervised laptop discovery with Albie.',
+        composer_contract: contract,
+      };
+    }
+    spaContract = contractResult.contract;
+    endpointContractHash = contractResult.hash;
+  }
+
   const expectedHash = computeMessageApprovalHash(
     woDetail.sr_id, woDetail.wo_id, message, woDetail.tenant,
-    contract.channel, contract.recipient_label,
+    contract.channel, contract.recipient_label, rowLabel,
     contract.form_action, contract.form_method, contract.textarea_name,
+    hiddenFieldNames, endpointContractHash,
   );
 
   if (!live) {
@@ -1981,6 +2048,7 @@ async function sendWoMessage(
       would_send_to: woDetail.tenant,
       tenant_label: threadResult.tenant_label,
       composer_recipient: contract.recipient_label,
+      row_label_matched: rowLabel,
       channel: contract.channel,
       sent_message: message,
       message_length: message.length,
@@ -1993,9 +2061,13 @@ async function sendWoMessage(
         textarea_name: contract.textarea_name,
         container_found: contract.container_found,
         hidden_fields: contract.hidden_fields,
-        endpoint_note: contract.form_action === 'no_form'
-          ? 'SPA form — HTTP endpoint cannot be verified from DOM. Live send requires --endpoint-verified flag (supervised laptop discovery).'
-          : `Form action: ${contract.form_action} (${contract.form_method})`,
+        hidden_field_names_bound: hiddenFieldNames,
+        ...(spaContract ? {
+          sms_send_contract: spaContract,
+          endpoint_contract_hash: endpointContractHash,
+        } : {
+          endpoint_note: `Form action: ${contract.form_action} (${contract.form_method})`,
+        }),
       },
       wo_number: woDetail.wo_number,
       wo_status: woDetail.status,
@@ -2016,14 +2088,18 @@ async function sendWoMessage(
     return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
   }
 
-  // Fail closed: SPA endpoint must be externally verified before live send
-  if (contract.form_action === 'no_form' && !endpointVerified) {
-    ab('close');
-    return {
-      error: 'endpoint_not_verified',
-      message: 'SPA form — HTTP endpoint cannot be verified from DOM. Live send requires --endpoint-verified flag after supervised laptop discovery with Albie.',
-      composer_contract: contract,
-    };
+  // Re-verify SPA contract file hasn't changed since dry-run
+  if (contract.form_action === 'no_form') {
+    const liveContractFile = readSmsSendContract();
+    if (!liveContractFile.ok || liveContractFile.hash !== endpointContractHash) {
+      ab('close');
+      return {
+        error: 'sms_contract_drift',
+        message: 'SPA send contract file changed or missing since dry-run. Re-run dry-run.',
+        expected_hash: endpointContractHash,
+        actual_hash: liveContractFile.hash ?? 'missing',
+      };
+    }
   }
 
   // Re-verify composer contract before send (state may have changed since dry-run)
@@ -2033,9 +2109,10 @@ async function sendWoMessage(
     return { error: 'live_contract_failed', message: 'Could not re-verify composer contract before live send. Fail closed.' };
   }
   const lc = liveContract.contract;
+  const liveHiddenFieldNames = lc.hidden_fields.map(f => f.split('=')[0]).sort().join(',');
   if (lc.channel !== contract.channel || lc.recipient_label !== contract.recipient_label ||
       lc.form_action !== contract.form_action || lc.form_method !== contract.form_method ||
-      lc.textarea_name !== contract.textarea_name) {
+      lc.textarea_name !== contract.textarea_name || liveHiddenFieldNames !== hiddenFieldNames) {
     ab('close');
     return {
       error: 'contract_drift',
@@ -2046,6 +2123,7 @@ async function sendWoMessage(
         form_action: lc.form_action !== contract.form_action ? { expected: contract.form_action, actual: lc.form_action } : 'ok',
         form_method: lc.form_method !== contract.form_method ? { expected: contract.form_method, actual: lc.form_method } : 'ok',
         textarea_name: lc.textarea_name !== contract.textarea_name ? { expected: contract.textarea_name, actual: lc.textarea_name } : 'ok',
+        hidden_fields: liveHiddenFieldNames !== hiddenFieldNames ? { expected: hiddenFieldNames, actual: liveHiddenFieldNames } : 'ok',
       },
     };
   }
@@ -2120,6 +2198,7 @@ async function sendWoMessage(
     tenant: woDetail.tenant,
     tenant_label: threadResult.tenant_label,
     composer_recipient: contract.recipient_label,
+    row_label_matched: rowLabel,
     channel: contract.channel,
     sent_message: message,
     message_length: message.length,
@@ -2459,13 +2538,12 @@ async function main() {
       if (msgIdx !== -1) consumedValueIndices.add(msgIdx + 1);
       if (msgHashIdx !== -1) consumedValueIndices.add(msgHashIdx + 1);
       const msgLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedValueIndices.has(i));
-      const msgEndpointVerified = cmdArgs.some((arg, i) => arg === '--endpoint-verified' && !consumedValueIndices.has(i));
 
       if (!msgWoQuery || !msgText) {
         console.error('send-wo-message: --wo and --message are required');
         process.exit(1);
       }
-      const result4 = await sendWoMessage(msgWoQuery, msgText, msgLive, msgHashVal, msgEndpointVerified);
+      const result4 = await sendWoMessage(msgWoQuery, msgText, msgLive, msgHashVal);
       console.log(JSON.stringify(result4, null, 2));
       process.exit(result4.error || result4.verified === false ? 1 : 0);
       break;
@@ -2492,7 +2570,7 @@ async function main() {
         '  add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]',
         '                                — add note to WO; dry-run default, --execute + hash submits POST',
         '  read-wo-messages <WO-number>  — read tenant SMS thread for a WO',
-        '  send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash> [--endpoint-verified]]',
+        '  send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]',
         '                                — send SMS to tenant; dry-run default, --execute + hash sends (GATED EXTERNAL)',
       ].join('\n'));
       process.exit(1);
