@@ -650,6 +650,18 @@ interface CreateWorkOrderParams {
   requestType?: 'internal' | 'tenant_requested' | 'unit_turn';
 }
 
+const CREATE_WO_NONCE_PATH = resolve(process.cwd(), '.create-wo-used-hashes.json');
+
+function readUsedHashes(): string[] {
+  try { return JSON.parse(readFileSync(CREATE_WO_NONCE_PATH, 'utf-8')) as string[]; } catch { return []; }
+}
+
+function markHashUsed(hash: string): void {
+  const used = readUsedHashes();
+  used.push(hash);
+  try { writeFileSync(CREATE_WO_NONCE_PATH, JSON.stringify(used)); } catch { /* best-effort */ }
+}
+
 function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
   const payload = JSON.stringify({
     propertyId: params.propertyId,
@@ -657,8 +669,10 @@ function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
     occupancyId: params.occupancyId ?? '',
     description: params.description,
     category: params.category ?? '',
+    issueDescriptorId: params.issueDescriptorId ?? '',
     priority: params.priority ?? 'Normal',
     permissionToEnter: params.permissionToEnter ?? '',
+    specialInstructions: params.specialInstructions ?? '',
     requestType: params.requestType ?? 'internal',
   });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
@@ -790,6 +804,13 @@ async function createWorkOrder(
     return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
   }
 
+  // Once-only guard: create is non-idempotent, a reused hash would create duplicates
+  const usedHashes = readUsedHashes();
+  if (usedHashes.includes(expectedHash)) {
+    ab('close');
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to create a WO. Run a new dry-run to get a fresh hash.' };
+  }
+
   // ── LIVE SUBMIT ──
   const bodyLiteral = JSON.stringify(postBody);
   const submitScript = `fetch("${postUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral},redirect:"follow"}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url,body_preview:t.substring(0,500)});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
@@ -798,62 +819,71 @@ async function createWorkOrder(
   let submitJson: Record<string, unknown> = {};
   try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
 
+  // Mark hash as used BEFORE checking success — even a partial/ambiguous submit should not retry
+  markHashUsed(expectedHash);
+
   const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
   if (!submitOk) {
     ab('close');
     return {
       error: 'submit_failed',
+      hash_consumed: true,
       submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
     };
   }
 
-  // Post-create verification: redirect should land on new SR/WO detail page
-  await new Promise(r => setTimeout(r, 2000));
-  const finalUrl = abSafe('get', 'url').output.trim();
+  // Post-create verification: navigate browser to the final_url from fetch response
+  // (fetch follows redirects server-side but does NOT navigate the browser page)
+  const fetchFinalUrl = String(submitJson.final_url ?? '');
+  const srMatchResponse = fetchFinalUrl.match(/\/service_requests\/(\d+)/);
+  const woMatchResponse = fetchFinalUrl.match(/\/work_orders\/(\d+)/);
 
-  // Success: redirected to /maintenance/service_requests/<sr_id>/work_orders/<wo_id>
-  // or /maintenance/service_requests/<sr_id>
-  const srMatch = finalUrl.match(/\/service_requests\/(\d+)/);
-  const woMatch = finalUrl.match(/\/work_orders\/(\d+)/);
+  let verification: Record<string, unknown> = {};
 
-  const verifyResult = abEval(`
-    var header = document.querySelector(".js-work-order-header-left");
-    var woNum = header ? header.textContent.trim() : "";
-    var srTitle = document.querySelector("h2.js-service-request-title");
-    var srNum = srTitle ? srTitle.textContent.trim() : "";
-    var logH3 = null;
-    var h3s = document.querySelectorAll("h3");
-    for (var i = 0; i < h3s.length; i++) {
-      if (/Actions Log/i.test(h3s[i].textContent.trim())) { logH3 = h3s[i]; break; }
-    }
-    var firstLog = "";
-    if (logH3) {
-      var sib = logH3.nextElementSibling;
-      if (sib) firstLog = sib.textContent.trim().split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;}).slice(0,3).join(" | ");
-    }
-    JSON.stringify({ wo_number: woNum, sr_number: srNum, first_log: firstLog });
-  `);
+  if (srMatchResponse) {
+    const verifyUrl = fetchFinalUrl.startsWith('http') ? fetchFinalUrl : `${APPFOLIO_URL}${fetchFinalUrl}`;
+    abSafe('open', verifyUrl);
+    abSafe('wait', '--load', 'networkidle');
+
+    const verifyResult = abEval(`
+      var header = document.querySelector(".js-work-order-header-left");
+      var woNum = header ? header.textContent.trim() : "";
+      var srTitle = document.querySelector("h2.js-service-request-title");
+      var srNum = srTitle ? srTitle.textContent.trim() : "";
+      var logH3 = null;
+      var h3s = document.querySelectorAll("h3");
+      for (var i = 0; i < h3s.length; i++) {
+        if (/Actions Log/i.test(h3s[i].textContent.trim())) { logH3 = h3s[i]; break; }
+      }
+      var firstLog = "";
+      if (logH3) {
+        var sib = logH3.nextElementSibling;
+        if (sib) firstLog = sib.textContent.trim().split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;}).slice(0,3).join(" | ");
+      }
+      JSON.stringify({ wo_number: woNum, sr_number: srNum, first_log: firstLog });
+    `);
+
+    try {
+      let vi = verifyResult.output;
+      if (vi.startsWith('"') && vi.endsWith('"')) vi = JSON.parse(vi) as string;
+      verification = JSON.parse(vi) as Record<string, unknown>;
+    } catch { verification = { parse_error: true, raw: verifyResult.output }; }
+  }
 
   ab('close');
 
-  let verification: Record<string, unknown> = {};
-  try {
-    let vi = verifyResult.output;
-    if (vi.startsWith('"') && vi.endsWith('"')) vi = JSON.parse(vi) as string;
-    verification = JSON.parse(vi) as Record<string, unknown>;
-  } catch { verification = { parse_error: true, raw: verifyResult.output }; }
-
   const hasCreatedPhrase = /Created/i.test(String(verification.first_log ?? ''));
-  const redirectedToWo = !!srMatch;
+  const redirectedToSr = !!srMatchResponse;
 
   return {
     live: true,
-    verified: redirectedToWo && hasCreatedPhrase,
-    sr_id: srMatch?.[1] ?? '',
-    wo_id: woMatch?.[1] ?? '',
-    final_url: finalUrl,
+    verified: redirectedToSr && hasCreatedPhrase,
+    sr_id: srMatchResponse?.[1] ?? '',
+    wo_id: woMatchResponse?.[1] ?? '',
+    final_url: fetchFinalUrl,
     submit_result: submitJson,
     verification,
+    hash_consumed: true,
   };
 }
 
