@@ -704,6 +704,12 @@ async function createWorkOrder(
   if (params.unitId && !/^\d+$/.test(params.unitId)) {
     return { error: 'invalid_unit_id', message: 'unitId must be numeric digits only' };
   }
+  if (params.occupancyId && !/^\d+$/.test(params.occupancyId)) {
+    return { error: 'invalid_occupancy_id', message: 'occupancyId must be numeric digits only' };
+  }
+  if (params.occupancyId && !params.unitId) {
+    return { error: 'missing_unit_id', message: 'unitId is required when occupancyId is supplied (tenant-path requires both)' };
+  }
   if (!params.description.trim()) {
     return { error: 'empty_description', message: 'description is required' };
   }
