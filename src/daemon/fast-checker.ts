@@ -2280,7 +2280,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
    * Re-reads from disk only when the file has changed so dashboard updates take effect
    * within one poll cycle without a daemon restart.
    */
-  private getCtxThresholds(): { warn: number; handoff: number } {
+  private getCtxThresholds(): { warn: number; handoff: number; deadlineMs: number } {
     try {
       const configPath = join(this.agent.getAgentDir(), 'config.json');
       const mtime = statSync(configPath).mtimeMs;
@@ -2289,6 +2289,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         const config = this.agent.getConfig();
         config.ctx_warning_threshold = cfg.ctx_warning_threshold;
         config.ctx_handoff_threshold = cfg.ctx_handoff_threshold;
+        config.ctx_handoff_deadline_ms = cfg.ctx_handoff_deadline_ms;
         this.ctxConfigMtime = mtime;
       }
     } catch { /* keep stale values */ }
@@ -2296,6 +2297,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     return {
       warn: config.ctx_warning_threshold ?? 70,
       handoff: config.ctx_handoff_threshold ?? 80,
+      deadlineMs: config.ctx_handoff_deadline_ms ?? 5 * 60_000,
     };
   }
 
@@ -2357,7 +2359,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    const { warn, handoff } = this.getCtxThresholds();
+    const { warn, handoff, deadlineMs } = this.getCtxThresholds();
 
     // No threshold configured — observe-only mode (log but don't act)
     if (this.agent.getConfig().ctx_handoff_threshold === undefined) return;
@@ -2369,7 +2371,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
       this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
       this.ctxHandoffDeadlineAt = 0;
-      this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within 5min`);
+      this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within ${Math.round(deadlineMs / 60_000)}min`);
       return;
     }
 
@@ -2385,7 +2387,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // Tier 2: handoff (fires once per session lifecycle)
     if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
       this.ctxHandoffFiredAt = now;
-      this.ctxHandoffDeadlineAt = now + 5 * 60_000; // 5min grace for agent to cooperate
+      this.ctxHandoffDeadlineAt = now + deadlineMs;
       // Reset context_status.json so the new session doesn't re-trigger immediately
       const statusPath = join(this.paths.stateDir, 'context_status.json');
       try {
