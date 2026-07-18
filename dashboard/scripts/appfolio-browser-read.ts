@@ -9,6 +9,8 @@
  *   npx tsx scripts/appfolio-browser-read.ts lookup-unit "123 Main St Apt 1"
  *   npx tsx scripts/appfolio-browser-read.ts read-work-order "8014"
  *   npx tsx scripts/appfolio-browser-read.ts batch-work-orders "8014" "7994" "8015"
+ *   npx tsx scripts/appfolio-browser-read.ts assign-vendor --sr-id <id> --wo-id <id> --vendor-id <id> [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts create-work-order --property-id <id> --description "<text>" [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -630,6 +632,228 @@ async function assignVendor(
       text_link: dispatch.textLink,
       require_accept: dispatch.requireAccept,
     },
+  };
+}
+
+// ─── create-work-order ──────────────────────────────────────────────────────
+
+interface CreateWorkOrderParams {
+  propertyId: string;
+  unitId?: string;
+  occupancyId?: string;
+  description: string;
+  category?: string;
+  issueDescriptorId?: string;
+  priority?: 'Urgent' | 'Normal' | 'Low';
+  permissionToEnter?: 'true' | 'false' | 'not_applicable';
+  specialInstructions?: string;
+  requestType?: 'internal' | 'tenant_requested' | 'unit_turn';
+}
+
+function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
+  const payload = JSON.stringify({
+    propertyId: params.propertyId,
+    unitId: params.unitId ?? '',
+    occupancyId: params.occupancyId ?? '',
+    description: params.description,
+    category: params.category ?? '',
+    priority: params.priority ?? 'Normal',
+    permissionToEnter: params.permissionToEnter ?? '',
+    requestType: params.requestType ?? 'internal',
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
+async function createWorkOrder(
+  params: CreateWorkOrderParams,
+  live: boolean,
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!/^\d+$/.test(params.propertyId)) {
+    return { error: 'invalid_property_id', message: 'propertyId must be numeric digits only' };
+  }
+  if (params.unitId && !/^\d+$/.test(params.unitId)) {
+    return { error: 'invalid_unit_id', message: 'unitId must be numeric digits only' };
+  }
+  if (!params.description.trim()) {
+    return { error: 'empty_description', message: 'description is required' };
+  }
+
+  const sessionCheck = await checkSession();
+  if (!sessionCheck.authenticated) {
+    return { error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
+  }
+
+  // Navigate to the create form to extract CSRF from the live page
+  const newFormUrl = `${APPFOLIO_URL}/maintenance/service_requests/new`;
+
+  const opened = abSafe('open', newFormUrl);
+  if (!opened.ok) return { error: 'navigation_failed', message: opened.output };
+  abSafe('wait', '--load', 'networkidle');
+
+  let currentUrl = abSafe('get', 'url').output.trim();
+  if (/account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(currentUrl)) {
+    ab('close');
+    return { error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
+  }
+
+  // Dashboard-redirect guard
+  if (!/\/service_requests\/new/i.test(currentUrl)) {
+    abSafe('open', newFormUrl);
+    abSafe('wait', '--load', 'networkidle');
+    currentUrl = abSafe('get', 'url').output.trim();
+    if (!/\/service_requests\/new/i.test(currentUrl)) {
+      ab('close');
+      return { error: 'navigation_redirected', message: `Create form not accessible — redirected to: ${currentUrl}` };
+    }
+  }
+
+  // Verify the form exists on page
+  const formCheck = abEval(`document.getElementById("new_maintenance_service_request")?"found":"missing"`);
+  let formFound = '';
+  try { let fc = formCheck.output; if (fc.startsWith('"') && fc.endsWith('"')) fc = JSON.parse(fc) as string; formFound = fc.trim(); } catch { /* stays empty */ }
+  if (formFound !== 'found') {
+    ab('close');
+    return { error: 'form_not_found', message: 'new_maintenance_service_request form not found on page' };
+  }
+
+  // CSRF token extraction
+  const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let csrfToken = '';
+  try {
+    let ct = csrfResult.output;
+    if (ct.startsWith('"') && ct.endsWith('"')) ct = JSON.parse(ct) as string;
+    csrfToken = ct.trim();
+  } catch { /* stays empty */ }
+  if (!csrfToken) {
+    ab('close');
+    return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
+  }
+
+  // Build POST body with real Rails field names
+  const postUrl = `${APPFOLIO_URL}/maintenance/service_requests`;
+  const formFields: Record<string, string> = {
+    'authenticity_token': csrfToken,
+    'maintenance_service_request[property_id]': params.propertyId,
+    'maintenance_service_request[unit_id]': params.unitId ?? '',
+    'maintenance_service_request[occupancy_id]': params.occupancyId ?? '',
+    'maintenance_service_request[description]': params.description,
+    'maintenance_service_request[maintenance_work_order][maintenance_work_order_category][work_order_category]': params.category ?? '',
+    'maintenance_service_request[maintenance_work_order][issue_descriptor_id]': params.issueDescriptorId ?? '',
+    'maintenance_service_request[priority]': params.priority ?? 'Normal',
+    'maintenance_service_request[request_type]': params.requestType ?? 'internal',
+  };
+  if (params.permissionToEnter) {
+    formFields['maintenance_service_request[permission_to_enter]'] = params.permissionToEnter;
+  }
+  if (params.specialInstructions) {
+    formFields['maintenance_service_request[special_instructions]'] = params.specialInstructions;
+  }
+
+  const postBody = Object.entries(formFields)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+
+  const expectedHash = computeCreateWoApprovalHash(params);
+
+  if (!live) {
+    ab('close');
+    return {
+      dry_run: true,
+      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only after chief + Albie greenlight.',
+      approval_hash: expectedHash,
+      would_post: postUrl,
+      csrf_token_extracted: true,
+      csrf_token_prefix: csrfToken.slice(0, 8) + '…',
+      form_id_verified: true,
+      params: {
+        property_id: params.propertyId,
+        unit_id: params.unitId ?? '',
+        occupancy_id: params.occupancyId ?? '',
+        description: params.description,
+        category: params.category ?? '',
+        priority: params.priority ?? 'Normal',
+        permission_to_enter: params.permissionToEnter ?? '',
+        request_type: params.requestType ?? 'internal',
+      },
+      field_map: formFields,
+    };
+  }
+
+  // Approval-hash binding
+  if (!approvalHash) {
+    ab('close');
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    ab('close');
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  // ── LIVE SUBMIT ──
+  const bodyLiteral = JSON.stringify(postBody);
+  const submitScript = `fetch("${postUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral},redirect:"follow"}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url,body_preview:t.substring(0,500)});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const submitResult = abEval(submitScript);
+
+  let submitJson: Record<string, unknown> = {};
+  try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
+
+  const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
+  if (!submitOk) {
+    ab('close');
+    return {
+      error: 'submit_failed',
+      submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
+    };
+  }
+
+  // Post-create verification: redirect should land on new SR/WO detail page
+  await new Promise(r => setTimeout(r, 2000));
+  const finalUrl = abSafe('get', 'url').output.trim();
+
+  // Success: redirected to /maintenance/service_requests/<sr_id>/work_orders/<wo_id>
+  // or /maintenance/service_requests/<sr_id>
+  const srMatch = finalUrl.match(/\/service_requests\/(\d+)/);
+  const woMatch = finalUrl.match(/\/work_orders\/(\d+)/);
+
+  const verifyResult = abEval(`
+    var header = document.querySelector(".js-work-order-header-left");
+    var woNum = header ? header.textContent.trim() : "";
+    var srTitle = document.querySelector("h2.js-service-request-title");
+    var srNum = srTitle ? srTitle.textContent.trim() : "";
+    var logH3 = null;
+    var h3s = document.querySelectorAll("h3");
+    for (var i = 0; i < h3s.length; i++) {
+      if (/Actions Log/i.test(h3s[i].textContent.trim())) { logH3 = h3s[i]; break; }
+    }
+    var firstLog = "";
+    if (logH3) {
+      var sib = logH3.nextElementSibling;
+      if (sib) firstLog = sib.textContent.trim().split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;}).slice(0,3).join(" | ");
+    }
+    JSON.stringify({ wo_number: woNum, sr_number: srNum, first_log: firstLog });
+  `);
+
+  ab('close');
+
+  let verification: Record<string, unknown> = {};
+  try {
+    let vi = verifyResult.output;
+    if (vi.startsWith('"') && vi.endsWith('"')) vi = JSON.parse(vi) as string;
+    verification = JSON.parse(vi) as Record<string, unknown>;
+  } catch { verification = { parse_error: true, raw: verifyResult.output }; }
+
+  const hasCreatedPhrase = /Created/i.test(String(verification.first_log ?? ''));
+  const redirectedToWo = !!srMatch;
+
+  return {
+    live: true,
+    verified: redirectedToWo && hasCreatedPhrase,
+    sr_id: srMatch?.[1] ?? '',
+    wo_id: woMatch?.[1] ?? '',
+    final_url: finalUrl,
+    submit_result: submitJson,
+    verification,
   };
 }
 
@@ -1300,6 +1524,56 @@ async function main() {
       process.exit(result.error || result.verified === false ? 1 : 0);
       break;
     }
+    case 'create-work-order': {
+      const propIdIdx = cmdArgs.indexOf('--property-id');
+      const descIdx = cmdArgs.indexOf('--description');
+      const unitIdIdx = cmdArgs.indexOf('--unit-id');
+      const occupancyIdIdx = cmdArgs.indexOf('--occupancy-id');
+      const categoryIdx = cmdArgs.indexOf('--category');
+      const issueDescIdx = cmdArgs.indexOf('--issue-descriptor-id');
+      const priorityIdx = cmdArgs.indexOf('--priority');
+      const pteIdx = cmdArgs.indexOf('--permission-to-enter');
+      const specialInstIdx = cmdArgs.indexOf('--special-instructions');
+      const requestTypeIdx = cmdArgs.indexOf('--request-type');
+      const approvalHashIdx2 = cmdArgs.indexOf('--approval-hash');
+      const live2 = cmdArgs.includes('--execute');
+
+      const approvalHashVal2 = approvalHashIdx2 !== -1 ? cmdArgs[approvalHashIdx2 + 1] : undefined;
+
+      if (propIdIdx === -1 || descIdx === -1) {
+        console.error('Usage: create-work-order --property-id <id> --description "<text>" [options]');
+        console.error('  --unit-id <id>              Unit within property');
+        console.error('  --occupancy-id <id>         Tenant occupancy (set by typeahead)');
+        console.error('  --category <num>            WO category (1=Alarm, 2=Appliances, 6=Electrical, ""=No Trade)');
+        console.error('  --issue-descriptor-id <id>  Issue descriptor');
+        console.error('  --priority <level>          Urgent|Normal|Low (default: Normal)');
+        console.error('  --permission-to-enter <val> true|false|not_applicable');
+        console.error('  --special-instructions "<t>" Entry instructions text');
+        console.error('  --request-type <type>       internal|tenant_requested|unit_turn (default: internal)');
+        console.error('  --execute --approval-hash <hash>  Submit live (requires prior dry-run hash)');
+        process.exit(1);
+      }
+      const cwParams: CreateWorkOrderParams = {
+        propertyId: cmdArgs[propIdIdx + 1],
+        description: cmdArgs[descIdx + 1],
+        unitId: unitIdIdx !== -1 ? cmdArgs[unitIdIdx + 1] : undefined,
+        occupancyId: occupancyIdIdx !== -1 ? cmdArgs[occupancyIdIdx + 1] : undefined,
+        category: categoryIdx !== -1 ? cmdArgs[categoryIdx + 1] : undefined,
+        issueDescriptorId: issueDescIdx !== -1 ? cmdArgs[issueDescIdx + 1] : undefined,
+        priority: priorityIdx !== -1 ? cmdArgs[priorityIdx + 1] as CreateWorkOrderParams['priority'] : undefined,
+        permissionToEnter: pteIdx !== -1 ? cmdArgs[pteIdx + 1] as CreateWorkOrderParams['permissionToEnter'] : undefined,
+        specialInstructions: specialInstIdx !== -1 ? cmdArgs[specialInstIdx + 1] : undefined,
+        requestType: requestTypeIdx !== -1 ? cmdArgs[requestTypeIdx + 1] as CreateWorkOrderParams['requestType'] : undefined,
+      };
+      if (!cwParams.propertyId || !cwParams.description) {
+        console.error('create-work-order: --property-id and --description are required');
+        process.exit(1);
+      }
+      const result2 = await createWorkOrder(cwParams, live2, approvalHashVal2);
+      console.log(JSON.stringify(result2, null, 2));
+      process.exit(result2.error || result2.verified === false ? 1 : 0);
+      break;
+    }
     default: {
       console.error([
         'Usage: appfolio-browser-read.ts <command> [args]',
@@ -1317,6 +1591,8 @@ async function main() {
         '  assign-vendor --sr-id <id> --wo-id <id> (--vendor-id <id> | --vendor-name "<name>") [--email-link] [--text-link] [--require-accept] [--execute --approval-hash <hash>]',
         '                                — assign vendor to WO; dry-run default, --execute + hash submits PATCH',
         '                                — --vendor-name resolves via paseo-ops DB before assign',
+        '  create-work-order --property-id <id> --description "<text>" [--unit-id <id>] [--category <num>] [--priority Urgent|Normal|Low] [--request-type internal|tenant_requested] [--execute --approval-hash <hash>]',
+        '                                — create new WO; dry-run default, --execute + hash submits POST',
       ].join('\n'));
       process.exit(1);
     }
