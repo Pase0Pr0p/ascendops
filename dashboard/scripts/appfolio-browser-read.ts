@@ -1685,7 +1685,7 @@ function computeMessageApprovalHash(
  * NOT the visible Text/Email buttons (those are vendor-notify: js-work-order-action-notify_vendor).
  * Assumes browser is already on the WO detail page.
  */
-function openResidentThread(): { ok: boolean; tenant_label?: string; error?: string; count?: number; labels?: string[] } {
+function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: string; error?: string; count?: number; labels?: string[] } {
   const launcherResult = abEval(
     'var btn=document.querySelector(\'button[data-messaging-launcher-trigger="true"]\');' +
     'if(btn){btn.click();JSON.stringify({ok:true});}' +
@@ -1703,7 +1703,7 @@ function openResidentThread(): { ok: boolean; tenant_label?: string; error?: str
 
   abSafe('wait', '3000');
 
-  // Find and click Resident row — must be exactly one (unambiguous)
+  // Find Resident rows, then select: single = click it; multiple + tenantName = disambiguate by name match
   const residentResult = abEval(
     'var matches=[];' +
     'var els=document.querySelectorAll("a,button,div,li,tr,td,[role=\\"listitem\\"]");' +
@@ -1713,24 +1713,73 @@ function openResidentThread(): { ok: boolean; tenant_label?: string; error?: str
     '    matches.push(els[i]);' +
     '  }' +
     '}' +
-    'if(matches.length===0){JSON.stringify({error:"resident_row_not_found"});}' +
-    'else if(matches.length>1){JSON.stringify({error:"resident_ambiguous",count:matches.length,' +
-    '  labels:matches.slice(0,5).map(function(m){return m.textContent.trim().substring(0,100)})});}' +
-    'else{matches[0].click();JSON.stringify({ok:true,label:matches[0].textContent.trim().substring(0,200)});}'
+    'JSON.stringify({count:matches.length,' +
+    '  labels:matches.slice(0,10).map(function(m){return m.textContent.trim().substring(0,200)})});'
   );
-  let residentParsed: { ok?: boolean; error?: string; label?: string; count?: number; labels?: string[] } = {};
+  let residentParsed: { count?: number; labels?: string[]; error?: string } = {};
   try {
     let inner = residentResult.output;
     if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
     residentParsed = JSON.parse(inner);
   } catch { residentParsed = { error: 'resident_parse_failed' }; }
-  if (residentParsed.error || !residentParsed.ok) {
-    return { ok: false, error: residentParsed.error ?? 'resident_click_failed', ...(residentParsed.count ? { count: residentParsed.count, labels: residentParsed.labels } : {}) };
+  if (residentParsed.error) {
+    return { ok: false, error: residentParsed.error };
+  }
+
+  const count = residentParsed.count ?? 0;
+  const labels = residentParsed.labels ?? [];
+
+  if (count === 0) {
+    return { ok: false, error: 'resident_row_not_found' };
+  }
+
+  let targetIndex = 0;
+  if (count === 1) {
+    targetIndex = 0;
+  } else if (tenantName) {
+    const matchingIndices = labels
+      .map((label, i) => ({ label, i }))
+      .filter(({ label }) => verifyTenantNameMatch(tenantName, label));
+    if (matchingIndices.length === 0) {
+      return { ok: false, error: 'resident_no_tenant_match', count, labels: labels.slice(0, 5),
+        message: `${count} Resident rows found but none match WO tenant "${tenantName}"` };
+    }
+    if (matchingIndices.length > 1) {
+      return { ok: false, error: 'resident_multiple_tenant_match', count, labels: labels.slice(0, 5),
+        message: `${count} Resident rows, ${matchingIndices.length} match tenant "${tenantName}" — cannot disambiguate` };
+    }
+    targetIndex = matchingIndices[0].i;
+  } else {
+    return { ok: false, error: 'resident_ambiguous', count, labels: labels.slice(0, 5) };
+  }
+
+  // Click the selected Resident row by index
+  const clickResult = abEval(
+    'var matches=[];' +
+    'var els=document.querySelectorAll("a,button,div,li,tr,td,[role=\\"listitem\\"]");' +
+    'for(var i=0;i<els.length;i++){' +
+    '  var t=els[i].textContent.trim();' +
+    '  if(/^Resident/i.test(t)&&els[i].offsetHeight>0&&t.length<300){' +
+    '    matches.push(els[i]);' +
+    '  }' +
+    '}' +
+    `var idx=${targetIndex};` +
+    'if(idx<matches.length){matches[idx].click();JSON.stringify({ok:true,label:matches[idx].textContent.trim().substring(0,200)});}' +
+    'else{JSON.stringify({error:"resident_index_out_of_range"});}'
+  );
+  let clickParsed: { ok?: boolean; error?: string; label?: string } = {};
+  try {
+    let inner = clickResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    clickParsed = JSON.parse(inner);
+  } catch { clickParsed = { error: 'click_parse_failed' }; }
+  if (clickParsed.error || !clickParsed.ok) {
+    return { ok: false, error: clickParsed.error ?? 'resident_click_failed' };
   }
 
   abSafe('wait', '3000');
 
-  return { ok: true, tenant_label: residentParsed.label };
+  return { ok: true, tenant_label: clickParsed.label };
 }
 
 /**
@@ -1888,12 +1937,13 @@ async function readWoMessages(woQuery: string): Promise<object> {
     };
   }
 
-  const threadResult = openResidentThread();
+  const threadResult = openResidentThread(woDetail.tenant ?? undefined);
   if (!threadResult.ok) {
     try { ab('close'); } catch { /* */ }
     return {
       wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
       tenant: woDetail.tenant, messages: [], error: threadResult.error,
+      ...(threadResult.count ? { resident_count: threadResult.count, resident_labels: threadResult.labels } : {}),
     };
   }
 
@@ -1946,12 +1996,13 @@ async function sendWoMessage(
     };
   }
 
-  const threadResult = openResidentThread();
+  const threadResult = openResidentThread(woDetail.tenant ?? undefined);
   if (!threadResult.ok) {
     try { ab('close'); } catch { /* */ }
     return {
       wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
       tenant: woDetail.tenant, error: threadResult.error,
+      ...(threadResult.count ? { resident_count: threadResult.count, resident_labels: threadResult.labels } : {}),
     };
   }
 
