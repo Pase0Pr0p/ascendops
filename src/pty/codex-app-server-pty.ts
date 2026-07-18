@@ -136,7 +136,7 @@ export class CodexAppServerPTY {
   private _alive = false;
   private _executing = false;
   private _writeBuffer = '';
-  private _turnQueue: unknown[][] = [];
+  private _turnQueue: { input: unknown[]; isHandoff?: boolean }[] = [];
   private _turnCompletion: {
     resolve: () => void;
     reject: (err: Error) => void;
@@ -375,7 +375,8 @@ export class CodexAppServerPTY {
     const turnText = extracted?.replyDirective
       ? `${input}\n\n${extracted.replyDirective}`
       : input;
-    this.queueTurn([{ type: 'text', text: turnText, text_elements: [] }]);
+    const isHandoff = turnText.includes('[CONTEXT HANDOFF REQUIRED]');
+    this.queueTurn([{ type: 'text', text: turnText, text_elements: [] }], isHandoff);
   }
 
   private extractTelegramPayload(
@@ -704,8 +705,8 @@ export class CodexAppServerPTY {
     return response.result?.data?.[0]?.id || null;
   }
 
-  private queueTurn(input: unknown[]): void {
-    this._turnQueue.push(input);
+  private queueTurn(input: unknown[], isHandoff?: boolean): void {
+    this._turnQueue.push({ input, isHandoff });
     if (!this._executing) {
       this.drainQueue().catch((err) => {
         this._outputBuffer.push(`[codex-app-server] turn queue failed: ${err}\n`);
@@ -715,10 +716,15 @@ export class CodexAppServerPTY {
 
   private async drainQueue(): Promise<void> {
     while (this._alive && this._turnQueue.length > 0) {
-      const input = this._turnQueue.shift()!;
+      const entry = this._turnQueue.shift()!;
       this._executing = true;
+      if (entry.isHandoff) {
+        try {
+          writeFileSync(join(this._stateDir, 'handoff_dequeued.flag'), Date.now().toString(), 'utf-8');
+        } catch { /* non-fatal */ }
+      }
       try {
-        await this.startTurn(input);
+        await this.startTurn(entry.input);
       } finally {
         this._executing = false;
       }

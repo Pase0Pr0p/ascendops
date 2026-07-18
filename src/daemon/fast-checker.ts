@@ -2368,11 +2368,26 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     if (effectivePct === null) return;
 
     // Tier 3: deadline exceeded — force restart if agent ignored handoff prompt
-    if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
-      this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
-      this.ctxHandoffDeadlineAt = 0;
-      this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within ${Math.round(deadlineMs / 60_000)}min`);
-      return;
+    // Queue-aware: if the handoff turn was queued behind an active turn, use the
+    // dequeue timestamp as the deadline start (not injection time). Without the
+    // flag file, falls back to the injection-time deadline (max-queue-wait safety net).
+    if (this.ctxHandoffDeadlineAt > 0) {
+      let effectiveDeadline = this.ctxHandoffDeadlineAt;
+      const flagPath = join(this.paths.stateDir, 'handoff_dequeued.flag');
+      try {
+        const dequeueTime = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
+        if (!isNaN(dequeueTime) && dequeueTime >= this.ctxHandoffFiredAt) {
+          effectiveDeadline = dequeueTime + deadlineMs;
+        }
+      } catch { /* no flag = still queued, use injection-time deadline */ }
+
+      if (now > effectiveDeadline) {
+        this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
+        this.ctxHandoffDeadlineAt = 0;
+        try { unlinkSync(flagPath); } catch { /* non-fatal */ }
+        this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within ${Math.round(deadlineMs / 60_000)}min`);
+        return;
+      }
     }
 
     // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
