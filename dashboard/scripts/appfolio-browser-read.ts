@@ -9,6 +9,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts lookup-unit "123 Main St Apt 1"
  *   npx tsx scripts/appfolio-browser-read.ts read-work-order "8014"
  *   npx tsx scripts/appfolio-browser-read.ts batch-work-orders "8014" "7994" "8015"
+ *   npx tsx scripts/appfolio-browser-read.ts add-note --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -630,6 +631,197 @@ async function assignVendor(
       text_link: dispatch.textLink,
       require_accept: dispatch.requireAccept,
     },
+  };
+}
+
+// ─── add-work-order-note ────────────────────────────────────────────────────
+
+interface AddNoteParams {
+  woId: string;
+  body: string;
+}
+
+function computeAddNoteApprovalHash(params: AddNoteParams): string {
+  const payload = JSON.stringify({
+    woId: params.woId,
+    body: params.body,
+    parentType: 'Maintenance::WorkOrderDecorator',
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
+async function addWorkOrderNote(
+  params: AddNoteParams,
+  live: boolean,
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!/^\d+$/.test(params.woId)) {
+    return { error: 'invalid_wo_id', message: 'woId must be numeric digits only' };
+  }
+  if (!params.body.trim()) {
+    return { error: 'empty_body', message: 'Note body is required' };
+  }
+
+  const sessionCheck = await checkSession();
+  if (!sessionCheck.authenticated) {
+    return { error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
+  }
+
+  const newNoteUrl = `${APPFOLIO_URL}/notes/new?parent_id=${params.woId}&parent_type=Maintenance%3A%3AWorkOrderDecorator`;
+
+  const opened = abSafe('open', newNoteUrl);
+  if (!opened.ok) return { error: 'navigation_failed', message: opened.output };
+  abSafe('wait', '--load', 'networkidle');
+
+  let currentUrl = abSafe('get', 'url').output.trim();
+  if (/account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(currentUrl)) {
+    ab('close');
+    return { error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
+  }
+
+  if (!/\/notes\/new/i.test(currentUrl)) {
+    abSafe('open', newNoteUrl);
+    abSafe('wait', '--load', 'networkidle');
+    currentUrl = abSafe('get', 'url').output.trim();
+    if (!/\/notes\/new/i.test(currentUrl)) {
+      ab('close');
+      return { error: 'navigation_redirected', message: `Notes form not accessible — redirected to: ${currentUrl}` };
+    }
+  }
+
+  const formCheck = abEval(`document.getElementById("new_note")?"found":"missing"`);
+  let formFound = '';
+  try { let fc = formCheck.output; if (fc.startsWith('"') && fc.endsWith('"')) fc = JSON.parse(fc) as string; formFound = fc.trim(); } catch { /* stays empty */ }
+  if (formFound !== 'found') {
+    ab('close');
+    return { error: 'form_not_found', message: 'new_note form not found on page' };
+  }
+
+  const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let csrfToken = '';
+  try {
+    let ct = csrfResult.output;
+    if (ct.startsWith('"') && ct.endsWith('"')) ct = JSON.parse(ct) as string;
+    csrfToken = ct.trim();
+  } catch { /* stays empty */ }
+  if (!csrfToken) {
+    ab('close');
+    return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
+  }
+
+  const postUrl = `${APPFOLIO_URL}/notes`;
+  const formFields: Record<string, string> = {
+    'authenticity_token': csrfToken,
+    'parent_id': params.woId,
+    'parent_type': 'Maintenance::WorkOrderDecorator',
+    'note[body]': params.body,
+    'commit': 'Save',
+  };
+
+  const postBody = Object.entries(formFields)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+
+  const expectedHash = computeAddNoteApprovalHash(params);
+
+  if (!live) {
+    ab('close');
+    return {
+      dry_run: true,
+      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only after chief + Albie greenlight.',
+      approval_hash: expectedHash,
+      would_post: postUrl,
+      csrf_token_extracted: true,
+      csrf_token_prefix: csrfToken.slice(0, 8) + '…',
+      form_id_verified: true,
+      params: {
+        wo_id: params.woId,
+        parent_type: 'Maintenance::WorkOrderDecorator',
+        body: params.body,
+      },
+      field_map: formFields,
+    };
+  }
+
+  if (!approvalHash) {
+    ab('close');
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    ab('close');
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  // ── LIVE SUBMIT ──
+  const bodyLiteral = JSON.stringify(postBody);
+  const submitScript = `fetch("${postUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral},redirect:"follow"}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url,body_preview:t.substring(0,500)});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const submitResult = abEval(submitScript);
+
+  let submitJson: Record<string, unknown> = {};
+  try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
+
+  const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
+  if (!submitOk) {
+    ab('close');
+    return {
+      error: 'submit_failed',
+      message: 'POST to /notes failed. Re-run dry-run and try again.',
+      submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
+    };
+  }
+
+  // Post-submit verification: navigate to the WO detail page and check notes section
+  const fetchFinalUrl = String(submitJson.final_url ?? '');
+  let verifyUrl: string;
+  const woMatch = fetchFinalUrl.match(/\/work_orders\/\d+/);
+  if (woMatch) {
+    verifyUrl = fetchFinalUrl.startsWith('http') ? fetchFinalUrl : `${APPFOLIO_URL}${fetchFinalUrl}`;
+  } else {
+    verifyUrl = `${APPFOLIO_URL}/maintenance/work_orders/${params.woId}`;
+  }
+
+  abSafe('open', verifyUrl);
+  abSafe('wait', '--load', 'networkidle');
+
+  const verifyResult = abEval(`
+    var notesH3 = null;
+    var h3s = document.querySelectorAll("h3");
+    for (var i = 0; i < h3s.length; i++) {
+      if (/Notes/i.test(h3s[i].textContent.trim())) { notesH3 = h3s[i]; break; }
+    }
+    var latestNote = "";
+    if (notesH3) {
+      var sib = notesH3.nextElementSibling;
+      while (sib) {
+        var t = sib.textContent.trim();
+        if (t.length > 0) { latestNote = t.split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;}).slice(0,5).join(" | "); break; }
+        sib = sib.nextElementSibling;
+      }
+    }
+    JSON.stringify({ latest_note: latestNote });
+  `);
+
+  let verification: Record<string, unknown> = {};
+  try {
+    let vi = verifyResult.output;
+    if (vi.startsWith('"') && vi.endsWith('"')) vi = JSON.parse(vi) as string;
+    verification = JSON.parse(vi) as Record<string, unknown>;
+  } catch { verification = { parse_error: true, raw: verifyResult.output }; }
+
+  ab('close');
+
+  const latestNote = String(verification.latest_note ?? '');
+  const hasPostedPhrase = /Posted/i.test(latestNote);
+  const bodySnippet = params.body.substring(0, 40);
+  const bodyVisible = latestNote.includes(bodySnippet);
+
+  return {
+    live: true,
+    verified: hasPostedPhrase && bodyVisible,
+    wo_id: params.woId,
+    final_url: fetchFinalUrl,
+    submit_result: submitJson,
+    verification,
   };
 }
 
@@ -1300,6 +1492,32 @@ async function main() {
       process.exit(result.error || result.verified === false ? 1 : 0);
       break;
     }
+    case 'add-note': {
+      const woIdIdx = cmdArgs.indexOf('--wo-id');
+      const bodyIdx = cmdArgs.indexOf('--body');
+      const approvalHashIdx = cmdArgs.indexOf('--approval-hash');
+      const live = cmdArgs.includes('--execute');
+      const approvalHashVal = approvalHashIdx !== -1 ? cmdArgs[approvalHashIdx + 1] : undefined;
+
+      if (woIdIdx === -1 || bodyIdx === -1) {
+        console.error('Usage: add-note --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]');
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  --wo-id            Work order ID (numeric)');
+        console.error('  --body             Note text to add');
+        console.error('  --approval-hash    Hash from dry-run output (required with --execute)');
+        process.exit(1);
+      }
+      const noteWoId = cmdArgs[woIdIdx + 1];
+      const noteBody = cmdArgs[bodyIdx + 1];
+      if (!noteWoId || !noteBody) {
+        console.error('add-note: --wo-id and --body are required');
+        process.exit(1);
+      }
+      const result = await addWorkOrderNote({ woId: noteWoId, body: noteBody }, live, approvalHashVal);
+      console.log(JSON.stringify(result, null, 2));
+      process.exit(result.error || result.verified === false ? 1 : 0);
+      break;
+    }
     default: {
       console.error([
         'Usage: appfolio-browser-read.ts <command> [args]',
@@ -1317,6 +1535,8 @@ async function main() {
         '  assign-vendor --sr-id <id> --wo-id <id> (--vendor-id <id> | --vendor-name "<name>") [--email-link] [--text-link] [--require-accept] [--execute --approval-hash <hash>]',
         '                                — assign vendor to WO; dry-run default, --execute + hash submits PATCH',
         '                                — --vendor-name resolves via paseo-ops DB before assign',
+        '  add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]',
+        '                                — add note to WO; dry-run default, --execute + hash submits POST',
       ].join('\n'));
       process.exit(1);
     }
