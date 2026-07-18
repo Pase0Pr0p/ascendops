@@ -656,10 +656,10 @@ function readUsedHashes(): string[] {
   try { return JSON.parse(readFileSync(CREATE_WO_NONCE_PATH, 'utf-8')) as string[]; } catch { return []; }
 }
 
-function markHashUsed(hash: string): void {
+function markHashUsed(hash: string): boolean {
   const used = readUsedHashes();
   used.push(hash);
-  try { writeFileSync(CREATE_WO_NONCE_PATH, JSON.stringify(used)); } catch { /* best-effort */ }
+  try { writeFileSync(CREATE_WO_NONCE_PATH, JSON.stringify(used)); return true; } catch { return false; }
 }
 
 function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
@@ -811,6 +811,12 @@ async function createWorkOrder(
     return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to create a WO. Run a new dry-run to get a fresh hash.' };
   }
 
+  // Mark hash used BEFORE sending the POST — closes the TOCTOU window between check and submit
+  if (!markHashUsed(expectedHash)) {
+    ab('close');
+    return { error: 'nonce_write_failed', message: 'Could not persist used-hash record. Refusing to POST without once-only guarantee.' };
+  }
+
   // ── LIVE SUBMIT ──
   const bodyLiteral = JSON.stringify(postBody);
   const submitScript = `fetch("${postUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral},redirect:"follow"}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url,body_preview:t.substring(0,500)});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
@@ -818,9 +824,6 @@ async function createWorkOrder(
 
   let submitJson: Record<string, unknown> = {};
   try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
-
-  // Mark hash as used BEFORE checking success — even a partial/ambiguous submit should not retry
-  markHashUsed(expectedHash);
 
   const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
   if (!submitOk) {
