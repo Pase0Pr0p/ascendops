@@ -317,12 +317,12 @@ async function resolveVendor(name: string): Promise<{ vendor?: VendorResolution;
     fetch(displayUrl, { headers }),
   ]);
 
-  if (!companyRes.ok && !displayRes.ok) {
-    return { error: `supabase_error: company=${companyRes.status}, display=${displayRes.status}` };
+  if (!companyRes.ok || !displayRes.ok) {
+    return { error: `supabase_query_failed: company=${companyRes.status}, display=${displayRes.status}` };
   }
 
-  const companyRows = companyRes.ok ? (await companyRes.json()) as Array<Record<string, unknown>> : [];
-  const displayRows = displayRes.ok ? (await displayRes.json()) as Array<Record<string, unknown>> : [];
+  const companyRows = (await companyRes.json()) as Array<Record<string, unknown>>;
+  const displayRows = (await displayRes.json()) as Array<Record<string, unknown>>;
 
   // Dedupe by appfolio_vendor_id
   const seen = new Set<string>();
@@ -1258,6 +1258,10 @@ async function main() {
       };
       const approvalHashVal = approvalHashIdx !== -1 ? cmdArgs[approvalHashIdx + 1] : undefined;
 
+      if (vendorIdIdx !== -1 && vendorNameIdx !== -1) {
+        console.error('assign-vendor: provide --vendor-id OR --vendor-name, not both (ambiguous target source)');
+        process.exit(1);
+      }
       if (srIdIdx === -1 || woIdIdx === -1 || (vendorIdIdx === -1 && vendorNameIdx === -1)) {
         console.error('Usage: assign-vendor --sr-id <id> --wo-id <id> (--vendor-id <id> | --vendor-name "<name>") [options]');
         console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
