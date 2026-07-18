@@ -1714,7 +1714,7 @@ function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: 
     '  }' +
     '}' +
     'JSON.stringify({count:matches.length,' +
-    '  labels:matches.slice(0,10).map(function(m){return m.textContent.trim().substring(0,200)})});'
+    '  labels:matches.map(function(m){return m.textContent.trim().substring(0,200)})});'
   );
   let residentParsed: { count?: number; labels?: string[]; error?: string } = {};
   try {
@@ -1775,6 +1775,12 @@ function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: 
   } catch { clickParsed = { error: 'click_parse_failed' }; }
   if (clickParsed.error || !clickParsed.ok) {
     return { ok: false, error: clickParsed.error ?? 'resident_click_failed' };
+  }
+
+  // Defense-in-depth: re-verify clicked row label matches tenant (guards against DOM order-swap between queries)
+  if (tenantName && clickParsed.label && !verifyTenantNameMatch(tenantName, clickParsed.label)) {
+    return { ok: false, error: 'resident_click_tenant_mismatch',
+      message: `Clicked row label "${clickParsed.label}" does not match WO tenant "${tenantName}" — possible DOM reorder between queries` };
   }
 
   abSafe('wait', '3000');
