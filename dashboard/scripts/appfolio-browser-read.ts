@@ -9,7 +9,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts lookup-unit "123 Main St Apt 1"
  *   npx tsx scripts/appfolio-browser-read.ts read-work-order "8014"
  *   npx tsx scripts/appfolio-browser-read.ts batch-work-orders "8014" "7994" "8015"
- *   npx tsx scripts/appfolio-browser-read.ts add-note --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -22,7 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { resolve } from 'node:path';
 
@@ -637,12 +637,30 @@ async function assignVendor(
 // ─── add-work-order-note ────────────────────────────────────────────────────
 
 interface AddNoteParams {
+  srId: string;
   woId: string;
   body: string;
 }
 
+const ADD_NOTE_NONCE_DIR = resolve(process.cwd(), '.add-note-nonces');
+
+function reserveAddNoteNonce(hash: string): 'reserved' | 'already_used' | 'error' {
+  try { mkdirSync(ADD_NOTE_NONCE_DIR, { recursive: true }); } catch { return 'error'; }
+  const noncePath = resolve(ADD_NOTE_NONCE_DIR, hash);
+  try {
+    const fd = openSync(noncePath, 'wx');
+    closeSync(fd);
+    return 'reserved';
+  } catch (err: unknown) {
+    const code = (err as { code?: string }).code;
+    if (code === 'EEXIST') return 'already_used';
+    return 'error';
+  }
+}
+
 function computeAddNoteApprovalHash(params: AddNoteParams): string {
   const payload = JSON.stringify({
+    srId: params.srId,
     woId: params.woId,
     body: params.body,
     parentType: 'Maintenance::WorkOrderDecorator',
@@ -655,8 +673,8 @@ async function addWorkOrderNote(
   live: boolean,
   approvalHash?: string,
 ): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
-  if (!/^\d+$/.test(params.woId)) {
-    return { error: 'invalid_wo_id', message: 'woId must be numeric digits only' };
+  if (!/^\d+$/.test(params.srId) || !/^\d+$/.test(params.woId)) {
+    return { error: 'invalid_ids', message: 'srId and woId must be numeric digits only' };
   }
   if (!params.body.trim()) {
     return { error: 'empty_body', message: 'Note body is required' };
@@ -735,6 +753,7 @@ async function addWorkOrderNote(
       csrf_token_prefix: csrfToken.slice(0, 8) + '…',
       form_id_verified: true,
       params: {
+        sr_id: params.srId,
         wo_id: params.woId,
         parent_type: 'Maintenance::WorkOrderDecorator',
         body: params.body,
@@ -752,6 +771,17 @@ async function addWorkOrderNote(
     return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
   }
 
+  // Atomic once-only guard: exclusive file create (wx) is check+reserve in one syscall
+  const nonceResult = reserveAddNoteNonce(expectedHash);
+  if (nonceResult === 'already_used') {
+    ab('close');
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to add a note. Run a new dry-run for a fresh hash.' };
+  }
+  if (nonceResult === 'error') {
+    ab('close');
+    return { error: 'nonce_reservation_failed', message: 'Could not reserve nonce file. Refusing to POST without once-only guarantee.' };
+  }
+
   // ── LIVE SUBMIT ──
   const bodyLiteral = JSON.stringify(postBody);
   const submitScript = `fetch("${postUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral},redirect:"follow"}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url,body_preview:t.substring(0,500)});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
@@ -765,40 +795,35 @@ async function addWorkOrderNote(
     ab('close');
     return {
       error: 'submit_failed',
-      message: 'POST to /notes failed. Re-run dry-run and try again.',
+      hash_consumed: true,
+      message: 'POST to /notes failed but approval hash is consumed (once-only guard). Run a new dry-run for a fresh hash before retrying.',
       submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
     };
   }
 
-  // Post-submit verification: navigate to the WO detail page and check notes section
-  const fetchFinalUrl = String(submitJson.final_url ?? '');
-  let verifyUrl: string;
-  const woMatch = fetchFinalUrl.match(/\/work_orders\/\d+/);
-  if (woMatch) {
-    verifyUrl = fetchFinalUrl.startsWith('http') ? fetchFinalUrl : `${APPFOLIO_URL}${fetchFinalUrl}`;
-  } else {
-    verifyUrl = `${APPFOLIO_URL}/maintenance/work_orders/${params.woId}`;
-  }
-
-  abSafe('open', verifyUrl);
+  // Post-submit verification: navigate to the validated WO detail page and check h2 Notes section
+  const woDetailUrl = `${APPFOLIO_URL}/maintenance/service_requests/${params.srId}/work_orders/${params.woId}`;
+  abSafe('open', woDetailUrl);
   abSafe('wait', '--load', 'networkidle');
 
   const verifyResult = abEval(`
-    var notesH3 = null;
-    var h3s = document.querySelectorAll("h3");
-    for (var i = 0; i < h3s.length; i++) {
-      if (/Notes/i.test(h3s[i].textContent.trim())) { notesH3 = h3s[i]; break; }
+    var notesText = "";
+    var notesH2 = null;
+    var h2s = document.querySelectorAll("h2");
+    for (var ni = 0; ni < h2s.length; ni++) {
+      if (/^Notes$/i.test(h2s[ni].textContent.trim())) { notesH2 = h2s[ni]; break; }
     }
-    var latestNote = "";
-    if (notesH3) {
-      var sib = notesH3.nextElementSibling;
-      while (sib) {
-        var t = sib.textContent.trim();
-        if (t.length > 0) { latestNote = t.split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;}).slice(0,5).join(" | "); break; }
-        sib = sib.nextElementSibling;
+    if (notesH2) {
+      var nsib = notesH2.nextElementSibling;
+      var noteLines = [];
+      while (nsib && nsib.tagName !== "H2") {
+        var nt = nsib.textContent.trim();
+        if (nt.length > 0) noteLines.push(nt);
+        nsib = nsib.nextElementSibling;
       }
+      notesText = noteLines.join(" | ").substring(0, 2000);
     }
-    JSON.stringify({ latest_note: latestNote });
+    JSON.stringify({ notes: notesText });
   `);
 
   let verification: Record<string, unknown> = {};
@@ -810,18 +835,20 @@ async function addWorkOrderNote(
 
   ab('close');
 
-  const latestNote = String(verification.latest_note ?? '');
-  const hasPostedPhrase = /Posted/i.test(latestNote);
+  const notesContent = String(verification.notes ?? '');
+  const hasPostedPhrase = /Posted/i.test(notesContent);
   const bodySnippet = params.body.substring(0, 40);
-  const bodyVisible = latestNote.includes(bodySnippet);
+  const bodyVisible = notesContent.includes(bodySnippet);
 
   return {
     live: true,
     verified: hasPostedPhrase && bodyVisible,
+    sr_id: params.srId,
     wo_id: params.woId,
-    final_url: fetchFinalUrl,
+    final_url: String(submitJson.final_url ?? ''),
     submit_result: submitJson,
     verification,
+    hash_consumed: true,
   };
 }
 
@@ -1493,27 +1520,30 @@ async function main() {
       break;
     }
     case 'add-note': {
-      const woIdIdx = cmdArgs.indexOf('--wo-id');
+      const noteSrIdIdx = cmdArgs.indexOf('--sr-id');
+      const noteWoIdIdx = cmdArgs.indexOf('--wo-id');
       const bodyIdx = cmdArgs.indexOf('--body');
-      const approvalHashIdx = cmdArgs.indexOf('--approval-hash');
-      const live = cmdArgs.includes('--execute');
-      const approvalHashVal = approvalHashIdx !== -1 ? cmdArgs[approvalHashIdx + 1] : undefined;
+      const noteHashIdx = cmdArgs.indexOf('--approval-hash');
+      const noteLive = cmdArgs.includes('--execute');
+      const noteHashVal = noteHashIdx !== -1 ? cmdArgs[noteHashIdx + 1] : undefined;
 
-      if (woIdIdx === -1 || bodyIdx === -1) {
-        console.error('Usage: add-note --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]');
+      if (noteSrIdIdx === -1 || noteWoIdIdx === -1 || bodyIdx === -1) {
+        console.error('Usage: add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]');
         console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  --sr-id            Service request ID (numeric)');
         console.error('  --wo-id            Work order ID (numeric)');
         console.error('  --body             Note text to add');
         console.error('  --approval-hash    Hash from dry-run output (required with --execute)');
         process.exit(1);
       }
-      const noteWoId = cmdArgs[woIdIdx + 1];
+      const noteSrId = cmdArgs[noteSrIdIdx + 1];
+      const noteWoId = cmdArgs[noteWoIdIdx + 1];
       const noteBody = cmdArgs[bodyIdx + 1];
-      if (!noteWoId || !noteBody) {
-        console.error('add-note: --wo-id and --body are required');
+      if (!noteSrId || !noteWoId || !noteBody) {
+        console.error('add-note: --sr-id, --wo-id, and --body are required');
         process.exit(1);
       }
-      const result = await addWorkOrderNote({ woId: noteWoId, body: noteBody }, live, approvalHashVal);
+      const result = await addWorkOrderNote({ srId: noteSrId, woId: noteWoId, body: noteBody }, noteLive, noteHashVal);
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.error || result.verified === false ? 1 : 0);
       break;
