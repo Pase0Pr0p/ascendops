@@ -14,6 +14,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts read-wo-messages <WO-number>
  *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>] [--capture]
+ *   npx tsx scripts/appfolio-browser-read.ts photo-intake --wo <WO-number> [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -26,9 +27,10 @@
 
 import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 dotenvConfig({ path: resolve(process.cwd(), '../orgs/paseo-pm/secrets.env'), override: false });
 dotenvConfig({ path: resolve(process.cwd(), '.env.local'), override: false });
@@ -1583,6 +1585,7 @@ async function batchWorkOrders(queries: string[]): Promise<WorkOrderDetail[]> {
 interface WoThreadMessage {
   direction: 'inbound' | 'outbound' | 'unknown';
   text: string;
+  media_urls?: string[];
 }
 
 const MAX_SMS_LENGTH = 910;
@@ -1820,7 +1823,17 @@ function extractThreadMessages(): { messages: WoThreadMessage[]; channel: string
     '  else if(isOut&&bgP)dir="outbound";' +
     '  else continue;' +
     '  var t=el.textContent.trim();' +
-    '  if(t.length>0)msgs.push({direction:dir,text:t.substring(0,500)});' +
+    '  var imgs=el.querySelectorAll("img");' +
+    '  var urls=[];' +
+    '  for(var k=0;k<imgs.length&&k<5;k++){' +
+    '    var s=imgs[k].src||"";' +
+    '    if(s&&/^https?:\\/\\//.test(s))urls.push(s.substring(0,500));' +
+    '  }' +
+    '  if(t.length>0||urls.length>0){' +
+    '    var m={direction:dir,text:t.substring(0,500)};' +
+    '    if(urls.length>0)m.media_urls=urls;' +
+    '    msgs.push(m);' +
+    '  }' +
     '}' +
     'var ch="unknown";' +
     'var sel=document.querySelector("select");' +
@@ -1983,6 +1996,307 @@ async function readWoMessages(woQuery: string): Promise<object> {
     channel,
     messages,
     message_count: messages.length,
+  };
+}
+
+// ─── photo-intake pipeline (inbound: A→B→D→E) ─────────────────────────────
+
+interface VisionResult {
+  make?: string;
+  model?: string;
+  serial?: string;
+  other_details?: string;
+  confidence: 'high' | 'medium' | 'low';
+  raw_text?: string;
+}
+
+interface PhotoIntakeResult {
+  wo_number?: string;
+  sr_id?: string;
+  wo_id?: string;
+  tenant?: string;
+  photos_found: number;
+  photos_analyzed: number;
+  analyses: Array<{
+    url: string;
+    download_ok: boolean;
+    vision?: VisionResult;
+    note_added?: boolean;
+    error?: string;
+  }>;
+  error?: string;
+  message?: string;
+}
+
+async function downloadImage(url: string): Promise<{ path: string; content_type: string } | { error: string }> {
+  const MAX_SIZE = 20 * 1024 * 1024; // 20MB
+  try {
+    const resp = await fetch(url, { redirect: 'follow' });
+    if (!resp.ok) return { error: `http_${resp.status}` };
+
+    const contentType = resp.headers.get('content-type') ?? '';
+    if (!contentType.startsWith('image/')) {
+      return { error: `not_image: ${contentType.substring(0, 50)}` };
+    }
+
+    const contentLength = parseInt(resp.headers.get('content-length') ?? '0', 10);
+    if (contentLength > MAX_SIZE) return { error: `too_large: ${contentLength}` };
+
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    if (buffer.length > MAX_SIZE) return { error: `too_large: ${buffer.length}` };
+
+    const ext = contentType.includes('png') ? '.png' : contentType.includes('webp') ? '.webp' : '.jpg';
+    const filename = `photo-intake-${Date.now()}${ext}`;
+    const filepath = join(tmpdir(), filename);
+    writeFileSync(filepath, buffer);
+    return { path: filepath, content_type: contentType };
+  } catch (err) {
+    return { error: `download_failed: ${String(err).substring(0, 100)}` };
+  }
+}
+
+async function analyzeImage(imagePath: string, woContext: string): Promise<VisionResult | { error: string }> {
+  const imageData = readFileSync(imagePath);
+  const base64 = imageData.toString('base64');
+  const ext = imagePath.endsWith('.png') ? 'image/png' : imagePath.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY;
+
+  if (apiKey) {
+    return analyzeWithClaude(base64, ext, woContext, apiKey);
+  } else if (geminiKey) {
+    return analyzeWithGemini(base64, ext, woContext, geminiKey);
+  }
+  return { error: 'no_vision_api_key: set ANTHROPIC_API_KEY or GEMINI_API_KEY' };
+}
+
+async function analyzeWithClaude(base64: string, mimeType: string, woContext: string, apiKey: string): Promise<VisionResult | { error: string }> {
+  const body = {
+    model: 'claude-sonnet-4-6-20250514',
+    max_tokens: 1024,
+    messages: [{
+      role: 'user' as const,
+      content: [
+        { type: 'image' as const, source: { type: 'base64' as const, media_type: mimeType, data: base64 } },
+        { type: 'text' as const, text: buildVisionPrompt(woContext) },
+      ],
+    }],
+  };
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) return { error: `claude_api_${resp.status}: ${(await resp.text()).substring(0, 200)}` };
+    const result = await resp.json() as { content: Array<{ type: string; text?: string }> };
+    const text = result.content?.find(c => c.type === 'text')?.text ?? '';
+    return parseVisionResponse(text);
+  } catch (err) {
+    return { error: `claude_error: ${String(err).substring(0, 100)}` };
+  }
+}
+
+async function analyzeWithGemini(base64: string, mimeType: string, woContext: string, apiKey: string): Promise<VisionResult | { error: string }> {
+  const body = {
+    contents: [{
+      parts: [
+        { inline_data: { mime_type: mimeType, data: base64 } },
+        { text: buildVisionPrompt(woContext) },
+      ],
+    }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 1024 },
+  };
+
+  try {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+    );
+    if (!resp.ok) return { error: `gemini_api_${resp.status}: ${(await resp.text()).substring(0, 200)}` };
+    const result = await resp.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = result.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseVisionResponse(text);
+  } catch (err) {
+    return { error: `gemini_error: ${String(err).substring(0, 100)}` };
+  }
+}
+
+function buildVisionPrompt(woContext: string): string {
+  return `You are analyzing a maintenance work order photo sent by a tenant. Context: ${woContext}
+
+Extract any appliance or equipment information visible in this image. Look for:
+- Make/manufacturer (brand name on labels, stickers, or the unit itself)
+- Model number (on labels, stickers, rating plates)
+- Serial number (on labels, stickers, rating plates)
+- Any other relevant specs (capacity, voltage, year, etc.)
+
+Respond in EXACTLY this JSON format (no markdown, no extra text):
+{"make":"","model":"","serial":"","other_details":"","confidence":"high|medium|low","raw_text":""}
+
+Rules:
+- "confidence": "high" = clearly readable text on label/sticker
+- "confidence": "medium" = partially readable or inferred from visible branding
+- "confidence": "low" = unclear, guessing, or no relevant info found
+- If you cannot find appliance/equipment info (e.g. photo shows damage only, no labels), set confidence to "low" and put description in other_details
+- "raw_text": any text you can read verbatim from labels/stickers
+- Leave fields empty string if not found`;
+}
+
+function parseVisionResponse(text: string): VisionResult {
+  const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  try {
+    const parsed = JSON.parse(cleaned) as Record<string, string>;
+    const confidence = (['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'low') as 'high' | 'medium' | 'low';
+    return {
+      make: parsed.make || undefined,
+      model: parsed.model || undefined,
+      serial: parsed.serial || undefined,
+      other_details: parsed.other_details || undefined,
+      confidence,
+      raw_text: parsed.raw_text || undefined,
+    };
+  } catch {
+    return { confidence: 'low', other_details: text.substring(0, 300), raw_text: text.substring(0, 300) };
+  }
+}
+
+function buildNoteBody(vision: VisionResult, photoUrl: string): string {
+  const parts: string[] = ['[Photo Analysis]'];
+
+  if (vision.make || vision.model) {
+    const id = [vision.make, vision.model].filter(Boolean).join(' ');
+    parts.push(`Appliance: ${id}`);
+  }
+  if (vision.serial) parts.push(`S/N: ${vision.serial}`);
+  if (vision.other_details) parts.push(`Details: ${vision.other_details}`);
+  if (vision.raw_text && vision.raw_text !== vision.other_details) {
+    parts.push(`Label text: ${vision.raw_text}`);
+  }
+  parts.push(`Confidence: ${vision.confidence}`);
+  parts.push(`Source: tenant MMS photo`);
+  parts.push(`[FIDUCIARY NOTE: This is a vision-model read of a tenant photo. Confidence level indicates extraction reliability. Verify against physical unit before ordering parts.]`);
+
+  return parts.join('\n');
+}
+
+function computePhotoIntakeHash(woQuery: string): string {
+  return createHash('sha256').update(`photo-intake:${woQuery}`).digest('hex').slice(0, 16);
+}
+
+async function photoIntake(woQuery: string, execute: boolean, approvalHash?: string): Promise<PhotoIntakeResult> {
+  if (!WO_QUERY_RE.test(woQuery)) {
+    return { photos_found: 0, photos_analyzed: 0, analyses: [], error: 'invalid_query', message: `WO query must be digits (got "${woQuery.substring(0, 50)}").` };
+  }
+
+  const woDetail = await readWorkOrder(woQuery, true);
+  if (woDetail.error) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, photos_found: 0, photos_analyzed: 0, analyses: [],
+      error: woDetail.error, message: woDetail.message,
+    };
+  }
+
+  const threadResult = openResidentThread(woDetail.tenant ?? undefined);
+  if (!threadResult.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, photos_found: 0, photos_analyzed: 0, analyses: [],
+      error: threadResult.error,
+    };
+  }
+
+  const { messages } = extractThreadMessages();
+  ab('close');
+
+  const inboundPhotos: string[] = [];
+  for (const msg of messages) {
+    if (msg.direction === 'inbound' && msg.media_urls) {
+      for (const url of msg.media_urls) {
+        if (!inboundPhotos.includes(url)) inboundPhotos.push(url);
+      }
+    }
+  }
+
+  if (inboundPhotos.length === 0) {
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, photos_found: 0, photos_analyzed: 0, analyses: [],
+      message: 'No inbound photos found in tenant thread.',
+    };
+  }
+
+  const expectedHash = computePhotoIntakeHash(woQuery);
+
+  if (!execute) {
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, photos_found: inboundPhotos.length, photos_analyzed: 0, analyses: [],
+      dry_run: true,
+      approval_hash: expectedHash,
+      message: `Found ${inboundPhotos.length} inbound photo(s). Pass --execute --approval-hash ${expectedHash} to analyze and add notes.`,
+    } as PhotoIntakeResult & { dry_run: boolean; approval_hash: string };
+  }
+
+  if (!approvalHash || approvalHash !== expectedHash) {
+    return {
+      photos_found: inboundPhotos.length, photos_analyzed: 0, analyses: [],
+      error: 'approval_hash_mismatch',
+      message: `Run dry-run first to get approval hash. Expected: ${expectedHash}`,
+    };
+  }
+
+  const woContext = `WO#${woDetail.wo_number} - ${woDetail.description ?? 'maintenance request'}`;
+  const analyses: PhotoIntakeResult['analyses'] = [];
+
+  for (const url of inboundPhotos.slice(0, 10)) {
+    const dlResult = await downloadImage(url);
+    if ('error' in dlResult) {
+      analyses.push({ url, download_ok: false, error: dlResult.error });
+      continue;
+    }
+
+    const visionResult = await analyzeImage(dlResult.path, woContext);
+
+    try { unlinkSync(dlResult.path); } catch { /* */ }
+
+    if ('error' in visionResult) {
+      analyses.push({ url, download_ok: true, error: visionResult.error });
+      continue;
+    }
+
+    const entry: PhotoIntakeResult['analyses'][number] = { url, download_ok: true, vision: visionResult };
+
+    // Component E: add-note if confidence >= medium
+    if (visionResult.confidence !== 'low' && woDetail.sr_id && woDetail.wo_id) {
+      const noteBody = buildNoteBody(visionResult, url);
+      const noteParams: AddNoteParams = { srId: woDetail.sr_id, woId: woDetail.wo_id, body: noteBody };
+      const noteHash = computeAddNoteApprovalHash(noteParams);
+      const noteResult = await addWorkOrderNote(noteParams, true, noteHash);
+      entry.note_added = !noteResult.error && noteResult.verified !== false;
+      if (noteResult.error) entry.error = `note_failed: ${noteResult.error}`;
+    }
+
+    analyses.push(entry);
+  }
+
+  return {
+    wo_number: woDetail.wo_number,
+    sr_id: woDetail.sr_id,
+    wo_id: woDetail.wo_id,
+    tenant: woDetail.tenant,
+    photos_found: inboundPhotos.length,
+    photos_analyzed: analyses.filter(a => a.download_ok).length,
+    analyses,
   };
 }
 
@@ -2707,6 +3021,28 @@ async function main() {
       process.exit(result4.error || result4.verified === false ? 1 : 0);
       break;
     }
+    case 'photo-intake': {
+      const piWoIdx = cmdArgs.indexOf('--wo');
+      const piHashIdx = cmdArgs.indexOf('--approval-hash');
+      const piExecute = cmdArgs.includes('--execute');
+      const piHashVal = piHashIdx !== -1 ? cmdArgs[piHashIdx + 1] : undefined;
+
+      if (piWoIdx === -1) {
+        console.error('Usage: photo-intake --wo <WO-number> [--execute --approval-hash <hash>]');
+        console.error('  Reads inbound tenant photos, runs vision analysis, adds note with findings.');
+        console.error('  Default is dry-run (analyze only). --execute adds notes to the WO.');
+        process.exit(1);
+      }
+      const piWoQuery = cmdArgs[piWoIdx + 1];
+      if (!piWoQuery) {
+        console.error('photo-intake: --wo is required');
+        process.exit(1);
+      }
+      const result5 = await photoIntake(piWoQuery, piExecute, piHashVal);
+      console.log(JSON.stringify(result5, null, 2));
+      process.exit(result5.error ? 1 : 0);
+      break;
+    }
     default: {
       console.error([
         'Usage: appfolio-browser-read.ts <command> [args]',
@@ -2731,6 +3067,8 @@ async function main() {
         '  read-wo-messages <WO-number>  — read tenant SMS thread for a WO',
         '  send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]',
         '                                — send SMS to tenant; dry-run default, --execute + hash sends (GATED EXTERNAL)',
+        '  photo-intake --wo <WO-number> [--execute --approval-hash <hash>]',
+        '                                — analyze inbound tenant photos via vision; dry-run default, --execute adds WO notes',
       ].join('\n'));
       process.exit(1);
     }
