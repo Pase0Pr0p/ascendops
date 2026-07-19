@@ -2467,6 +2467,12 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
       return { photos_found: 0, photos_analyzed: 0, analyses: [], error: 'plan_parse_error', message: `Failed to parse stored plan at ${planPath}.` };
     }
 
+    // Integrity: recompute hash from loaded content; reject if tampered/corrupted
+    const recomputedHash = computePhotoIntakePlanHash(storedPlan);
+    if (recomputedHash !== approvalHash) {
+      return { photos_found: 0, photos_analyzed: 0, analyses: [], error: 'plan_integrity_failed', message: `Stored plan content does not match approval hash. Expected ${approvalHash}, got ${recomputedHash}. Plan file may be corrupted.` };
+    }
+
     // Light guard: open thread and confirm approved media URLs are still present
     const woDetail = await readWorkOrder(woQuery, true);
     if (woDetail.error) {
@@ -2533,6 +2539,11 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
         entry.note_added = true;
       }
       analyses.push(entry);
+    }
+
+    // Single-use: consume plan file on full success to prevent duplicate execution
+    if (!noteFailed) {
+      try { unlinkSync(planPath); } catch { /* */ }
     }
 
     return {
