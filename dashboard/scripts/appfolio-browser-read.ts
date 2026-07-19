@@ -3791,7 +3791,7 @@ async function sendVendorEmail(
     };
   }
 
-  // Fill Message body (contenteditable div)
+  // Fill Message body (contenteditable div) — use execCommand('insertText') for React compatibility
   const escapedMessage = JSON.stringify(message);
   const messageFillResult = abEval(
     'var dialogs=document.querySelectorAll("[role=dialog],dialog");' +
@@ -3806,9 +3806,11 @@ async function sendVendorEmail(
     '  if(!ce){JSON.stringify({error:"message_contenteditable_not_found"});}' +
     '  else{' +
     '    ce.focus();' +
-    '    ce.textContent=' + escapedMessage + ';' +
+    '    var sel=window.getSelection();' +
+    '    sel.selectAllChildren(ce);' +
+    '    sel.deleteFromDocument();' +
+    '    document.execCommand("insertText",false,' + escapedMessage + ');' +
     '    ce.dispatchEvent(new Event("input",{bubbles:true}));' +
-    '    ce.dispatchEvent(new Event("change",{bubbles:true}));' +
     '    JSON.stringify({ok:true,length:ce.textContent.length});' +
     '  }' +
     '}'
