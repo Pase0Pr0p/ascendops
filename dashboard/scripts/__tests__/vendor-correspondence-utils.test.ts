@@ -425,3 +425,49 @@ describe('computeMessageApprovalHash', () => {
     expect(h1).not.toBe(h2);
   });
 });
+
+describe('post-send type filter contract', () => {
+  const mixedThread = [
+    { direction: 'outbound' as const, type: 'sms' as const, text: 'Old SMS message' },
+    { direction: 'inbound' as const, type: 'sms' as const, text: 'Tenant reply' },
+    { direction: 'outbound' as const, type: 'sms' as const, text: 'Second SMS outbound' },
+    { direction: 'outbound' as const, type: 'email' as const, text: 'Subject lineEmail body content here' },
+  ];
+
+  it('SMS filter excludes email outbounds', () => {
+    const smsOutbounds = mixedThread.filter(m => m.direction === 'outbound' && m.type === 'sms');
+    expect(smsOutbounds).toHaveLength(2);
+    expect(smsOutbounds.every(m => m.type === 'sms')).toBe(true);
+    const latest = smsOutbounds[smsOutbounds.length - 1];
+    expect(latest.text).toBe('Second SMS outbound');
+  });
+
+  it('email filter excludes SMS outbounds', () => {
+    const emailOutbounds = mixedThread.filter(m => m.direction === 'outbound' && m.type === 'email');
+    expect(emailOutbounds).toHaveLength(1);
+    expect(emailOutbounds[0].type).toBe('email');
+    expect(emailOutbounds[0].text).toContain('Email body');
+  });
+
+  it('email as newest outbound does NOT satisfy SMS verify', () => {
+    const allOutbounds = mixedThread.filter(m => m.direction === 'outbound');
+    const latestAny = allOutbounds[allOutbounds.length - 1];
+    expect(latestAny.type).toBe('email');
+
+    const smsOutbounds = mixedThread.filter(m => m.direction === 'outbound' && m.type === 'sms');
+    const latestSms = smsOutbounds[smsOutbounds.length - 1];
+    expect(latestSms.type).toBe('sms');
+    expect(latestSms.text).not.toContain('Email body');
+  });
+
+  it('SMS as newest outbound does NOT satisfy email verify', () => {
+    const smsLastThread = [
+      { direction: 'outbound' as const, type: 'email' as const, text: 'Old email' },
+      { direction: 'outbound' as const, type: 'sms' as const, text: 'New SMS after email' },
+    ];
+    const emailOutbounds = smsLastThread.filter(m => m.direction === 'outbound' && m.type === 'email');
+    const latestEmail = emailOutbounds[emailOutbounds.length - 1];
+    expect(latestEmail.text).toBe('Old email');
+    expect(latestEmail.text).not.toContain('New SMS');
+  });
+});
