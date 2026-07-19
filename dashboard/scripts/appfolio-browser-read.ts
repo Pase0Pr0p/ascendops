@@ -1875,13 +1875,44 @@ function verifyTenantNameMatch(tenantName: string, label: string): boolean {
   return labelTokens.includes(tenantTokens[0]);
 }
 
+function normalizeVendorName(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function vendorNameTokens(normalized: string): string[] {
+  return normalized.split(' ').filter(t => t.length >= 2);
+}
+
 function verifyVendorNameMatch(vendorName: string, label: string): boolean {
   const stripped = label.replace(/\s*\(Vendor\)\s*$/i, '').trim();
-  const normVendor = vendorName.toLowerCase().replace(/\s+/g, ' ').trim();
-  const normLabel = stripped.toLowerCase().replace(/\s+/g, ' ').trim();
+  const normVendor = normalizeVendorName(vendorName);
+  const normLabel = normalizeVendorName(stripped);
   if (normVendor.length === 0 || normLabel.length === 0) return false;
   if (normVendor === normLabel) return true;
-  return normVendor.includes(normLabel) || normLabel.includes(normVendor);
+
+  // Handle AppFolio pseudo-person "Last, First" -> "First Last" reorder
+  const commaFlip = (s: string) => {
+    const parts = s.split(',').map(p => p.trim());
+    return parts.length === 2 ? normalizeVendorName(`${parts[1]} ${parts[0]}`) : null;
+  };
+  const flippedVendor = commaFlip(vendorName);
+  const flippedLabel = commaFlip(stripped);
+  if (flippedVendor && flippedVendor === normLabel) return true;
+  if (flippedLabel && flippedLabel === normVendor) return true;
+  if (flippedVendor && flippedLabel && flippedVendor === flippedLabel) return true;
+
+  // Token-bound matching: all tokens of the shorter must appear as whole tokens in the longer
+  const vTokens = vendorNameTokens(normVendor);
+  const lTokens = vendorNameTokens(normLabel);
+  if (vTokens.length === 0 || lTokens.length === 0) return false;
+
+  const shorter = vTokens.length <= lTokens.length ? vTokens : lTokens;
+  const longer = vTokens.length <= lTokens.length ? lTokens : vTokens;
+
+  // Single-token names must match exactly (prevents "Pro" matching "All Pro Rooter")
+  if (shorter.length === 1) return false;
+
+  return shorter.every(t => longer.includes(t));
 }
 
 function computeMessageApprovalHash(
