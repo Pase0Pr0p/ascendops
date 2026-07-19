@@ -834,7 +834,10 @@ async function updateVendorInstructions(
     verifyParsed = JSON.parse(vi) as typeof verifyParsed;
   } catch { verifyParsed = { error: 'parse_failed' }; }
 
-  const verified = verifyParsed.ok === true && (verifyParsed.value ?? '').includes(params.instructions.substring(0, 50));
+  const normalize = (s: string) => s.replace(/\r\n/g, '\n').trim();
+  const actualValue = normalize(verifyParsed.value ?? '');
+  const expectedValue = normalize(finalInstructions);
+  const verified = verifyParsed.ok === true && actualValue === expectedValue;
 
   return {
     live: true,
@@ -847,6 +850,7 @@ async function updateVendorInstructions(
     mode: params.replace ? 'replace' : (currentInstructions.trim() ? 'append' : 'set'),
     submit_result: submitJson,
     verification: verifyParsed,
+    ...(!verified && verifyParsed.ok ? { mismatch: { expected: expectedValue.substring(0, 500), actual: actualValue.substring(0, 500) } } : {}),
   };
 }
 
@@ -2885,9 +2889,16 @@ async function main() {
       const viWoIdIdx = cmdArgs.indexOf('--wo-id');
       const viInstrIdx = cmdArgs.indexOf('--instructions');
       const viHashIdx = cmdArgs.indexOf('--approval-hash');
-      const viLive = cmdArgs.includes('--execute');
-      const viReplace = cmdArgs.includes('--replace');
       const viHashVal = viHashIdx !== -1 ? cmdArgs[viHashIdx + 1] : undefined;
+
+      // Exclude positions consumed as values of other flags
+      const viConsumed = new Set<number>();
+      if (viSrIdIdx !== -1) viConsumed.add(viSrIdIdx + 1);
+      if (viWoIdIdx !== -1) viConsumed.add(viWoIdIdx + 1);
+      if (viInstrIdx !== -1) viConsumed.add(viInstrIdx + 1);
+      if (viHashIdx !== -1) viConsumed.add(viHashIdx + 1);
+      const viLive = cmdArgs.some((arg, i) => arg === '--execute' && !viConsumed.has(i));
+      const viReplace = cmdArgs.some((arg, i) => arg === '--replace' && !viConsumed.has(i));
 
       if (viSrIdIdx === -1 || viWoIdIdx === -1 || viInstrIdx === -1) {
         console.error('Usage: update-vendor-instructions --sr-id <id> --wo-id <id> --instructions "<text>" [--replace] [--execute --approval-hash <hash>]');
