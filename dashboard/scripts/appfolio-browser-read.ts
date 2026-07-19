@@ -28,7 +28,7 @@
 
 import { createHash } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync, existsSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -2217,6 +2217,8 @@ async function readWoMessages(woQuery: string): Promise<object> {
 
 // ─── photo-intake pipeline (inbound: A→B→D→E) ─────────────────────────────
 
+const PHOTO_INTAKE_PLAN_DIR = resolve(process.cwd(), '.photo-intake-plans');
+
 interface VisionResult {
   make?: string;
   model?: string;
@@ -2448,6 +2450,104 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
     return { photos_found: 0, photos_analyzed: 0, analyses: [], error: 'invalid_query', message: `WO query must be digits (got "${woQuery.substring(0, 50)}").` };
   }
 
+  // Execute mode: read stored plan, verify media presence, post notes (no vision re-run)
+  if (execute) {
+    if (!approvalHash) {
+      return { photos_found: 0, photos_analyzed: 0, analyses: [], error: 'missing_approval_hash', message: 'Execute mode requires --approval-hash from a prior dry-run.' };
+    }
+    const planPath = join(PHOTO_INTAKE_PLAN_DIR, `${approvalHash}.json`);
+    if (!existsSync(planPath)) {
+      return { photos_found: 0, photos_analyzed: 0, analyses: [], error: 'plan_not_found', message: `No stored plan for hash ${approvalHash}. Run dry-run first.` };
+    }
+
+    let storedPlan: PhotoIntakePlan;
+    try {
+      storedPlan = JSON.parse(readFileSync(planPath, 'utf-8'));
+    } catch {
+      return { photos_found: 0, photos_analyzed: 0, analyses: [], error: 'plan_parse_error', message: `Failed to parse stored plan at ${planPath}.` };
+    }
+
+    // Light guard: open thread and confirm approved media URLs are still present
+    const woDetail = await readWorkOrder(woQuery, true);
+    if (woDetail.error) {
+      try { ab('close'); } catch { /* */ }
+      return {
+        wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+        tenant: woDetail.tenant, photos_found: 0, photos_analyzed: 0, analyses: [],
+        error: woDetail.error, message: woDetail.message,
+      };
+    }
+
+    const threadResult = openResidentThread(woDetail.tenant ?? undefined);
+    if (!threadResult.ok) {
+      try { ab('close'); } catch { /* */ }
+      return {
+        wo_number: storedPlan.wo_number, sr_id: storedPlan.sr_id, wo_id: storedPlan.wo_id,
+        tenant: storedPlan.tenant, photos_found: 0, photos_analyzed: 0, analyses: [],
+        error: threadResult.error,
+      };
+    }
+
+    const { messages } = extractThreadMessages();
+    ab('close');
+
+    const currentMediaUrls: string[] = [];
+    for (const msg of messages) {
+      if (msg.direction === 'inbound' && msg.media_urls) {
+        for (const url of msg.media_urls) {
+          if (!currentMediaUrls.includes(url)) currentMediaUrls.push(url);
+        }
+      }
+    }
+
+    // Verify all planned note URLs are still present in thread
+    const missingUrls = storedPlan.planned_notes
+      .map(n => n.url)
+      .filter(url => !currentMediaUrls.includes(url));
+
+    if (missingUrls.length > 0) {
+      return {
+        wo_number: storedPlan.wo_number, sr_id: storedPlan.sr_id, wo_id: storedPlan.wo_id,
+        tenant: storedPlan.tenant, photos_found: currentMediaUrls.length, photos_analyzed: 0, analyses: [],
+        error: 'media_missing',
+        message: `${missingUrls.length} photo(s) from the approved plan are no longer in the thread. Re-run dry-run.`,
+      };
+    }
+
+    // Post exact stored note bodies
+    const analyses: PhotoIntakeResult['analyses'] = [];
+    let noteFailed = false;
+    for (const planned of storedPlan.planned_notes) {
+      const noteParams: AddNoteParams = { srId: storedPlan.sr_id, woId: storedPlan.wo_id, body: planned.body };
+      const noteResult = await addWorkOrderNote(noteParams, true, planned.add_note_hash);
+      const entry: PhotoIntakeResult['analyses'][number] = { url: planned.url, download_ok: true, vision: planned.vision };
+      if (noteResult.error) {
+        entry.error = `note_failed: ${noteResult.error}`;
+        entry.note_added = false;
+        noteFailed = true;
+      } else if (noteResult.verified === false) {
+        entry.error = 'note_failed: verification_failed';
+        entry.note_added = false;
+        noteFailed = true;
+      } else {
+        entry.note_added = true;
+      }
+      analyses.push(entry);
+    }
+
+    return {
+      wo_number: storedPlan.wo_number,
+      sr_id: storedPlan.sr_id,
+      wo_id: storedPlan.wo_id,
+      tenant: storedPlan.tenant,
+      photos_found: currentMediaUrls.length,
+      photos_analyzed: storedPlan.planned_notes.length,
+      analyses,
+      ...(noteFailed ? { error: 'note_write_failed', message: 'One or more notes failed to post or verify. See analyses for details.' } : {}),
+    };
+  }
+
+  // Dry-run mode: full pipeline (read thread → download → vision → build plan → persist)
   const woDetail = await readWorkOrder(woQuery, true);
   if (woDetail.error) {
     try { ab('close'); } catch { /* */ }
@@ -2488,7 +2588,6 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
     };
   }
 
-  // Phase 1: Download + Vision (runs in both dry-run and execute modes)
   const woContext = `WO#${woDetail.wo_number} - ${woDetail.description ?? 'maintenance request'}`;
   const analyses: PhotoIntakeResult['analyses'] = [];
   const plannedNotes: PlannedNote[] = [];
@@ -2513,7 +2612,6 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
 
     analyses.push({ url, download_ok: true, vision: visionResult });
 
-    // Build planned note for confidence >= medium
     if (visionResult.confidence !== 'low' && woDetail.sr_id && woDetail.wo_id) {
       const noteBody = buildNoteBody(visionResult, url);
       const noteParams: AddNoteParams = { srId: woDetail.sr_id, woId: woDetail.wo_id, body: noteBody };
@@ -2524,7 +2622,6 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
     }
   }
 
-  // Build the execution plan
   const plan: PhotoIntakePlan = {
     wo_number: woDetail.wo_number ?? '',
     sr_id: woDetail.sr_id ?? '',
@@ -2538,59 +2635,9 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
 
   const planHash = computePhotoIntakePlanHash(plan);
 
-  if (!execute) {
-    return {
-      wo_number: woDetail.wo_number,
-      sr_id: woDetail.sr_id,
-      wo_id: woDetail.wo_id,
-      tenant: woDetail.tenant,
-      photos_found: inboundPhotos.length,
-      photos_analyzed: analyses.filter(a => a.download_ok).length,
-      analyses,
-      dry_run: true,
-      approval_hash: planHash,
-      execution_plan: {
-        notes_to_add: plannedNotes.map(n => ({
-          photo_url: n.url,
-          note_body: n.body,
-          add_note_hash: n.add_note_hash,
-          confidence: n.vision.confidence,
-        })),
-        skipped: plan.skipped,
-      },
-      message: plannedNotes.length > 0
-        ? `Analyzed ${analyses.filter(a => a.download_ok).length} photo(s). ${plannedNotes.length} note(s) planned. Pass --execute --approval-hash ${planHash} to post notes.`
-        : `Analyzed ${analyses.filter(a => a.download_ok).length} photo(s). No notes to add (all below confidence threshold).`,
-    } as PhotoIntakeResult & { dry_run: boolean; approval_hash: string; execution_plan: unknown };
-  }
-
-  // Phase 2: Execute — validate plan hash then post notes
-  if (!approvalHash || approvalHash !== planHash) {
-    return {
-      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
-      tenant: woDetail.tenant, photos_found: inboundPhotos.length,
-      photos_analyzed: analyses.filter(a => a.download_ok).length, analyses,
-      error: 'approval_hash_mismatch',
-      message: `Plan hash mismatch. Photos or vision results may have changed since dry-run. Re-run dry-run to get a fresh hash. Expected: ${planHash}`,
-    };
-  }
-
-  let noteFailed = false;
-  for (const planned of plannedNotes) {
-    const noteParams: AddNoteParams = { srId: plan.sr_id, woId: plan.wo_id, body: planned.body };
-    const noteResult = await addWorkOrderNote(noteParams, true, planned.add_note_hash);
-    const analysisEntry = analyses.find(a => a.url === planned.url);
-    if (analysisEntry) {
-      analysisEntry.note_added = !noteResult.error && noteResult.verified !== false;
-      if (noteResult.error) {
-        analysisEntry.error = `note_failed: ${noteResult.error}`;
-        noteFailed = true;
-      } else if (noteResult.verified === false) {
-        analysisEntry.error = 'note_failed: verification_failed';
-        noteFailed = true;
-      }
-    }
-  }
+  // Persist plan to disk so execute can reuse exact approved bodies
+  mkdirSync(PHOTO_INTAKE_PLAN_DIR, { recursive: true });
+  writeFileSync(join(PHOTO_INTAKE_PLAN_DIR, `${planHash}.json`), JSON.stringify(plan, null, 2));
 
   return {
     wo_number: woDetail.wo_number,
@@ -2600,8 +2647,21 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
     photos_found: inboundPhotos.length,
     photos_analyzed: analyses.filter(a => a.download_ok).length,
     analyses,
-    ...(noteFailed ? { error: 'note_write_failed', message: 'One or more notes failed to post or verify. See analyses for details.' } : {}),
-  };
+    dry_run: true,
+    approval_hash: planHash,
+    execution_plan: {
+      notes_to_add: plannedNotes.map(n => ({
+        photo_url: n.url,
+        note_body: n.body,
+        add_note_hash: n.add_note_hash,
+        confidence: n.vision.confidence,
+      })),
+      skipped: plan.skipped,
+    },
+    message: plannedNotes.length > 0
+      ? `Analyzed ${analyses.filter(a => a.download_ok).length} photo(s). ${plannedNotes.length} note(s) planned. Pass --execute --approval-hash ${planHash} to post notes.`
+      : `Analyzed ${analyses.filter(a => a.download_ok).length} photo(s). No notes to add (all below confidence threshold).`,
+  } as PhotoIntakeResult & { dry_run: boolean; approval_hash: string; execution_plan: unknown };
 }
 
 async function sendWoMessage(
