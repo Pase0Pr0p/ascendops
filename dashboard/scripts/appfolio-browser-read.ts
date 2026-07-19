@@ -2383,14 +2383,41 @@ function parseVisionResponse(text: string): VisionResult {
   }
 
   if (parsed) {
-    const confidence = (['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'low') as 'high' | 'medium' | 'low';
+    let make = parsed.make || '';
+    let model = parsed.model || '';
+    let serial = parsed.serial || '';
+    let otherDetails = parsed.other_details || '';
+    let rawText = parsed.raw_text || '';
+    let confidence = parsed.confidence || '';
+
+    // Gemini sometimes nests structured fields as a JSON string inside other_details/raw_text
+    if (!make && !model && !serial && (otherDetails || rawText)) {
+      const nested = otherDetails || rawText;
+      if (nested.startsWith('{')) {
+        try {
+          const inner = JSON.parse(nested) as Record<string, string>;
+          make = inner.make || '';
+          model = inner.model || '';
+          serial = inner.serial || '';
+          if (inner.other_details) otherDetails = inner.other_details;
+          if (inner.raw_text) rawText = inner.raw_text;
+          if (inner.confidence) confidence = inner.confidence;
+        } catch { /* keep outer values */ }
+      }
+    }
+
+    // Confidence reflects genuine read quality: fields present + Gemini's own signal
+    if (!['high', 'medium', 'low'].includes(confidence)) {
+      confidence = (make && model) ? 'medium' : 'low';
+    }
+
     return {
-      make: parsed.make || undefined,
-      model: parsed.model || undefined,
-      serial: parsed.serial || undefined,
-      other_details: parsed.other_details || undefined,
-      confidence,
-      raw_text: parsed.raw_text || undefined,
+      make: make || undefined,
+      model: model || undefined,
+      serial: serial || undefined,
+      other_details: otherDetails || undefined,
+      confidence: confidence as 'high' | 'medium' | 'low',
+      raw_text: rawText || undefined,
     };
   }
 
