@@ -1187,9 +1187,12 @@ async function addWorkOrderNote(
     return { error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
   }
 
-  const newNoteUrl = `${APPFOLIO_URL}/notes/new?parent_id=${params.woId}&parent_type=Maintenance%3A%3AWorkOrderDecorator`;
-
-  const opened = abSafe('open', newNoteUrl);
+  // Navigate to WO detail page for session context and CSRF token.
+  // AppFolio changed /notes/new to XHR-only (data-remote="true"), returning 422
+  // on plain browser navigation. We get the CSRF from the WO page meta tag instead,
+  // then XHR POST to /notes with the required headers.
+  const woDetailUrl = `${APPFOLIO_URL}/maintenance/service_requests/${params.srId}/work_orders/${params.woId}`;
+  const opened = abSafe('open', woDetailUrl);
   if (!opened.ok) return { error: 'navigation_failed', message: opened.output };
   abSafe('wait', '--load', 'networkidle');
 
@@ -1199,22 +1202,9 @@ async function addWorkOrderNote(
     return { error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
   }
 
-  if (!/\/notes\/new/i.test(currentUrl)) {
-    abSafe('open', newNoteUrl);
-    abSafe('wait', '--load', 'networkidle');
-    currentUrl = abSafe('get', 'url').output.trim();
-    if (!/\/notes\/new/i.test(currentUrl)) {
-      ab('close');
-      return { error: 'navigation_redirected', message: `Notes form not accessible — redirected to: ${currentUrl}` };
-    }
-  }
-
-  const formCheck = abEval(`document.getElementById("new_note")?"found":"missing"`);
-  let formFound = '';
-  try { let fc = formCheck.output; if (fc.startsWith('"') && fc.endsWith('"')) fc = JSON.parse(fc) as string; formFound = fc.trim(); } catch { /* stays empty */ }
-  if (formFound !== 'found') {
+  if (!/\/work_orders\//i.test(currentUrl)) {
     ab('close');
-    return { error: 'form_not_found', message: 'new_note form not found on page' };
+    return { error: 'navigation_redirected', message: `WO page not accessible — redirected to: ${currentUrl}` };
   }
 
   const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
@@ -1253,7 +1243,7 @@ async function addWorkOrderNote(
       would_post: postUrl,
       csrf_token_extracted: true,
       csrf_token_prefix: csrfToken.slice(0, 8) + '…',
-      form_id_verified: true,
+      wo_page_verified: true,
       params: {
         sr_id: params.srId,
         wo_id: params.woId,
@@ -1302,7 +1292,6 @@ async function addWorkOrderNote(
   }
 
   // Post-submit verification: navigate to WO detail page and check h2 Notes section
-  const woDetailUrl = `${APPFOLIO_URL}/maintenance/service_requests/${params.srId}/work_orders/${params.woId}`;
   abSafe('open', woDetailUrl);
   abSafe('wait', '--load', 'networkidle');
 
