@@ -221,6 +221,30 @@ describe('computeEmailApprovalHash', () => {
     expect(h1).not.toBe(h2);
   });
 
+  it('changes when rowLabel changes', () => {
+    const h1 = computeEmailApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.subject, baseArgs.message,
+      baseArgs.vendor, baseArgs.toAddress, baseArgs.rowLabel,
+    );
+    const h2 = computeEmailApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.subject, baseArgs.message,
+      baseArgs.vendor, baseArgs.toAddress, 'Different Label (Vendor)',
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when srId changes independently of woId', () => {
+    const h1 = computeEmailApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.subject, baseArgs.message,
+      baseArgs.vendor, baseArgs.toAddress, baseArgs.rowLabel,
+    );
+    const h2 = computeEmailApprovalHash(
+      '9999', baseArgs.woId, baseArgs.subject, baseArgs.message,
+      baseArgs.vendor, baseArgs.toAddress, baseArgs.rowLabel,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
   it('binds channel=email in payload', () => {
     const emailHash = computeEmailApprovalHash(
       baseArgs.srId, baseArgs.woId, baseArgs.subject, baseArgs.message,
@@ -299,6 +323,102 @@ describe('computeMessageApprovalHash', () => {
     const h2 = computeMessageApprovalHash(
       baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
       'email', baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when tenant changes', () => {
+    const h1 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    const h2 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, 'Different Tenant',
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when recipientLabel changes', () => {
+    const h1 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    const h2 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, 'Different Label', baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when rowLabel changes', () => {
+    const h1 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    const h2 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, 'Different Row (Resident)',
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when formAction changes', () => {
+    const h1 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    const h2 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      '/different/action', baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when endpointContractHash changes', () => {
+    const h1 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    const h2 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, 'xyz789',
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when WO IDs change', () => {
+    const h1 = computeMessageApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
+      baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
+      baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    const h2 = computeMessageApprovalHash(
+      '9999', '9999', baseArgs.message, baseArgs.tenant,
+      baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
       baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
       baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
     );

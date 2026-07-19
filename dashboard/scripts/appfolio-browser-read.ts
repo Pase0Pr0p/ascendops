@@ -1787,6 +1787,7 @@ async function batchWorkOrders(queries: string[]): Promise<WorkOrderDetail[]> {
 
 interface WoThreadMessage {
   direction: 'inbound' | 'outbound' | 'unknown';
+  type: 'sms' | 'email' | 'unknown';
   text: string;
   media_urls?: string[];
 }
@@ -2100,10 +2101,11 @@ function openVendorThread(vendorName?: string): { ok: boolean; vendor_label?: st
 }
 
 /**
- * Extract messages from the currently-open tenant message thread.
+ * Extract messages from the currently-open message thread (SMS + emails).
  * Thread direction is STRUCTURAL per chief's deep-pass map:
- *   inbound (from tenant): offset-sm-0 + bg-light
- *   outbound (to tenant): offset-sm-4 + bg-primary
+ *   inbound: offset-sm-0 + bg-light/bg-secondary
+ *   outbound SMS: offset-sm-4 + bg-primary
+ *   outbound email: offset-sm-4 + text-muted (no bg-primary), has "View Email" button
  * Key on offset/bg class pair, NOT sender-label (labels vary).
  */
 function extractThreadMessages(): { messages: WoThreadMessage[]; channel: string } {
@@ -2118,9 +2120,16 @@ function extractThreadMessages(): { messages: WoThreadMessage[]; channel: string
     '  var html=el.innerHTML||"";' +
     '  var bgL=/bg-light|bg-secondary/.test(html)||/bg-light|bg-secondary/.test(cls);' +
     '  var bgP=/bg-primary/.test(html)||/bg-primary/.test(cls);' +
-    '  var dir="unknown";' +
-    '  if(isIn&&bgL)dir="inbound";' +
-    '  else if(isOut&&bgP)dir="outbound";' +
+    '  var hasViewEmail=false;' +
+    '  var btns=el.querySelectorAll("button");' +
+    '  for(var b=0;b<btns.length;b++){' +
+    '    if(btns[b].textContent.trim()==="View Email"){hasViewEmail=true;break;}' +
+    '  }' +
+    '  var isMuted=/text-muted/.test(html)&&!bgP;' +
+    '  var dir="unknown";var typ="unknown";' +
+    '  if(isIn&&bgL){dir="inbound";typ="sms";}' +
+    '  else if(isOut&&bgP){dir="outbound";typ="sms";}' +
+    '  else if(isOut&&(hasViewEmail||isMuted)){dir="outbound";typ="email";}' +
     '  else continue;' +
     '  var t=el.textContent.trim();' +
     '  var imgs=el.querySelectorAll("img");' +
@@ -2130,7 +2139,7 @@ function extractThreadMessages(): { messages: WoThreadMessage[]; channel: string
     '    if(s&&/^https?:\\/\\//.test(s))urls.push(s.substring(0,500));' +
     '  }' +
     '  if(t.length>0||urls.length>0){' +
-    '    var m={direction:dir,text:t.substring(0,500)};' +
+    '    var m={direction:dir,type:typ,text:t.substring(0,500)};' +
     '    if(urls.length>0)m.media_urls=urls;' +
     '    msgs.push(m);' +
     '  }' +
@@ -3938,10 +3947,10 @@ async function sendVendorEmail(
     return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
   }
 
-  // Record pre-send outbound count for post-send verification
+  // Record pre-send outbound EMAIL count for post-send verification
   const { messages: preSendMessages } = extractThreadMessages();
-  const preSendOutbounds = preSendMessages.filter(m => m.direction === 'outbound');
-  const preSendOutboundCount = preSendOutbounds.length;
+  const preSendEmailOutbounds = preSendMessages.filter(m => m.direction === 'outbound' && m.type === 'email');
+  const preSendOutboundCount = preSendEmailOutbounds.length;
 
   // Click Send button scoped to the email dialog — require button text matches "Send"
   const sendResult = abEval(
@@ -3983,12 +3992,12 @@ async function sendVendorEmail(
 
   abSafe('wait', '5000');
 
-  // Post-send verification: require a NEW outbound with both subject AND body content
+  // Post-send verification: require a NEW outbound EMAIL with both subject AND body content
   const { messages: postSendMessages } = extractThreadMessages();
-  const postSendOutbounds = postSendMessages.filter(m => m.direction === 'outbound');
-  const postSendOutboundCount = postSendOutbounds.length;
+  const postSendEmailOutbounds = postSendMessages.filter(m => m.direction === 'outbound' && m.type === 'email');
+  const postSendOutboundCount = postSendEmailOutbounds.length;
   const hasNewOutbound = postSendOutboundCount > preSendOutboundCount;
-  const latestOutbound = postSendOutbounds.length > 0 ? postSendOutbounds[postSendOutbounds.length - 1] : null;
+  const latestOutbound = postSendEmailOutbounds.length > 0 ? postSendEmailOutbounds[postSendEmailOutbounds.length - 1] : null;
   const subjectInLatest = latestOutbound ? latestOutbound.text.includes(subject.trim().substring(0, 50)) : false;
   const bodyInLatest = latestOutbound ? latestOutbound.text.includes(message.trim().substring(0, 50)) : false;
   const verified = hasNewOutbound && subjectInLatest && bodyInLatest;
