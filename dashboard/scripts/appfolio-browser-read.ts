@@ -1191,7 +1191,11 @@ async function addWorkOrderNote(
   // AppFolio changed /notes/new to XHR-only (data-remote="true"), returning 422
   // on plain browser navigation. We get the CSRF from the WO page meta tag instead,
   // then XHR POST to /notes with the required headers.
+  // Warm-up: Keycloak OAuth requires the base URL first to establish the session
+  // callback; direct deep-links redirect to dashboard without the warm-up.
   const woDetailUrl = `${APPFOLIO_URL}/maintenance/service_requests/${params.srId}/work_orders/${params.woId}`;
+  abSafe('open', APPFOLIO_URL);
+  abSafe('wait', '--load', 'networkidle');
   const opened = abSafe('open', woDetailUrl);
   if (!opened.ok) return { error: 'navigation_failed', message: opened.output };
   abSafe('wait', '--load', 'networkidle');
@@ -1297,20 +1301,9 @@ async function addWorkOrderNote(
 
   const verifyResult = abEval(`
     var notesText = "";
-    var notesH2 = null;
-    var h2s = document.querySelectorAll("h2");
-    for (var ni = 0; ni < h2s.length; ni++) {
-      if (/^Notes$/i.test(h2s[ni].textContent.trim())) { notesH2 = h2s[ni]; break; }
-    }
-    if (notesH2) {
-      var nsib = notesH2.nextElementSibling;
-      var noteLines = [];
-      while (nsib && nsib.tagName !== "H2") {
-        var nt = nsib.textContent.trim();
-        if (nt.length > 0) noteLines.push(nt);
-        nsib = nsib.nextElementSibling;
-      }
-      notesText = noteLines.join(" | ").substring(0, 2000);
+    var nl = document.getElementById("notes-list");
+    if (nl) {
+      notesText = nl.textContent.trim().substring(0, 2000);
     }
     JSON.stringify({ notes: notesText });
   `);
