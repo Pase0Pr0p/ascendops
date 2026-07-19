@@ -2520,13 +2520,13 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
       };
     }
 
-    // Post exact stored note bodies (skip already-posted notes on retry)
+    // Post exact stored note bodies (skip verified-posted notes on retry)
     const analyses: PhotoIntakeResult['analyses'] = [];
     let noteFailed = false;
     for (const planned of storedPlan.planned_notes) {
-      // Skip notes whose nonce was already consumed (successful on a prior attempt)
-      const noncePath = resolve(ADD_NOTE_NONCE_DIR, planned.add_note_hash);
-      if (existsSync(noncePath)) {
+      // Skip notes with a verified-success marker (confirmed posted on a prior attempt)
+      const postedMarker = join(PHOTO_INTAKE_PLAN_DIR, `${approvalHash}.${planned.add_note_hash}.posted`);
+      if (existsSync(postedMarker)) {
         analyses.push({ url: planned.url, download_ok: true, vision: planned.vision, note_added: true });
         continue;
       }
@@ -2544,13 +2544,18 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
         noteFailed = true;
       } else {
         entry.note_added = true;
+        try { writeFileSync(postedMarker, ''); } catch { /* best-effort */ }
       }
       analyses.push(entry);
     }
 
-    // Single-use: consume plan file on full success
+    // Single-use: consume plan file + markers on full success
     if (!noteFailed) {
       try {
+        for (const planned of storedPlan.planned_notes) {
+          const marker = join(PHOTO_INTAKE_PLAN_DIR, `${approvalHash}.${planned.add_note_hash}.posted`);
+          try { unlinkSync(marker); } catch { /* */ }
+        }
         unlinkSync(planPath);
       } catch {
         return {
