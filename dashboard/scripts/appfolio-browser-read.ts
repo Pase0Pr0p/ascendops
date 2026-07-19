@@ -12,6 +12,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts assign-vendor --sr-id <id> --wo-id <id> --vendor-id <id> [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts create-work-order --property-id <id> --description "<text>" [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts update-vendor-instructions --sr-id <id> --wo-id <id> --instructions "<text>" [--replace] [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts read-wo-messages <WO-number>
  *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>] [--capture]
  *
@@ -635,6 +636,217 @@ async function assignVendor(
       text_link: dispatch.textLink,
       require_accept: dispatch.requireAccept,
     },
+  };
+}
+
+// ─── update-vendor-instructions ─────────────────────────────────────────────
+
+interface UpdateVendorInstructionsParams {
+  srId: string;
+  woId: string;
+  instructions: string;
+  replace?: boolean;
+}
+
+function computeVendorInstructionsHash(params: UpdateVendorInstructionsParams, currentInstructions: string): string {
+  const payload = JSON.stringify({
+    srId: params.srId,
+    woId: params.woId,
+    instructions: params.instructions,
+    replace: params.replace ?? false,
+    currentInstructions,
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
+async function updateVendorInstructions(
+  params: UpdateVendorInstructionsParams,
+  live: boolean,
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!/^\d+$/.test(params.srId) || !/^\d+$/.test(params.woId)) {
+    return { error: 'invalid_ids', message: 'srId and woId must be numeric digits only' };
+  }
+  if (!params.instructions.trim()) {
+    return { error: 'empty_instructions', message: 'Instructions text is required' };
+  }
+
+  const sessionCheck = await checkSession();
+  if (!sessionCheck.authenticated) {
+    return { error: 'not_authenticated', message: 'No active AppFolio session. Run login first.' };
+  }
+
+  const woUrl = `${APPFOLIO_URL}/maintenance/service_requests/${params.srId}/work_orders/${params.woId}`;
+
+  const opened = abSafe('open', woUrl);
+  if (!opened.ok) return { error: 'navigation_failed', message: opened.output };
+  abSafe('wait', '--load', 'networkidle');
+
+  let currentUrl = abSafe('get', 'url').output.trim();
+  if (/account\.appfolio\.com|\/openid-connect\/auth|\/users\/sign_in|\/login/i.test(currentUrl)) {
+    ab('close');
+    return { error: 'not_authenticated', message: `Redirected to auth page: ${currentUrl}` };
+  }
+
+  if (!/\/service_requests\/\d+/.test(currentUrl)) {
+    abSafe('open', woUrl);
+    abSafe('wait', '--load', 'networkidle');
+    currentUrl = abSafe('get', 'url').output.trim();
+    if (!/\/service_requests\/\d+/.test(currentUrl)) {
+      ab('close');
+      return { error: 'navigation_redirected', message: `WO detail page not accessible — redirected to: ${currentUrl}` };
+    }
+  }
+
+  // Status gate: block if terminal
+  let woStatus = '';
+  for (let statusAttempt = 0; statusAttempt < 2; statusAttempt++) {
+    if (statusAttempt > 0) abSafe('wait', '5000');
+    const statusResult = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+    try {
+      let sv = statusResult.output;
+      if (sv.startsWith('"') && sv.endsWith('"')) sv = JSON.parse(sv) as string;
+      woStatus = sv.trim();
+    } catch { /* stays empty */ }
+    if (woStatus) break;
+  }
+
+  if (!woStatus) {
+    ab('close');
+    return { error: 'status_unreadable', message: 'Could not read WO status from .js-status-label after retry.' };
+  }
+  if (/^(Completed|Completed No Need to Bill|Canceled|Cancelled|Ready to Bill|Ready-to-Bill|Closed)$/i.test(woStatus)) {
+    ab('close');
+    return { error: 'terminal_status', wo_status: woStatus, message: `WO is "${woStatus}" — vendor instructions update blocked.` };
+  }
+
+  // Extract CSRF token
+  const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let csrfToken = '';
+  try {
+    let ct = csrfResult.output;
+    if (ct.startsWith('"') && ct.endsWith('"')) ct = JSON.parse(ct) as string;
+    csrfToken = ct.trim();
+  } catch { /* stays empty */ }
+  if (!csrfToken) {
+    ab('close');
+    return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
+  }
+
+  // Idempotency preflight: fetch SR edit form and read current special_instructions
+  const editPath = `/maintenance/service_requests/${params.srId}/edit`;
+  const readInstructionsScript = `fetch("${editPath}",{headers:{"Accept":"text/html","X-Requested-With":"XMLHttpRequest","X-CSRF-Token":"${csrfToken}"}}).then(function(r){if(!r.ok){return JSON.stringify({error:"http_"+r.status});}return r.text().then(function(html){var p=new DOMParser();var doc=p.parseFromString(html,"text/html");var ta=doc.querySelector("#maintenance_service_request_special_instructions");if(!ta){return JSON.stringify({error:"field_not_found"});}return JSON.stringify({ok:true,current:ta.value||ta.textContent||""});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const readResult = abEval(readInstructionsScript);
+
+  if (!readResult.ok) {
+    ab('close');
+    return { error: 'preflight_failed', reason: 'abEval error', raw: readResult.output };
+  }
+  let readParsed: { ok?: boolean; current?: string; error?: string } = {};
+  try {
+    let inner = readResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    readParsed = JSON.parse(inner) as typeof readParsed;
+  } catch {
+    ab('close');
+    return { error: 'preflight_failed', reason: 'JSON parse error', raw: readResult.output };
+  }
+  if (readParsed.error || !readParsed.ok) {
+    ab('close');
+    return { error: 'preflight_failed', reason: readParsed.error ?? 'missing ok flag', raw: readResult.output };
+  }
+
+  const currentInstructions = readParsed.current ?? '';
+
+  // Compute final instructions: append or replace
+  let finalInstructions: string;
+  if (params.replace || !currentInstructions.trim()) {
+    finalInstructions = params.instructions;
+  } else {
+    finalInstructions = currentInstructions.trim() + '\n---\n' + params.instructions;
+  }
+
+  // Compute approval hash binding all parameters including current state
+  const expectedHash = computeVendorInstructionsHash(params, currentInstructions);
+
+  const patchUrl = `/maintenance/service_requests/${params.srId}`;
+  const patchParams: Record<string, string> = {
+    '_method': 'patch',
+    'authenticity_token': csrfToken,
+    'maintenance_service_request[special_instructions]': finalInstructions,
+  };
+
+  if (!live) {
+    ab('close');
+    return {
+      dry_run: true,
+      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.',
+      approval_hash: expectedHash,
+      would_patch: patchUrl,
+      wo_status: woStatus,
+      sr_id: params.srId,
+      wo_id: params.woId,
+      current_instructions: currentInstructions || '(empty)',
+      new_instructions: finalInstructions,
+      mode: params.replace ? 'replace' : (currentInstructions.trim() ? 'append' : 'set'),
+      csrf_token_extracted: true,
+      csrf_token_prefix: csrfToken.slice(0, 8) + '...',
+    };
+  }
+
+  if (!approvalHash) {
+    ab('close');
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    ab('close');
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  // LIVE SUBMIT
+  const patchBody = Object.entries(patchParams)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+  const bodyLiteral = JSON.stringify(patchBody);
+  const submitScript = `fetch("${patchUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral}}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const submitResult = abEval(submitScript);
+
+  let submitJson: Record<string, unknown> = {};
+  try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
+
+  const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
+  if (!submitOk) {
+    ab('close');
+    return { error: 'submit_failed', sr_id: params.srId, wo_id: params.woId, submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output };
+  }
+
+  // Verification: re-read SR edit form to confirm instructions were saved
+  await new Promise(r => setTimeout(r, 2000));
+  const verifyScript = `fetch("${editPath}",{headers:{"Accept":"text/html","X-Requested-With":"XMLHttpRequest","X-CSRF-Token":"${csrfToken}"}}).then(function(r){if(!r.ok){return JSON.stringify({error:"http_"+r.status});}return r.text().then(function(html){var p=new DOMParser();var doc=p.parseFromString(html,"text/html");var ta=doc.querySelector("#maintenance_service_request_special_instructions");if(!ta){return JSON.stringify({error:"field_not_found"});}return JSON.stringify({ok:true,value:ta.value||ta.textContent||""});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const verifyResult = abEval(verifyScript);
+
+  ab('close');
+
+  let verifyParsed: { ok?: boolean; value?: string; error?: string } = {};
+  try {
+    let vi = verifyResult.output;
+    if (vi.startsWith('"') && vi.endsWith('"')) vi = JSON.parse(vi) as string;
+    verifyParsed = JSON.parse(vi) as typeof verifyParsed;
+  } catch { verifyParsed = { error: 'parse_failed' }; }
+
+  const verified = verifyParsed.ok === true && (verifyParsed.value ?? '').includes(params.instructions.substring(0, 50));
+
+  return {
+    live: true,
+    verified,
+    sr_id: params.srId,
+    wo_id: params.woId,
+    wo_status: woStatus,
+    previous_instructions: currentInstructions || '(empty)',
+    new_instructions: finalInstructions,
+    mode: params.replace ? 'replace' : (currentInstructions.trim() ? 'append' : 'set'),
+    submit_result: submitJson,
+    verification: verifyParsed,
   };
 }
 
@@ -2668,6 +2880,36 @@ async function main() {
       process.exit(result3.error || result3.verified === false ? 1 : 0);
       break;
     }
+    case 'update-vendor-instructions': {
+      const viSrIdIdx = cmdArgs.indexOf('--sr-id');
+      const viWoIdIdx = cmdArgs.indexOf('--wo-id');
+      const viInstrIdx = cmdArgs.indexOf('--instructions');
+      const viHashIdx = cmdArgs.indexOf('--approval-hash');
+      const viLive = cmdArgs.includes('--execute');
+      const viReplace = cmdArgs.includes('--replace');
+      const viHashVal = viHashIdx !== -1 ? cmdArgs[viHashIdx + 1] : undefined;
+
+      if (viSrIdIdx === -1 || viWoIdIdx === -1 || viInstrIdx === -1) {
+        console.error('Usage: update-vendor-instructions --sr-id <id> --wo-id <id> --instructions "<text>" [--replace] [--execute --approval-hash <hash>]');
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  --replace          Replace existing instructions (default: append with separator)');
+        process.exit(1);
+      }
+      const viSrId = cmdArgs[viSrIdIdx + 1];
+      const viWoId = cmdArgs[viWoIdIdx + 1];
+      const viInstr = cmdArgs[viInstrIdx + 1];
+      if (!viSrId || !viWoId || !viInstr) {
+        console.error('update-vendor-instructions: --sr-id, --wo-id, and --instructions are required');
+        process.exit(1);
+      }
+      const result3c = await updateVendorInstructions(
+        { srId: viSrId, woId: viWoId, instructions: viInstr, replace: viReplace },
+        viLive, viHashVal,
+      );
+      console.log(JSON.stringify(result3c, null, 2));
+      process.exit(result3c.error || result3c.verified === false ? 1 : 0);
+      break;
+    }
     case 'read-wo-messages': {
       if (!cmdArgs[0]) { console.error('Usage: read-wo-messages <WO-number>'); process.exit(1); }
       const result3b = await readWoMessages(cmdArgs[0]);
@@ -2728,6 +2970,8 @@ async function main() {
         '                                — create new WO; dry-run default, --execute + hash submits POST',
         '  add-note --sr-id <id> --wo-id <id> --body "<text>" [--execute --approval-hash <hash>]',
         '                                — add note to WO; dry-run default, --execute + hash submits POST',
+        '  update-vendor-instructions --sr-id <id> --wo-id <id> --instructions "<text>" [--replace] [--execute --approval-hash <hash>]',
+        '                                — set/append vendor instructions on SR; dry-run default, --execute + hash submits PATCH',
         '  read-wo-messages <WO-number>  — read tenant SMS thread for a WO',
         '  send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]',
         '                                — send SMS to tenant; dry-run default, --execute + hash sends (GATED EXTERNAL)',
