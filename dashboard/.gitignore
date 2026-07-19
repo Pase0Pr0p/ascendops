@@ -57,3 +57,4 @@ next-env.d.ts
 # Runtime state files (not tracked)
 .appfolio-selfheal-state.json
 .emergency-dispatch-state.json
+.photo-intake-plans/
