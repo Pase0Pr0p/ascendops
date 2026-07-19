@@ -3575,6 +3575,7 @@ interface EmailDialogContract {
   subject_value: string;
   message_value: string;
   send_button_found: boolean;
+  send_button_text: string;
   dialog_found: boolean;
 }
 
@@ -3610,10 +3611,15 @@ function extractEmailDialogContract(): { ok: boolean; contract?: EmailDialogCont
     '  var subjectVal=subjectInput?subjectInput.value.trim():"";' +
     '  var ce=d.querySelector("[contenteditable]");' +
     '  var msgVal=ce?ce.textContent.trim():"";' +
-    '  var sendBtn=d.querySelector(".btn-primary");' +
+    '  var btns=d.querySelectorAll(".btn-primary");' +
+    '  var sendBtn=null;var sendBtnText="";' +
+    '  for(var b=0;b<btns.length;b++){' +
+    '    var bt=btns[b].textContent.trim();' +
+    '    if(/^Send$/i.test(bt)){sendBtn=btns[b];sendBtnText=bt;break;}' +
+    '  }' +
     '  JSON.stringify({ok:true,to_address:toAddr,from_address:fromText,' +
     '    subject_value:subjectVal,message_value:msgVal,' +
-    '    send_button_found:!!sendBtn,dialog_found:true});' +
+    '    send_button_found:!!sendBtn,send_button_text:sendBtnText,dialog_found:true});' +
     '}'
   );
   let parsed: { ok: boolean; error?: string } & Partial<EmailDialogContract> = { ok: false };
@@ -3635,6 +3641,7 @@ function extractEmailDialogContract(): { ok: boolean; contract?: EmailDialogCont
       subject_value: parsed.subject_value ?? '',
       message_value: parsed.message_value ?? '',
       send_button_found: parsed.send_button_found ?? false,
+      send_button_text: parsed.send_button_text ?? '',
       dialog_found: parsed.dialog_found ?? false,
     },
   };
@@ -3780,6 +3787,19 @@ async function sendVendorEmail(
     };
   }
 
+  // Blocker fix 1: verify dialog To address matches WO vendor_email (authoritative source)
+  const normalizeEmail = (e: string) => e.trim().toLowerCase();
+  if (normalizeEmail(dialog.to_address) !== normalizeEmail(woDetail.vendor_email)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'email_to_vendor_mismatch',
+      message: `Dialog To address "${dialog.to_address}" does not match WO vendor email "${woDetail.vendor_email}". Fail closed.`,
+      dialog_to: dialog.to_address,
+      vendor_email: woDetail.vendor_email,
+    };
+  }
+
   if (!dialog.send_button_found) {
     try { ab('close'); } catch { /* */ }
     return {
@@ -3867,6 +3887,37 @@ async function sendVendorEmail(
     woDetail.vendor_name, dialog.to_address, rowLabel,
   );
 
+  // Blocker fix 2: re-extract dialog and verify filled subject/body match intended values
+  const postFillDialog = extractEmailDialogContract();
+  if (!postFillDialog.ok || !postFillDialog.contract) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'post_fill_dialog_extraction_failed',
+      message: 'Could not re-extract email dialog after filling fields. Fail closed.',
+    };
+  }
+  const filledSubject = postFillDialog.contract.subject_value.trim();
+  const filledBody = postFillDialog.contract.message_value.trim();
+  if (filledSubject !== subject.trim()) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'subject_fill_mismatch',
+      message: `Filled subject "${filledSubject}" does not match intended subject "${subject.trim()}". Fail closed.`,
+      filled_subject: filledSubject, intended_subject: subject.trim(),
+    };
+  }
+  if (filledBody !== message.trim()) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'body_fill_mismatch',
+      message: `Filled body "${filledBody.substring(0, 80)}..." does not match intended message. Fail closed.`,
+      filled_body_length: filledBody.length, intended_body_length: message.trim().length,
+    };
+  }
+
   if (!live) {
     ab('close');
     return {
@@ -3878,9 +3929,13 @@ async function sendVendorEmail(
       row_label_matched: rowLabel,
       channel: 'email',
       to_address: dialog.to_address,
+      vendor_email: woDetail.vendor_email,
+      to_matches_vendor_email: true,
       from_address: dialog.from_address,
       subject,
+      subject_verified_in_dialog: true,
       sent_message: message,
+      body_verified_in_dialog: true,
       message_length: message.length,
       wo_number: woDetail.wo_number,
       wo_status: woDetail.status,
@@ -3898,17 +3953,31 @@ async function sendVendorEmail(
     return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
   }
 
-  // Re-verify email dialog state before send
+  // Re-verify full email dialog state before nonce reservation
   const liveDialog = extractEmailDialogContract();
   if (!liveDialog.ok || !liveDialog.contract) {
     ab('close');
     return { error: 'live_dialog_failed', message: 'Could not re-verify email dialog before live send. Fail closed.' };
   }
-  if (liveDialog.contract.to_address !== dialog.to_address) {
+  if (normalizeEmail(liveDialog.contract.to_address) !== normalizeEmail(woDetail.vendor_email)) {
     ab('close');
     return {
       error: 'email_to_drift',
-      message: `Email To address changed between dry-run and execute ("${dialog.to_address}" -> "${liveDialog.contract.to_address}"). Fail closed.`,
+      message: `Live dialog To "${liveDialog.contract.to_address}" does not match vendor email "${woDetail.vendor_email}". Fail closed.`,
+    };
+  }
+  if (liveDialog.contract.subject_value.trim() !== subject.trim()) {
+    ab('close');
+    return {
+      error: 'live_subject_drift',
+      message: `Live dialog subject "${liveDialog.contract.subject_value}" does not match approved subject "${subject}". Fail closed.`,
+    };
+  }
+  if (liveDialog.contract.message_value.trim() !== message.trim()) {
+    ab('close');
+    return {
+      error: 'live_body_drift',
+      message: 'Live dialog body does not match approved message. Fail closed.',
     };
   }
 
@@ -3922,7 +3991,12 @@ async function sendVendorEmail(
     return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
   }
 
-  // Click Send button scoped to the email dialog
+  // Record pre-send outbound count for post-send verification
+  const { messages: preSendMessages } = extractThreadMessages();
+  const preSendOutbounds = preSendMessages.filter(m => m.direction === 'outbound');
+  const preSendOutboundCount = preSendOutbounds.length;
+
+  // Click Send button scoped to the email dialog — require button text matches "Send"
   const sendResult = abEval(
     'var dialogs=document.querySelectorAll("[role=dialog],dialog");' +
     'var d=null;' +
@@ -3932,9 +4006,15 @@ async function sendVendorEmail(
     '}' +
     'if(!d){JSON.stringify({error:"email_dialog_not_found"});}' +
     'else{' +
-    '  var btn=d.querySelector(".btn-primary");' +
-    '  if(!btn){JSON.stringify({error:"send_button_not_found"});}' +
-    '  else{btn.click();JSON.stringify({ok:true,button_text:btn.textContent.trim().substring(0,50)});}' +
+    '  var btns=d.querySelectorAll(".btn-primary");' +
+    '  var sendBtn=null;var count=0;' +
+    '  for(var b=0;b<btns.length;b++){' +
+    '    var bt=btns[b].textContent.trim();' +
+    '    if(/^Send$/i.test(bt)){sendBtn=btns[b];count++;}' +
+    '  }' +
+    '  if(!sendBtn){JSON.stringify({error:"send_button_not_found_by_text"});}' +
+    '  else if(count>1){JSON.stringify({error:"multiple_send_buttons",count:count});}' +
+    '  else{sendBtn.click();JSON.stringify({ok:true,button_text:sendBtn.textContent.trim().substring(0,50)});}' +
     '}'
   );
   let sendParsed: { ok?: boolean; error?: string; button_text?: string } = {};
@@ -3956,11 +4036,15 @@ async function sendVendorEmail(
 
   abSafe('wait', '5000');
 
-  // Post-send verification: check for the email in the thread
+  // Post-send verification: require a NEW outbound with both subject AND body content
   const { messages: postSendMessages } = extractThreadMessages();
-  const outbounds = postSendMessages.filter(m => m.direction === 'outbound');
-  const latestOutbound = outbounds.length > 0 ? outbounds[outbounds.length - 1] : null;
-  const verified = latestOutbound ? latestOutbound.text.includes(subject.substring(0, 30)) || latestOutbound.text.includes(message.substring(0, 30)) : false;
+  const postSendOutbounds = postSendMessages.filter(m => m.direction === 'outbound');
+  const postSendOutboundCount = postSendOutbounds.length;
+  const hasNewOutbound = postSendOutboundCount > preSendOutboundCount;
+  const latestOutbound = postSendOutbounds.length > 0 ? postSendOutbounds[postSendOutbounds.length - 1] : null;
+  const subjectInLatest = latestOutbound ? latestOutbound.text.includes(subject.trim().substring(0, 50)) : false;
+  const bodyInLatest = latestOutbound ? latestOutbound.text.includes(message.trim().substring(0, 50)) : false;
+  const verified = hasNewOutbound && subjectInLatest && bodyInLatest;
 
   ab('close');
 
@@ -3976,12 +4060,17 @@ async function sendVendorEmail(
     row_label_matched: rowLabel,
     channel: 'email',
     to_address: dialog.to_address,
+    vendor_email: woDetail.vendor_email,
     from_address: dialog.from_address,
     subject,
     sent_message: message,
     message_length: message.length,
     send_button_clicked: sendParsed.button_text,
-    post_send_thread_count: postSendMessages.length,
+    pre_send_outbound_count: preSendOutboundCount,
+    post_send_outbound_count: postSendOutboundCount,
+    new_outbound_detected: hasNewOutbound,
+    subject_in_latest: subjectInLatest,
+    body_in_latest: bodyInLatest,
     latest_outbound: latestOutbound ?? null,
   };
 }
