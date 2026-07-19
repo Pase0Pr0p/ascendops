@@ -2391,18 +2391,20 @@ function parseVisionResponse(text: string): VisionResult {
     let confidence = parsed.confidence || '';
 
     // Gemini sometimes nests structured fields as a JSON string inside other_details/raw_text
-    if (!make && !model && !serial && (otherDetails || rawText)) {
-      const nested = otherDetails || rawText;
-      if (nested.startsWith('{')) {
+    if (!make && !model && !serial) {
+      for (const candidate of [otherDetails, rawText]) {
+        const trimmed = candidate.trim();
+        if (!trimmed.startsWith('{')) continue;
         try {
-          const inner = JSON.parse(nested) as Record<string, string>;
+          const inner = JSON.parse(trimmed) as Record<string, string>;
           make = inner.make || '';
           model = inner.model || '';
           serial = inner.serial || '';
           if (inner.other_details) otherDetails = inner.other_details;
           if (inner.raw_text) rawText = inner.raw_text;
           if (inner.confidence) confidence = inner.confidence;
-        } catch { /* keep outer values */ }
+          break;
+        } catch { /* try next candidate */ }
       }
     }
 
