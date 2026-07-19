@@ -2520,10 +2520,17 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
       };
     }
 
-    // Post exact stored note bodies
+    // Post exact stored note bodies (skip already-posted notes on retry)
     const analyses: PhotoIntakeResult['analyses'] = [];
     let noteFailed = false;
     for (const planned of storedPlan.planned_notes) {
+      // Skip notes whose nonce was already consumed (successful on a prior attempt)
+      const noncePath = resolve(ADD_NOTE_NONCE_DIR, planned.add_note_hash);
+      if (existsSync(noncePath)) {
+        analyses.push({ url: planned.url, download_ok: true, vision: planned.vision, note_added: true });
+        continue;
+      }
+
       const noteParams: AddNoteParams = { srId: storedPlan.sr_id, woId: storedPlan.wo_id, body: planned.body };
       const noteResult = await addWorkOrderNote(noteParams, true, planned.add_note_hash);
       const entry: PhotoIntakeResult['analyses'][number] = { url: planned.url, download_ok: true, vision: planned.vision };
@@ -2541,9 +2548,19 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
       analyses.push(entry);
     }
 
-    // Single-use: consume plan file on full success to prevent duplicate execution
+    // Single-use: consume plan file on full success
     if (!noteFailed) {
-      try { unlinkSync(planPath); } catch { /* */ }
+      try {
+        unlinkSync(planPath);
+      } catch {
+        return {
+          wo_number: storedPlan.wo_number, sr_id: storedPlan.sr_id, wo_id: storedPlan.wo_id,
+          tenant: storedPlan.tenant, photos_found: currentMediaUrls.length,
+          photos_analyzed: storedPlan.planned_notes.length, analyses,
+          error: 'plan_cleanup_failed',
+          message: 'All notes posted successfully but plan file could not be deleted. Manual cleanup required.',
+        };
+      }
     }
 
     return {
