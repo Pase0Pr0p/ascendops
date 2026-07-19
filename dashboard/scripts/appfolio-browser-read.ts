@@ -3170,9 +3170,9 @@ async function sendWoMessage(
     } catch { /* capture is best-effort */ }
   }
 
-  // Post-send verification: check if message appears in thread as newest outbound
+  // Post-send verification: check if SMS appears in thread as newest outbound SMS
   const { messages: postSendMessages } = extractThreadMessages();
-  const outbounds = postSendMessages.filter(m => m.direction === 'outbound');
+  const outbounds = postSendMessages.filter(m => m.direction === 'outbound' && m.type === 'sms');
   const latestOutbound = outbounds.length > 0 ? outbounds[outbounds.length - 1] : null;
   const verified = latestOutbound ? latestOutbound.text.includes(message.substring(0, 50)) : false;
 
@@ -3497,7 +3497,7 @@ async function sendVendorMessage(
   abSafe('wait', '5000');
 
   const { messages: postSendMessages } = extractThreadMessages();
-  const outbounds = postSendMessages.filter(m => m.direction === 'outbound');
+  const outbounds = postSendMessages.filter(m => m.direction === 'outbound' && m.type === 'sms');
   const latestOutbound = outbounds.length > 0 ? outbounds[outbounds.length - 1] : null;
   const verified = latestOutbound ? latestOutbound.text.includes(message.substring(0, 50)) : false;
 
