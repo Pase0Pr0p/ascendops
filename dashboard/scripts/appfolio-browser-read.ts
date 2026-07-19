@@ -15,6 +15,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts update-vendor-instructions --sr-id <id> --wo-id <id> --instructions "<text>" [--replace] [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts read-wo-messages <WO-number>
  *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>] [--capture]
+ *   npx tsx scripts/appfolio-browser-read.ts send-vendor-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts photo-intake --wo <WO-number> [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
@@ -1874,6 +1875,46 @@ function verifyTenantNameMatch(tenantName: string, label: string): boolean {
   return labelTokens.includes(tenantTokens[0]);
 }
 
+function normalizeVendorName(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function vendorNameTokens(normalized: string): string[] {
+  return normalized.split(' ').filter(t => t.length >= 2);
+}
+
+function verifyVendorNameMatch(vendorName: string, label: string): boolean {
+  const stripped = label.replace(/\s*\(Vendor\)\s*$/i, '').trim();
+  const normVendor = normalizeVendorName(vendorName);
+  const normLabel = normalizeVendorName(stripped);
+  if (normVendor.length === 0 || normLabel.length === 0) return false;
+  if (normVendor === normLabel) return true;
+
+  // Handle AppFolio pseudo-person "Last, First" -> "First Last" reorder
+  const commaFlip = (s: string) => {
+    const parts = s.split(',').map(p => p.trim());
+    return parts.length === 2 ? normalizeVendorName(`${parts[1]} ${parts[0]}`) : null;
+  };
+  const flippedVendor = commaFlip(vendorName);
+  const flippedLabel = commaFlip(stripped);
+  if (flippedVendor && flippedVendor === normLabel) return true;
+  if (flippedLabel && flippedLabel === normVendor) return true;
+  if (flippedVendor && flippedLabel && flippedVendor === flippedLabel) return true;
+
+  // Token-bound matching: all tokens of the shorter must appear as whole tokens in the longer
+  const vTokens = vendorNameTokens(normVendor);
+  const lTokens = vendorNameTokens(normLabel);
+  if (vTokens.length === 0 || lTokens.length === 0) return false;
+
+  const shorter = vTokens.length <= lTokens.length ? vTokens : lTokens;
+  const longer = vTokens.length <= lTokens.length ? lTokens : vTokens;
+
+  // Single-token names must match exactly (prevents "Pro" matching "All Pro Rooter")
+  if (shorter.length === 1) return false;
+
+  return shorter.every(t => longer.includes(t));
+}
+
 function computeMessageApprovalHash(
   srId: string, woId: string, message: string, tenant: string,
   channel: string, recipientLabel: string, rowLabel: string,
@@ -2002,6 +2043,112 @@ function openResidentThread(tenantName?: string): { ok: boolean; tenant_label?: 
   abSafe('wait', '3000');
 
   return { ok: true, tenant_label: clickParsed.label };
+}
+
+function openVendorThread(vendorName?: string): { ok: boolean; vendor_label?: string; error?: string; count?: number; labels?: string[]; message?: string } {
+  const launcherResult = abEval(
+    'var btn=document.querySelector(\'button[data-messaging-launcher-trigger="true"]\');' +
+    'if(btn){btn.click();JSON.stringify({ok:true});}' +
+    'else{JSON.stringify({error:"messaging_launcher_not_found"});}'
+  );
+  let launcherParsed: { ok?: boolean; error?: string } = {};
+  try {
+    let inner = launcherResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    launcherParsed = JSON.parse(inner);
+  } catch { launcherParsed = { error: 'launcher_parse_failed' }; }
+  if (launcherParsed.error || !launcherParsed.ok) {
+    return { ok: false, error: launcherParsed.error ?? 'launcher_click_failed' };
+  }
+
+  abSafe('wait', '3000');
+
+  const vendorResult = abEval(
+    'var matches=[];' +
+    'var container=document.querySelector(".js-communication-inbox-container");' +
+    'if(container){' +
+    '  var els=container.querySelectorAll("li.list-group-item");' +
+    '  for(var i=0;i<els.length;i++){' +
+    '    var t=els[i].textContent.trim();' +
+    '    if(/\\(Vendor\\)\\s*$/.test(t)&&els[i].offsetHeight>0){' +
+    '      matches.push(els[i]);' +
+    '    }' +
+    '  }' +
+    '}' +
+    'JSON.stringify({count:matches.length,' +
+    '  labels:matches.map(function(m){return m.textContent.trim().substring(0,200)})});'
+  );
+  let vendorParsed: { count?: number; labels?: string[]; error?: string } = {};
+  try {
+    let inner = vendorResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    vendorParsed = JSON.parse(inner);
+  } catch { vendorParsed = { error: 'vendor_parse_failed' }; }
+  if (vendorParsed.error) {
+    return { ok: false, error: vendorParsed.error };
+  }
+
+  const count = vendorParsed.count ?? 0;
+  const labels = vendorParsed.labels ?? [];
+
+  if (count === 0) {
+    return { ok: false, error: 'vendor_row_not_found' };
+  }
+
+  let targetIndex = 0;
+  if (count === 1) {
+    targetIndex = 0;
+  } else if (vendorName) {
+    const matchingIndices = labels
+      .map((label, i) => ({ label, i }))
+      .filter(({ label }) => verifyVendorNameMatch(vendorName, label));
+    if (matchingIndices.length === 0) {
+      return { ok: false, error: 'vendor_no_name_match', count, labels: labels.slice(0, 5),
+        message: `${count} Vendor rows found but none match WO vendor "${vendorName}"` };
+    }
+    if (matchingIndices.length > 1) {
+      return { ok: false, error: 'vendor_multiple_name_match', count, labels: labels.slice(0, 5),
+        message: `${count} Vendor rows, ${matchingIndices.length} match vendor "${vendorName}" — cannot disambiguate` };
+    }
+    targetIndex = matchingIndices[0].i;
+  } else {
+    return { ok: false, error: 'vendor_ambiguous', count, labels: labels.slice(0, 5) };
+  }
+
+  const clickResult = abEval(
+    'var matches=[];' +
+    'var container=document.querySelector(".js-communication-inbox-container");' +
+    'if(container){' +
+    '  var els=container.querySelectorAll("li.list-group-item");' +
+    '  for(var i=0;i<els.length;i++){' +
+    '    var t=els[i].textContent.trim();' +
+    '    if(/\\(Vendor\\)\\s*$/.test(t)&&els[i].offsetHeight>0){' +
+    '      matches.push(els[i]);' +
+    '    }' +
+    '  }' +
+    '}' +
+    `var idx=${targetIndex};` +
+    'if(idx<matches.length){matches[idx].click();JSON.stringify({ok:true,label:matches[idx].textContent.trim().substring(0,200)});}' +
+    'else{JSON.stringify({error:"vendor_index_out_of_range"});}'
+  );
+  let clickParsed: { ok?: boolean; error?: string; label?: string } = {};
+  try {
+    let inner = clickResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    clickParsed = JSON.parse(inner);
+  } catch { clickParsed = { error: 'click_parse_failed' }; }
+  if (clickParsed.error || !clickParsed.ok) {
+    return { ok: false, error: clickParsed.error ?? 'vendor_click_failed' };
+  }
+
+  if (vendorName && clickParsed.label && !verifyVendorNameMatch(vendorName, clickParsed.label)) {
+    return { ok: false, error: 'vendor_click_name_mismatch',
+      message: `Clicked row label "${clickParsed.label}" does not match WO vendor "${vendorName}" — possible DOM reorder between queries` };
+  }
+
+  abSafe('wait', '3000');
+
+  return { ok: true, vendor_label: clickParsed.label };
 }
 
 /**
@@ -3095,6 +3242,330 @@ async function sendWoMessage(
   };
 }
 
+async function sendVendorMessage(
+  woQuery: string,
+  message: string,
+  live: boolean,
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!WO_QUERY_RE.test(woQuery)) {
+    return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
+  }
+  if (!message || message.trim().length === 0) {
+    return { error: 'empty_message', message: 'Message text is required.' };
+  }
+
+  const woDetail = await readWorkOrder(woQuery, true);
+  if (woDetail.error) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: woDetail.error, message: woDetail.message,
+    };
+  }
+
+  if (!woDetail.vendor_name) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      error: 'no_vendor', message: 'No vendor assigned to this WO — cannot send message.',
+    };
+  }
+
+  const threadResult = openVendorThread(woDetail.vendor_name);
+  if (!threadResult.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: threadResult.error,
+      ...(threadResult.count ? { vendor_count: threadResult.count, vendor_labels: threadResult.labels } : {}),
+    };
+  }
+
+  const { messages: existingMessages } = extractThreadMessages();
+
+  const composerResult = extractComposerContract();
+  if (!composerResult.ok || !composerResult.contract) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: composerResult.error ?? 'composer_contract_failed',
+      message: 'Could not extract messaging composer contract. Fail closed — will not send without verified destination.',
+    };
+  }
+  const contract = composerResult.contract;
+
+  if (!/sms|text/i.test(contract.channel)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'channel_not_sms',
+      message: `Channel "${contract.channel}" is not SMS/Text. V1 vendor messaging is SMS-only via inline composer. Fail closed.`,
+      composer_contract: contract,
+    };
+  }
+
+  if (message.length > MAX_SMS_LENGTH) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'message_too_long', message: `Message exceeds ${MAX_SMS_LENGTH} character SMS limit (got ${message.length}).` };
+  }
+
+  if (!contract.recipient_label || contract.recipient_label.length < 2) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'recipient_unknown',
+      message: 'Could not identify the messaging recipient from the composer. Fail closed.',
+      composer_contract: contract,
+    };
+  }
+
+  const rowLabel = threadResult.vendor_label ?? '';
+  if (!verifyVendorNameMatch(woDetail.vendor_name, rowLabel)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'row_vendor_mismatch',
+      message: `Clicked Vendor row "${rowLabel}" does not match WO vendor "${woDetail.vendor_name}". Fail closed.`,
+      composer_contract: contract,
+    };
+  }
+  if (!verifyVendorNameMatch(woDetail.vendor_name, contract.recipient_label)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'recipient_vendor_mismatch',
+      message: `Composer recipient "${contract.recipient_label}" does not match WO vendor "${woDetail.vendor_name}". Fail closed.`,
+      composer_contract: contract,
+    };
+  }
+
+  if (!contract.send_button_scoped) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'send_button_not_scoped',
+      message: 'No Send button found within the messaging composer/form. Fail closed.',
+      composer_contract: contract,
+    };
+  }
+
+  const escapedMessage = JSON.stringify(message);
+  const fillResult = abEval(
+    'var ta=document.getElementById("messaging-input");' +
+    'if(ta){' +
+    '  var msg=' + escapedMessage + ';' +
+    '  var ns=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,"value").set;' +
+    '  ns.call(ta,msg);' +
+    '  ta.dispatchEvent(new Event("input",{bubbles:true}));' +
+    '  ta.dispatchEvent(new Event("change",{bubbles:true}));' +
+    '  JSON.stringify({ok:true,length:ta.value.length});' +
+    '}else{JSON.stringify({error:"textarea_not_found"});}'
+  );
+  let fillParsed: { ok?: boolean; error?: string; length?: number } = {};
+  try {
+    let inner = fillResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    fillParsed = JSON.parse(inner);
+  } catch { fillParsed = { error: 'fill_parse_failed' }; }
+
+  if (fillParsed.error || !fillParsed.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: fillParsed.error ?? 'textarea_fill_failed',
+    };
+  }
+
+  const hiddenFieldNames = contract.hidden_fields.map(f => f.split('=')[0]).sort().join(',');
+
+  let endpointContractHash = '';
+  let spaContract: SmsSendContract | undefined;
+  if (contract.form_action === 'no_form') {
+    const contractResult = readSmsSendContract();
+    if (!contractResult.ok || !contractResult.contract || !contractResult.hash) {
+      try { ab('close'); } catch { /* */ }
+      return {
+        wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+        vendor_name: woDetail.vendor_name, error: 'sms_contract_missing',
+        message: contractResult.error ?? 'No .sms-send-contract.json found. Requires supervised laptop discovery.',
+        composer_contract: contract,
+      };
+    }
+    spaContract = contractResult.contract;
+    endpointContractHash = contractResult.hash;
+  }
+
+  const expectedHash = computeMessageApprovalHash(
+    woDetail.sr_id, woDetail.wo_id, message, woDetail.vendor_name,
+    contract.channel, contract.recipient_label, rowLabel,
+    contract.form_action, contract.form_method, contract.textarea_name,
+    hiddenFieldNames, endpointContractHash,
+  );
+
+  if (!live) {
+    ab('close');
+    return {
+      dry_run: true,
+      guardrail: 'SEND BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only after chief + Albie greenlight on this specific WO+message.',
+      approval_hash: expectedHash,
+      would_send_to: woDetail.vendor_name,
+      vendor_label: threadResult.vendor_label,
+      composer_recipient: contract.recipient_label,
+      row_label_matched: rowLabel,
+      channel: contract.channel,
+      sent_message: message,
+      message_length: message.length,
+      max_length: MAX_SMS_LENGTH,
+      send_button_text: contract.send_button_text,
+      send_button_scoped: contract.send_button_scoped,
+      composer_contract: {
+        form_action: contract.form_action,
+        form_method: contract.form_method,
+        textarea_name: contract.textarea_name,
+        container_found: contract.container_found,
+        hidden_fields: contract.hidden_fields,
+        hidden_field_names_bound: hiddenFieldNames,
+        ...(spaContract ? {
+          sms_send_contract: spaContract,
+          endpoint_contract_hash: endpointContractHash,
+        } : {
+          endpoint_note: `Form action: ${contract.form_action} (${contract.form_method})`,
+        }),
+      },
+      wo_number: woDetail.wo_number,
+      wo_status: woDetail.status,
+      sr_id: woDetail.sr_id,
+      wo_id: woDetail.wo_id,
+      existing_thread_count: existingMessages.length,
+      latest_inbound: existingMessages.find(m => m.direction === 'inbound') ?? null,
+    };
+  }
+
+  if (!approvalHash) {
+    ab('close');
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    ab('close');
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  if (contract.form_action === 'no_form') {
+    const liveContractFile = readSmsSendContract();
+    if (!liveContractFile.ok || liveContractFile.hash !== endpointContractHash) {
+      ab('close');
+      return {
+        error: 'sms_contract_drift',
+        message: 'SPA send contract file changed or missing since dry-run. Re-run dry-run.',
+        expected_hash: endpointContractHash,
+        actual_hash: liveContractFile.hash ?? 'missing',
+      };
+    }
+  }
+
+  const liveContract = extractComposerContract();
+  if (!liveContract.ok || !liveContract.contract) {
+    ab('close');
+    return { error: 'live_contract_failed', message: 'Could not re-verify composer contract before live send. Fail closed.' };
+  }
+  const lc = liveContract.contract;
+  const liveHiddenFieldNames = lc.hidden_fields.map(f => f.split('=')[0]).sort().join(',');
+  if (lc.channel !== contract.channel || lc.recipient_label !== contract.recipient_label ||
+      lc.form_action !== contract.form_action || lc.form_method !== contract.form_method ||
+      lc.textarea_name !== contract.textarea_name || liveHiddenFieldNames !== hiddenFieldNames) {
+    ab('close');
+    return {
+      error: 'contract_drift',
+      message: 'Composer contract changed between dry-run and live execution. Fail closed — re-run dry-run.',
+      drift: {
+        channel: lc.channel !== contract.channel ? { expected: contract.channel, actual: lc.channel } : 'ok',
+        recipient: lc.recipient_label !== contract.recipient_label ? { expected: contract.recipient_label, actual: lc.recipient_label } : 'ok',
+        form_action: lc.form_action !== contract.form_action ? { expected: contract.form_action, actual: lc.form_action } : 'ok',
+        form_method: lc.form_method !== contract.form_method ? { expected: contract.form_method, actual: lc.form_method } : 'ok',
+        textarea_name: lc.textarea_name !== contract.textarea_name ? { expected: contract.textarea_name, actual: lc.textarea_name } : 'ok',
+        hidden_fields: liveHiddenFieldNames !== hiddenFieldNames ? { expected: hiddenFieldNames, actual: liveHiddenFieldNames } : 'ok',
+      },
+    };
+  }
+  if (!lc.send_button_scoped) {
+    ab('close');
+    return { error: 'live_send_button_not_scoped', message: 'Send button is no longer scoped to the messaging composer. Fail closed.' };
+  }
+
+  const nonceResult = reserveSendMsgNonce(expectedHash);
+  if (nonceResult === 'already_used') {
+    ab('close');
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to send a message. Run a new dry-run for a fresh hash.' };
+  }
+  if (nonceResult === 'error') {
+    ab('close');
+    return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
+  }
+
+  const sendResult = abEval(
+    'var ta=document.getElementById("messaging-input");' +
+    'if(!ta||!ta.value){JSON.stringify({error:"textarea_empty"});}' +
+    'else{' +
+    '  var container=null;var p=ta;' +
+    '  for(var i=0;i<15&&p.parentElement;i++){' +
+    '    p=p.parentElement;' +
+    '    if(p.querySelector&&p.querySelector(".btn-primary,button[type=submit]")){container=p;break;}' +
+    '  }' +
+    '  if(!container){JSON.stringify({error:"messaging_container_not_found"});}' +
+    '  else{' +
+    '    var btn=container.querySelector(".btn-primary:not([disabled]),button[type=submit]:not([disabled])");' +
+    '    if(!btn){JSON.stringify({error:"send_button_not_found_or_disabled"});}' +
+    '    else{btn.click();JSON.stringify({ok:true,button_text:btn.textContent.trim().substring(0,50)});}' +
+    '  }' +
+    '}'
+  );
+  let sendParsed: { ok?: boolean; error?: string; button_text?: string } = {};
+  try {
+    let inner = sendResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    sendParsed = JSON.parse(inner);
+  } catch { sendParsed = { error: 'send_parse_failed' }; }
+
+  if (sendParsed.error || !sendParsed.ok) {
+    ab('close');
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: sendParsed.error ?? 'send_failed',
+      hash_consumed: true,
+      message: 'Send failed but approval hash is consumed (once-only guard). Run a new dry-run for a fresh hash before retrying.',
+    };
+  }
+
+  abSafe('wait', '5000');
+
+  const { messages: postSendMessages } = extractThreadMessages();
+  const outbounds = postSendMessages.filter(m => m.direction === 'outbound');
+  const latestOutbound = outbounds.length > 0 ? outbounds[outbounds.length - 1] : null;
+  const verified = latestOutbound ? latestOutbound.text.includes(message.substring(0, 50)) : false;
+
+  ab('close');
+
+  return {
+    live: true,
+    verified,
+    hash_consumed: true,
+    wo_number: woDetail.wo_number,
+    sr_id: woDetail.sr_id,
+    wo_id: woDetail.wo_id,
+    vendor_name: woDetail.vendor_name,
+    vendor_label: threadResult.vendor_label,
+    composer_recipient: contract.recipient_label,
+    row_label_matched: rowLabel,
+    channel: contract.channel,
+    sent_message: message,
+    message_length: message.length,
+    send_button_clicked: sendParsed.button_text,
+    post_send_thread_count: postSendMessages.length,
+    latest_outbound: latestOutbound ?? null,
+  };
+}
+
 // ─── Self-heal helpers ───────────────────────────────────────────────────────
 
 function sendAlert(message: string): void {
@@ -3473,6 +3944,36 @@ async function main() {
       process.exit(result4.error || result4.verified === false ? 1 : 0);
       break;
     }
+    case 'send-vendor-message': {
+      const vmWoIdx = cmdArgs.indexOf('--wo');
+      const vmMsgIdx = cmdArgs.indexOf('--message');
+      const vmHashIdx = cmdArgs.indexOf('--approval-hash');
+
+      if (vmWoIdx === -1 || vmMsgIdx === -1) {
+        console.error('Usage: send-vendor-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]');
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  GATED EXTERNAL: messaging a real vendor requires per-instance approval.');
+        process.exit(1);
+      }
+      const vmWoQuery = cmdArgs[vmWoIdx + 1];
+      const vmText = cmdArgs[vmMsgIdx + 1];
+      const vmHashVal = vmHashIdx !== -1 ? cmdArgs[vmHashIdx + 1] : undefined;
+
+      const consumedVmIndices = new Set<number>();
+      if (vmWoIdx !== -1) consumedVmIndices.add(vmWoIdx + 1);
+      if (vmMsgIdx !== -1) consumedVmIndices.add(vmMsgIdx + 1);
+      if (vmHashIdx !== -1) consumedVmIndices.add(vmHashIdx + 1);
+      const vmLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedVmIndices.has(i));
+
+      if (!vmWoQuery || !vmText) {
+        console.error('send-vendor-message: --wo and --message are required');
+        process.exit(1);
+      }
+      const result4b = await sendVendorMessage(vmWoQuery, vmText, vmLive, vmHashVal);
+      console.log(JSON.stringify(result4b, null, 2));
+      process.exit(result4b.error || result4b.verified === false ? 1 : 0);
+      break;
+    }
     case 'photo-intake': {
       const piWoIdx = cmdArgs.indexOf('--wo');
       const piHashIdx = cmdArgs.indexOf('--approval-hash');
@@ -3521,6 +4022,8 @@ async function main() {
         '  read-wo-messages <WO-number>  — read tenant SMS thread for a WO',
         '  send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]',
         '                                — send SMS to tenant; dry-run default, --execute + hash sends (GATED EXTERNAL)',
+        '  send-vendor-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]',
+        '                                — send SMS to vendor; dry-run default, --execute + hash sends (GATED EXTERNAL)',
         '  photo-intake --wo <WO-number> [--execute --approval-hash <hash>]',
         '                                — analyze inbound tenant photos via vision; dry-run default, --execute adds WO notes',
       ].join('\n'));
