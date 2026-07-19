@@ -2198,8 +2198,33 @@ function buildNoteBody(vision: VisionResult, photoUrl: string): string {
   return parts.join('\n');
 }
 
-function computePhotoIntakeHash(woQuery: string): string {
-  return createHash('sha256').update(`photo-intake:${woQuery}`).digest('hex').slice(0, 16);
+interface PlannedNote {
+  url: string;
+  body: string;
+  add_note_hash: string;
+  vision: VisionResult;
+}
+
+interface PhotoIntakePlan {
+  wo_number: string;
+  sr_id: string;
+  wo_id: string;
+  tenant: string;
+  tenant_label: string;
+  media_urls: string[];
+  planned_notes: PlannedNote[];
+  skipped: Array<{ url: string; reason: string }>;
+}
+
+function computePhotoIntakePlanHash(plan: PhotoIntakePlan): string {
+  const payload = JSON.stringify({
+    sr_id: plan.sr_id,
+    wo_id: plan.wo_id,
+    tenant: plan.tenant,
+    media_urls: plan.media_urls,
+    planned_notes: plan.planned_notes.map(n => ({ url: n.url, body: n.body, hash: n.add_note_hash })),
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
 async function photoIntake(woQuery: string, execute: boolean, approvalHash?: string): Promise<PhotoIntakeResult> {
@@ -2247,58 +2272,108 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
     };
   }
 
-  const expectedHash = computePhotoIntakeHash(woQuery);
-
-  if (!execute) {
-    return {
-      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
-      tenant: woDetail.tenant, photos_found: inboundPhotos.length, photos_analyzed: 0, analyses: [],
-      dry_run: true,
-      approval_hash: expectedHash,
-      message: `Found ${inboundPhotos.length} inbound photo(s). Pass --execute --approval-hash ${expectedHash} to analyze and add notes.`,
-    } as PhotoIntakeResult & { dry_run: boolean; approval_hash: string };
-  }
-
-  if (!approvalHash || approvalHash !== expectedHash) {
-    return {
-      photos_found: inboundPhotos.length, photos_analyzed: 0, analyses: [],
-      error: 'approval_hash_mismatch',
-      message: `Run dry-run first to get approval hash. Expected: ${expectedHash}`,
-    };
-  }
-
+  // Phase 1: Download + Vision (runs in both dry-run and execute modes)
   const woContext = `WO#${woDetail.wo_number} - ${woDetail.description ?? 'maintenance request'}`;
   const analyses: PhotoIntakeResult['analyses'] = [];
+  const plannedNotes: PlannedNote[] = [];
+  const skipped: Array<{ url: string; reason: string }> = [];
 
   for (const url of inboundPhotos.slice(0, 10)) {
     const dlResult = await downloadImage(url);
     if ('error' in dlResult) {
       analyses.push({ url, download_ok: false, error: dlResult.error });
+      skipped.push({ url, reason: `download: ${dlResult.error}` });
       continue;
     }
 
     const visionResult = await analyzeImage(dlResult.path, woContext);
-
     try { unlinkSync(dlResult.path); } catch { /* */ }
 
     if ('error' in visionResult) {
       analyses.push({ url, download_ok: true, error: visionResult.error });
+      skipped.push({ url, reason: `vision: ${visionResult.error}` });
       continue;
     }
 
-    const entry: PhotoIntakeResult['analyses'][number] = { url, download_ok: true, vision: visionResult };
+    analyses.push({ url, download_ok: true, vision: visionResult });
 
-    // Component E: add-note if confidence >= medium
+    // Build planned note for confidence >= medium
     if (visionResult.confidence !== 'low' && woDetail.sr_id && woDetail.wo_id) {
       const noteBody = buildNoteBody(visionResult, url);
       const noteParams: AddNoteParams = { srId: woDetail.sr_id, woId: woDetail.wo_id, body: noteBody };
       const noteHash = computeAddNoteApprovalHash(noteParams);
-      const noteResult = await addWorkOrderNote(noteParams, true, noteHash);
-      entry.note_added = !noteResult.error && noteResult.verified !== false;
-      if (noteResult.error) entry.error = `note_failed: ${noteResult.error}`;
+      plannedNotes.push({ url, body: noteBody, add_note_hash: noteHash, vision: visionResult });
+    } else {
+      skipped.push({ url, reason: `confidence_low` });
     }
+  }
 
-    analyses.push(entry);
+  // Build the execution plan
+  const plan: PhotoIntakePlan = {
+    wo_number: woDetail.wo_number ?? '',
+    sr_id: woDetail.sr_id ?? '',
+    wo_id: woDetail.wo_id ?? '',
+    tenant: woDetail.tenant ?? '',
+    tenant_label: threadResult.tenant_label ?? '',
+    media_urls: inboundPhotos.slice(0, 10),
+    planned_notes: plannedNotes,
+    skipped,
+  };
+
+  const planHash = computePhotoIntakePlanHash(plan);
+
+  if (!execute) {
+    return {
+      wo_number: woDetail.wo_number,
+      sr_id: woDetail.sr_id,
+      wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant,
+      photos_found: inboundPhotos.length,
+      photos_analyzed: analyses.filter(a => a.download_ok).length,
+      analyses,
+      dry_run: true,
+      approval_hash: planHash,
+      execution_plan: {
+        notes_to_add: plannedNotes.map(n => ({
+          photo_url: n.url,
+          note_body: n.body,
+          add_note_hash: n.add_note_hash,
+          confidence: n.vision.confidence,
+        })),
+        skipped: plan.skipped,
+      },
+      message: plannedNotes.length > 0
+        ? `Analyzed ${analyses.filter(a => a.download_ok).length} photo(s). ${plannedNotes.length} note(s) planned. Pass --execute --approval-hash ${planHash} to post notes.`
+        : `Analyzed ${analyses.filter(a => a.download_ok).length} photo(s). No notes to add (all below confidence threshold).`,
+    } as PhotoIntakeResult & { dry_run: boolean; approval_hash: string; execution_plan: unknown };
+  }
+
+  // Phase 2: Execute — validate plan hash then post notes
+  if (!approvalHash || approvalHash !== planHash) {
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      tenant: woDetail.tenant, photos_found: inboundPhotos.length,
+      photos_analyzed: analyses.filter(a => a.download_ok).length, analyses,
+      error: 'approval_hash_mismatch',
+      message: `Plan hash mismatch. Photos or vision results may have changed since dry-run. Re-run dry-run to get a fresh hash. Expected: ${planHash}`,
+    };
+  }
+
+  let noteFailed = false;
+  for (const planned of plannedNotes) {
+    const noteParams: AddNoteParams = { srId: plan.sr_id, woId: plan.wo_id, body: planned.body };
+    const noteResult = await addWorkOrderNote(noteParams, true, planned.add_note_hash);
+    const analysisEntry = analyses.find(a => a.url === planned.url);
+    if (analysisEntry) {
+      analysisEntry.note_added = !noteResult.error && noteResult.verified !== false;
+      if (noteResult.error) {
+        analysisEntry.error = `note_failed: ${noteResult.error}`;
+        noteFailed = true;
+      } else if (noteResult.verified === false) {
+        analysisEntry.error = 'note_failed: verification_failed';
+        noteFailed = true;
+      }
+    }
   }
 
   return {
@@ -2309,6 +2384,7 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
     photos_found: inboundPhotos.length,
     photos_analyzed: analyses.filter(a => a.download_ok).length,
     analyses,
+    ...(noteFailed ? { error: 'note_write_failed', message: 'One or more notes failed to post or verify. See analyses for details.' } : {}),
   };
 }
 
