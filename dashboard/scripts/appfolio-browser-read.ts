@@ -1816,7 +1816,7 @@ function extractThreadMessages(): { messages: WoThreadMessage[]; channel: string
     '  var isIn=/offset-sm-0/.test(cls);' +
     '  var isOut=/offset-sm-4/.test(cls);' +
     '  var html=el.innerHTML||"";' +
-    '  var bgL=/bg-light/.test(html)||/bg-light/.test(cls);' +
+    '  var bgL=/bg-light|bg-secondary/.test(html)||/bg-light|bg-secondary/.test(cls);' +
     '  var bgP=/bg-primary/.test(html)||/bg-primary/.test(cls);' +
     '  var dir="unknown";' +
     '  if(isIn&&bgL)dir="inbound";' +
@@ -2060,15 +2060,15 @@ async function analyzeImage(imagePath: string, woContext: string): Promise<Visio
   const base64 = imageData.toString('base64');
   const ext = imagePath.endsWith('.png') ? 'image/png' : imagePath.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
 
-  if (apiKey) {
-    return analyzeWithClaude(base64, ext, woContext, apiKey);
-  } else if (geminiKey) {
+  if (geminiKey) {
     return analyzeWithGemini(base64, ext, woContext, geminiKey);
+  } else if (apiKey) {
+    return analyzeWithClaude(base64, ext, woContext, apiKey);
   }
-  return { error: 'no_vision_api_key: set ANTHROPIC_API_KEY or GEMINI_API_KEY' };
+  return { error: 'no_vision_api_key: set GEMINI_API_KEY or ANTHROPIC_API_KEY' };
 }
 
 async function analyzeWithClaude(base64: string, mimeType: string, woContext: string, apiKey: string): Promise<VisionResult | { error: string }> {
@@ -2151,8 +2151,20 @@ Rules:
 
 function parseVisionResponse(text: string): VisionResult {
   const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+
+  // Try direct parse first
+  let parsed: Record<string, string> | null = null;
   try {
-    const parsed = JSON.parse(cleaned) as Record<string, string>;
+    parsed = JSON.parse(cleaned) as Record<string, string>;
+  } catch {
+    // Try extracting JSON object from surrounding text
+    const jsonMatch = cleaned.match(/\{[\s\S]*"confidence"[\s\S]*\}/);
+    if (jsonMatch) {
+      try { parsed = JSON.parse(jsonMatch[0]) as Record<string, string>; } catch { /* fall through */ }
+    }
+  }
+
+  if (parsed) {
     const confidence = (['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'low') as 'high' | 'medium' | 'low';
     return {
       make: parsed.make || undefined,
@@ -2162,9 +2174,9 @@ function parseVisionResponse(text: string): VisionResult {
       confidence,
       raw_text: parsed.raw_text || undefined,
     };
-  } catch {
-    return { confidence: 'low', other_details: text.substring(0, 300), raw_text: text.substring(0, 300) };
   }
+
+  return { confidence: 'low', other_details: text.substring(0, 500), raw_text: text.substring(0, 500) };
 }
 
 function buildNoteBody(vision: VisionResult, photoUrl: string): string {
