@@ -1908,6 +1908,16 @@ function verifyVendorNameMatch(vendorName: string, label: string): boolean {
   return shorter.every(t => longer.includes(t));
 }
 
+function computeEmailApprovalHash(
+  srId: string, woId: string, subject: string, message: string,
+  vendor: string, toAddress: string, rowLabel: string,
+): string {
+  const payload = JSON.stringify({
+    srId, woId, subject, message, vendor, toAddress, rowLabel, channel: 'email',
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
 function computeMessageApprovalHash(
   srId: string, woId: string, message: string, tenant: string,
   channel: string, recipientLabel: string, rowLabel: string,
@@ -3559,6 +3569,423 @@ async function sendVendorMessage(
   };
 }
 
+interface EmailDialogContract {
+  to_address: string;
+  from_address: string;
+  subject_value: string;
+  message_value: string;
+  send_button_found: boolean;
+  dialog_found: boolean;
+}
+
+function extractEmailDialogContract(): { ok: boolean; contract?: EmailDialogContract; error?: string } {
+  const result = abEval(
+    'var dialogs=document.querySelectorAll("[role=dialog],dialog");' +
+    'var d=null;' +
+    'for(var i=dialogs.length-1;i>=0;i--){' +
+    '  var h=dialogs[i].querySelector("h5,h4,h3");' +
+    '  if(h&&/compose.*email/i.test(h.textContent)){d=dialogs[i];break;}' +
+    '}' +
+    'if(!d){JSON.stringify({ok:false,error:"email_dialog_not_found"});}' +
+    'else{' +
+    '  var toInput=d.querySelector("input[name=to]");' +
+    '  var toAddr=toInput?toInput.value.trim():"";' +
+    '  var fromText="";' +
+    '  var labels=d.querySelectorAll("label");' +
+    '  for(var j=0;j<labels.length;j++){' +
+    '    if(/^From$/i.test(labels[j].textContent.trim())){' +
+    '      var sib=labels[j].nextElementSibling||labels[j].parentElement;' +
+    '      if(sib){var st=sib.textContent.trim();if(st.indexOf("@")>0)fromText=st.substring(0,200);}' +
+    '      break;' +
+    '    }' +
+    '  }' +
+    '  if(!fromText){' +
+    '    var spans=d.querySelectorAll("span,div,p");' +
+    '    for(var k=0;k<spans.length;k++){' +
+    '      var t=spans[k].textContent.trim();' +
+    '      if(/opsassistant@/.test(t)){fromText=t.substring(0,200);break;}' +
+    '    }' +
+    '  }' +
+    '  var subjectInput=d.querySelector("input[name=subject]");' +
+    '  var subjectVal=subjectInput?subjectInput.value.trim():"";' +
+    '  var ce=d.querySelector("[contenteditable]");' +
+    '  var msgVal=ce?ce.textContent.trim():"";' +
+    '  var sendBtn=d.querySelector(".btn-primary");' +
+    '  JSON.stringify({ok:true,to_address:toAddr,from_address:fromText,' +
+    '    subject_value:subjectVal,message_value:msgVal,' +
+    '    send_button_found:!!sendBtn,dialog_found:true});' +
+    '}'
+  );
+  let parsed: { ok: boolean; error?: string } & Partial<EmailDialogContract> = { ok: false };
+  try {
+    let inner = result.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    parsed = JSON.parse(inner);
+  } catch { parsed = { ok: false, error: 'email_contract_parse_failed' }; }
+
+  if (!parsed.ok || parsed.error) {
+    return { ok: false, error: parsed.error ?? 'email_contract_extraction_failed' };
+  }
+
+  return {
+    ok: true,
+    contract: {
+      to_address: parsed.to_address ?? '',
+      from_address: parsed.from_address ?? '',
+      subject_value: parsed.subject_value ?? '',
+      message_value: parsed.message_value ?? '',
+      send_button_found: parsed.send_button_found ?? false,
+      dialog_found: parsed.dialog_found ?? false,
+    },
+  };
+}
+
+function openEmailComposer(): { ok: boolean; error?: string } {
+  // Click the "Send via SMS" dropdown to reveal "Compose New Email"
+  const dropdownResult = abEval(
+    'var btns=document.querySelectorAll("button");' +
+    'var dropdown=null;' +
+    'for(var i=0;i<btns.length;i++){' +
+    '  if(/^Send via SMS$/i.test(btns[i].textContent.trim())){dropdown=btns[i];break;}' +
+    '}' +
+    'if(dropdown){dropdown.click();JSON.stringify({ok:true});}' +
+    'else{JSON.stringify({error:"sms_dropdown_not_found"});}'
+  );
+  let dropdownParsed: { ok?: boolean; error?: string } = {};
+  try {
+    let inner = dropdownResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    dropdownParsed = JSON.parse(inner);
+  } catch { dropdownParsed = { error: 'dropdown_parse_failed' }; }
+  if (dropdownParsed.error || !dropdownParsed.ok) {
+    return { ok: false, error: dropdownParsed.error ?? 'dropdown_click_failed' };
+  }
+
+  abSafe('wait', '1000');
+
+  // Click "Compose New Email" menuitem
+  const emailResult = abEval(
+    'var items=document.querySelectorAll("[role=menuitem]");' +
+    'var target=null;' +
+    'for(var i=0;i<items.length;i++){' +
+    '  if(/compose.*new.*email/i.test(items[i].textContent.trim())){target=items[i];break;}' +
+    '}' +
+    'if(target){target.click();JSON.stringify({ok:true});}' +
+    'else{JSON.stringify({error:"compose_email_menuitem_not_found"});}'
+  );
+  let emailParsed: { ok?: boolean; error?: string } = {};
+  try {
+    let inner = emailResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    emailParsed = JSON.parse(inner);
+  } catch { emailParsed = { error: 'email_menuitem_parse_failed' }; }
+  if (emailParsed.error || !emailParsed.ok) {
+    return { ok: false, error: emailParsed.error ?? 'email_menuitem_click_failed' };
+  }
+
+  abSafe('wait', '3000');
+  return { ok: true };
+}
+
+async function sendVendorEmail(
+  woQuery: string,
+  subject: string,
+  message: string,
+  live: boolean,
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!WO_QUERY_RE.test(woQuery)) {
+    return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
+  }
+  if (!subject || subject.trim().length === 0) {
+    return { error: 'empty_subject', message: 'Email subject is required.' };
+  }
+  if (!message || message.trim().length === 0) {
+    return { error: 'empty_message', message: 'Email message body is required.' };
+  }
+
+  const woDetail = await readWorkOrder(woQuery, true);
+  if (woDetail.error) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: woDetail.error, message: woDetail.message,
+    };
+  }
+
+  if (!woDetail.vendor_name) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      error: 'no_vendor', message: 'No vendor assigned to this WO — cannot send email.',
+    };
+  }
+
+  if (!woDetail.vendor_email) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name,
+      error: 'no_vendor_email', message: 'No email address on file for this vendor — cannot send email.',
+    };
+  }
+
+  const threadResult = openVendorThread(woDetail.vendor_name);
+  if (!threadResult.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: threadResult.error,
+      ...(threadResult.count ? { vendor_count: threadResult.count, vendor_labels: threadResult.labels } : {}),
+    };
+  }
+
+  const rowLabel = threadResult.vendor_label ?? '';
+  if (!verifyVendorNameMatch(woDetail.vendor_name, rowLabel)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'row_vendor_mismatch',
+      message: `Clicked Vendor row "${rowLabel}" does not match WO vendor "${woDetail.vendor_name}". Fail closed.`,
+    };
+  }
+
+  const emailOpened = openEmailComposer();
+  if (!emailOpened.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: emailOpened.error ?? 'email_composer_open_failed',
+    };
+  }
+
+  const dialogResult = extractEmailDialogContract();
+  if (!dialogResult.ok || !dialogResult.contract) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: dialogResult.error ?? 'email_dialog_contract_failed',
+      message: 'Could not extract email dialog contract. Fail closed.',
+    };
+  }
+  const dialog = dialogResult.contract;
+
+  if (!dialog.to_address || dialog.to_address.length < 3 || !dialog.to_address.includes('@')) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'email_to_invalid',
+      message: `Email To address "${dialog.to_address}" is empty or invalid. Fail closed.`,
+      email_dialog: dialog,
+    };
+  }
+
+  if (!dialog.send_button_found) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: 'email_send_button_not_found',
+      message: 'No Send button found in email dialog. Fail closed.',
+      email_dialog: dialog,
+    };
+  }
+
+  // Fill Subject field
+  const escapedSubject = JSON.stringify(subject);
+  const subjectFillResult = abEval(
+    'var dialogs=document.querySelectorAll("[role=dialog],dialog");' +
+    'var d=null;' +
+    'for(var i=dialogs.length-1;i>=0;i--){' +
+    '  var h=dialogs[i].querySelector("h5,h4,h3");' +
+    '  if(h&&/compose.*email/i.test(h.textContent)){d=dialogs[i];break;}' +
+    '}' +
+    'if(!d){JSON.stringify({error:"email_dialog_not_found"});}' +
+    'else{' +
+    '  var subInput=d.querySelector("input[name=subject]");' +
+    '  if(!subInput){JSON.stringify({error:"subject_input_not_found"});}' +
+    '  else{' +
+    '    var ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set;' +
+    '    ns.call(subInput,' + escapedSubject + ');' +
+    '    subInput.dispatchEvent(new Event("input",{bubbles:true}));' +
+    '    subInput.dispatchEvent(new Event("change",{bubbles:true}));' +
+    '    JSON.stringify({ok:true,value:subInput.value});' +
+    '  }' +
+    '}'
+  );
+  let subjectParsed: { ok?: boolean; error?: string; value?: string } = {};
+  try {
+    let inner = subjectFillResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    subjectParsed = JSON.parse(inner);
+  } catch { subjectParsed = { error: 'subject_fill_parse_failed' }; }
+  if (subjectParsed.error || !subjectParsed.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: subjectParsed.error ?? 'subject_fill_failed',
+    };
+  }
+
+  // Fill Message body (contenteditable div)
+  const escapedMessage = JSON.stringify(message);
+  const messageFillResult = abEval(
+    'var dialogs=document.querySelectorAll("[role=dialog],dialog");' +
+    'var d=null;' +
+    'for(var i=dialogs.length-1;i>=0;i--){' +
+    '  var h=dialogs[i].querySelector("h5,h4,h3");' +
+    '  if(h&&/compose.*email/i.test(h.textContent)){d=dialogs[i];break;}' +
+    '}' +
+    'if(!d){JSON.stringify({error:"email_dialog_not_found"});}' +
+    'else{' +
+    '  var ce=d.querySelector("[contenteditable]");' +
+    '  if(!ce){JSON.stringify({error:"message_contenteditable_not_found"});}' +
+    '  else{' +
+    '    ce.focus();' +
+    '    ce.textContent=' + escapedMessage + ';' +
+    '    ce.dispatchEvent(new Event("input",{bubbles:true}));' +
+    '    ce.dispatchEvent(new Event("change",{bubbles:true}));' +
+    '    JSON.stringify({ok:true,length:ce.textContent.length});' +
+    '  }' +
+    '}'
+  );
+  let messageParsed: { ok?: boolean; error?: string; length?: number } = {};
+  try {
+    let inner = messageFillResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    messageParsed = JSON.parse(inner);
+  } catch { messageParsed = { error: 'message_fill_parse_failed' }; }
+  if (messageParsed.error || !messageParsed.ok) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: messageParsed.error ?? 'message_fill_failed',
+    };
+  }
+
+  const expectedHash = computeEmailApprovalHash(
+    woDetail.sr_id, woDetail.wo_id, subject, message,
+    woDetail.vendor_name, dialog.to_address, rowLabel,
+  );
+
+  if (!live) {
+    ab('close');
+    return {
+      dry_run: true,
+      guardrail: 'SEND BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only after chief + Albie greenlight on this specific WO+email.',
+      approval_hash: expectedHash,
+      would_send_to: woDetail.vendor_name,
+      vendor_label: threadResult.vendor_label,
+      row_label_matched: rowLabel,
+      channel: 'email',
+      to_address: dialog.to_address,
+      from_address: dialog.from_address,
+      subject,
+      sent_message: message,
+      message_length: message.length,
+      wo_number: woDetail.wo_number,
+      wo_status: woDetail.status,
+      sr_id: woDetail.sr_id,
+      wo_id: woDetail.wo_id,
+    };
+  }
+
+  if (!approvalHash) {
+    ab('close');
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    ab('close');
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  // Re-verify email dialog state before send
+  const liveDialog = extractEmailDialogContract();
+  if (!liveDialog.ok || !liveDialog.contract) {
+    ab('close');
+    return { error: 'live_dialog_failed', message: 'Could not re-verify email dialog before live send. Fail closed.' };
+  }
+  if (liveDialog.contract.to_address !== dialog.to_address) {
+    ab('close');
+    return {
+      error: 'email_to_drift',
+      message: `Email To address changed between dry-run and execute ("${dialog.to_address}" -> "${liveDialog.contract.to_address}"). Fail closed.`,
+    };
+  }
+
+  const nonceResult = reserveSendMsgNonce(expectedHash);
+  if (nonceResult === 'already_used') {
+    ab('close');
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used to send an email. Run a new dry-run for a fresh hash.' };
+  }
+  if (nonceResult === 'error') {
+    ab('close');
+    return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
+  }
+
+  // Click Send button scoped to the email dialog
+  const sendResult = abEval(
+    'var dialogs=document.querySelectorAll("[role=dialog],dialog");' +
+    'var d=null;' +
+    'for(var i=dialogs.length-1;i>=0;i--){' +
+    '  var h=dialogs[i].querySelector("h5,h4,h3");' +
+    '  if(h&&/compose.*email/i.test(h.textContent)){d=dialogs[i];break;}' +
+    '}' +
+    'if(!d){JSON.stringify({error:"email_dialog_not_found"});}' +
+    'else{' +
+    '  var btn=d.querySelector(".btn-primary");' +
+    '  if(!btn){JSON.stringify({error:"send_button_not_found"});}' +
+    '  else{btn.click();JSON.stringify({ok:true,button_text:btn.textContent.trim().substring(0,50)});}' +
+    '}'
+  );
+  let sendParsed: { ok?: boolean; error?: string; button_text?: string } = {};
+  try {
+    let inner = sendResult.output;
+    if (inner.startsWith('"') && inner.endsWith('"')) inner = JSON.parse(inner) as string;
+    sendParsed = JSON.parse(inner);
+  } catch { sendParsed = { error: 'send_parse_failed' }; }
+
+  if (sendParsed.error || !sendParsed.ok) {
+    ab('close');
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      vendor_name: woDetail.vendor_name, error: sendParsed.error ?? 'send_failed',
+      hash_consumed: true,
+      message: 'Send failed but approval hash is consumed (once-only guard). Run a new dry-run for a fresh hash before retrying.',
+    };
+  }
+
+  abSafe('wait', '5000');
+
+  // Post-send verification: check for the email in the thread
+  const { messages: postSendMessages } = extractThreadMessages();
+  const outbounds = postSendMessages.filter(m => m.direction === 'outbound');
+  const latestOutbound = outbounds.length > 0 ? outbounds[outbounds.length - 1] : null;
+  const verified = latestOutbound ? latestOutbound.text.includes(subject.substring(0, 30)) || latestOutbound.text.includes(message.substring(0, 30)) : false;
+
+  ab('close');
+
+  return {
+    live: true,
+    verified,
+    hash_consumed: true,
+    wo_number: woDetail.wo_number,
+    sr_id: woDetail.sr_id,
+    wo_id: woDetail.wo_id,
+    vendor_name: woDetail.vendor_name,
+    vendor_label: threadResult.vendor_label,
+    row_label_matched: rowLabel,
+    channel: 'email',
+    to_address: dialog.to_address,
+    from_address: dialog.from_address,
+    subject,
+    sent_message: message,
+    message_length: message.length,
+    send_button_clicked: sendParsed.button_text,
+    post_send_thread_count: postSendMessages.length,
+    latest_outbound: latestOutbound ?? null,
+  };
+}
+
 // ─── Self-heal helpers ───────────────────────────────────────────────────────
 
 function sendAlert(message: string): void {
@@ -3967,6 +4394,39 @@ async function main() {
       process.exit(result4b.error || result4b.verified === false ? 1 : 0);
       break;
     }
+    case 'send-vendor-email': {
+      const veWoIdx = cmdArgs.indexOf('--wo');
+      const veSubIdx = cmdArgs.indexOf('--subject');
+      const veMsgIdx = cmdArgs.indexOf('--message');
+      const veHashIdx = cmdArgs.indexOf('--approval-hash');
+
+      if (veWoIdx === -1 || veSubIdx === -1 || veMsgIdx === -1) {
+        console.error('Usage: send-vendor-email --wo <WO-number> --subject "<text>" --message "<text>" [--execute --approval-hash <hash>]');
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  GATED EXTERNAL: emailing a real vendor requires per-instance approval.');
+        process.exit(1);
+      }
+      const veWoQuery = cmdArgs[veWoIdx + 1];
+      const veSubject = cmdArgs[veSubIdx + 1];
+      const veMessage = cmdArgs[veMsgIdx + 1];
+      const veHashVal = veHashIdx !== -1 ? cmdArgs[veHashIdx + 1] : undefined;
+
+      const consumedVeIndices = new Set<number>();
+      if (veWoIdx !== -1) consumedVeIndices.add(veWoIdx + 1);
+      if (veSubIdx !== -1) consumedVeIndices.add(veSubIdx + 1);
+      if (veMsgIdx !== -1) consumedVeIndices.add(veMsgIdx + 1);
+      if (veHashIdx !== -1) consumedVeIndices.add(veHashIdx + 1);
+      const veLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedVeIndices.has(i));
+
+      if (!veWoQuery || !veSubject || !veMessage) {
+        console.error('send-vendor-email: --wo, --subject, and --message are required');
+        process.exit(1);
+      }
+      const result4c = await sendVendorEmail(veWoQuery, veSubject, veMessage, veLive, veHashVal);
+      console.log(JSON.stringify(result4c, null, 2));
+      process.exit(result4c.error || result4c.verified === false ? 1 : 0);
+      break;
+    }
     case 'photo-intake': {
       const piWoIdx = cmdArgs.indexOf('--wo');
       const piHashIdx = cmdArgs.indexOf('--approval-hash');
@@ -4017,6 +4477,8 @@ async function main() {
         '                                — send SMS to tenant; dry-run default, --execute + hash sends (GATED EXTERNAL)',
         '  send-vendor-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]',
         '                                — send SMS to vendor; dry-run default, --execute + hash sends (GATED EXTERNAL)',
+        '  send-vendor-email --wo <WO-number> --subject "<text>" --message "<text>" [--execute --approval-hash <hash>]',
+        '                                — send email to vendor; dry-run default, --execute + hash sends (GATED EXTERNAL)',
         '  photo-intake --wo <WO-number> [--execute --approval-hash <hash>]',
         '                                — analyze inbound tenant photos via vision; dry-run default, --execute adds WO notes',
       ].join('\n'));
