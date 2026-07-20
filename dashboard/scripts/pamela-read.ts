@@ -18,8 +18,9 @@
 import '../src/lib/config';
 import { listInboxMessages, getInboxSummary } from '../src/lib/pamela/gmail';
 import {
-  listEvents, getDayEvents, getAllCalendarEvents,
+  listEvents, getDayEvents,
   listCalendars, formatEventsForTelegram,
+  type CalendarEvent,
 } from '../src/lib/pamela/calendar';
 import { mintPamelaToken, GMAIL_SCOPE } from '../src/lib/pamela/auth';
 
@@ -145,16 +146,18 @@ async function main() {
     case 'calendar': {
       const date = argVal('--date') ?? todayPT();
       const days = parseInt(argVal('--days') ?? '1', 10);
-      const startDate = new Date(`${date}T00:00:00-07:00`);
-      const endDate = new Date(startDate.getTime() + days * 86400000);
-      const timeMin = startDate.toISOString();
-      const timeMax = endDate.toISOString();
-
-      const events = await getAllCalendarEvents({ timeMin, timeMax });
+      const allEvents: CalendarEvent[] = [];
+      for (let i = 0; i < days; i++) {
+        const d = new Date(`${date}T12:00:00Z`);
+        d.setUTCDate(d.getUTCDate() + i);
+        const dayStr = d.toISOString().slice(0, 10);
+        const dayEvents = await getDayEvents(dayStr);
+        allEvents.push(...dayEvents);
+      }
       console.log(JSON.stringify({
         date_range: { from: date, days },
-        count: events.length,
-        events,
+        count: allEvents.length,
+        events: allEvents,
       }, null, 2));
       break;
     }

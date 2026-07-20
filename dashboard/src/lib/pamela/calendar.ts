@@ -98,38 +98,66 @@ export async function listCalendars(): Promise<CalendarInfo[]> {
   }));
 }
 
+function pacificOffset(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const probe = new Date(Date.UTC(y, m - 1, d, 20, 0, 0));
+  const laHour = parseInt(
+    probe.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }),
+    10,
+  );
+  const hours = 20 - laHour;
+  return `-${String(hours).padStart(2, '0')}:00`;
+}
+
 export async function getDayEvents(date: string, calendarId?: string): Promise<CalendarEvent[]> {
-  const timeMin = `${date}T00:00:00-07:00`;
-  const timeMax = `${date}T23:59:59-07:00`;
+  const offset = pacificOffset(date);
+  const timeMin = `${date}T00:00:00${offset}`;
+  const timeMax = `${date}T23:59:59${offset}`;
   if (calendarId) {
     return listEvents({ calendarId, timeMin, timeMax });
   }
-  return getAllCalendarEvents({ timeMin, timeMax });
+  const result = await getAllCalendarEvents({ timeMin, timeMax });
+  return result.events;
+}
+
+export interface CalendarFailure {
+  calendarId: string;
+  summary: string;
+  error: string;
+}
+
+export interface AllCalendarResult {
+  events: CalendarEvent[];
+  failedCalendars: CalendarFailure[];
 }
 
 export async function getAllCalendarEvents(opts: {
   timeMin: string;
   timeMax: string;
   maxResults?: number;
-}): Promise<CalendarEvent[]> {
+  allowPartial?: boolean;
+}): Promise<AllCalendarResult> {
   const calendars = await listCalendars();
   const allEvents: CalendarEvent[] = [];
-  let successes = 0;
-  let lastError: Error | null = null;
+  const failures: CalendarFailure[] = [];
   for (const cal of calendars) {
     try {
-      const events = await listEvents({ calendarId: cal.id, ...opts });
+      const events = await listEvents({ calendarId: cal.id, timeMin: opts.timeMin, timeMax: opts.timeMax, maxResults: opts.maxResults });
       allEvents.push(...events);
-      successes++;
     } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e));
+      failures.push({
+        calendarId: cal.id,
+        summary: cal.summary,
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
   }
-  if (successes === 0 && calendars.length > 0) {
-    throw lastError ?? new Error('All calendar reads failed but no error was captured');
+  if (failures.length > 0 && !opts.allowPartial) {
+    const failedNames = failures.map(f => f.summary || f.calendarId).join(', ');
+    throw new Error(`Calendar read failed for: ${failedNames}. Use allowPartial to accept incomplete results.`);
   }
   allEvents.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-  return allEvents;
+  return { events: allEvents, failedCalendars: failures };
 }
 
 export function formatEventsForTelegram(events: CalendarEvent[], date: string): string {
