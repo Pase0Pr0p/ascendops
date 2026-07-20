@@ -99,7 +99,7 @@ const TURN_PERMISSION_OVERRIDES = {
 // an agent's config.model=gpt-5-codex (the better executor) and resolveSafeModel
 // will pass it through. The DEFAULT must always be an entitled model — an earlier
 // gpt-5-codex default was an unproven assumption that 400'd; gpt-5.5 is proven.
-const SAFE_MODELS: readonly string[] = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5-codex'];
+const SAFE_MODELS: readonly string[] = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5-codex'];
 const DEFAULT_SAFE_MODEL = 'gpt-5.5';
 
 /**
