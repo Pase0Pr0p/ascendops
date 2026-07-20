@@ -1587,15 +1587,15 @@ const STATUS_TRANSITION_CONFIG: Record<WoStatusTransition, {
   label: string;
 }> = {
   work_done: {
-    actionPath: (srId, woId) => `/maintenance/service_requests/${srId}/actions/mark_work_done/${woId}`,
+    actionPath: (srId, woId) => `/maintenance/service_requests/${srId}/actions/mark_work_done/${woId}/mark_work_done`,
     expectedBadge: 'Work Done',
-    validFrom: /^(assigned|dispatched)$/i,
+    validFrom: /^(assigned|scheduled|waiting)$/i,
     label: 'Mark Work Done',
   },
   ready_to_bill: {
     actionPath: (srId, woId) => `/maintenance/service_requests/${srId}/actions/mark_ready_to_bill/${woId}/mark_ready_to_bill`,
     expectedBadge: 'Ready to Bill',
-    validFrom: /^(assigned|dispatched|work done)$/i,
+    validFrom: /^(assigned|scheduled|waiting|work done)$/i,
     label: 'Mark Ready to Bill',
   },
 };
@@ -1704,6 +1704,17 @@ async function transitionWoStatus(
     };
   }
 
+  const reVerifyCsrf = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let freshCsrf = '';
+  try {
+    let fc = reVerifyCsrf.output;
+    if (fc.startsWith('"') && fc.endsWith('"')) fc = JSON.parse(fc) as string;
+    freshCsrf = fc.trim();
+  } catch { /* */ }
+  if (freshCsrf && freshCsrf !== csrfToken) {
+    csrfToken = freshCsrf;
+  }
+
   const nonceResult = reserveStatusTransitionNonce(expectedHash);
   if (nonceResult === 'already_used') {
     try { ab('close'); } catch { /* */ }
@@ -1722,11 +1733,13 @@ async function transitionWoStatus(
 
   const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
   if (!submitOk) {
+    const noncePath = resolve(STATUS_TRANSITION_NONCE_DIR, expectedHash);
+    try { unlinkSync(noncePath); } catch { /* best-effort cleanup */ }
     try { ab('close'); } catch { /* */ }
     return {
       error: 'submit_failed',
-      hash_consumed: true,
-      message: `GET to ${config.label} failed but approval hash is consumed (once-only guard). Run a new dry-run for a fresh hash before retrying.`,
+      hash_consumed: false,
+      message: `${config.label} submit failed. Nonce released — re-run dry-run for a fresh hash to retry.`,
       submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
     };
   }
@@ -1746,7 +1759,7 @@ async function transitionWoStatus(
 
   try { ab('close'); } catch { /* */ }
 
-  const verified = finalStatus.toLowerCase().includes(config.expectedBadge.toLowerCase());
+  const verified = finalStatus.toLowerCase() === config.expectedBadge.toLowerCase();
 
   return {
     live: true,
