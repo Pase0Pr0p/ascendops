@@ -98,7 +98,7 @@ export async function listCalendars(): Promise<CalendarInfo[]> {
   }));
 }
 
-function pacificOffset(dateStr: string): string {
+export function pacificOffset(dateStr: string): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   const probe = new Date(Date.UTC(y, m - 1, d, 20, 0, 0));
   const laHour = parseInt(
