@@ -57,6 +57,16 @@ export function computeCloseWoApprovalHash(
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
+export function computeStatusTransitionHash(
+  srId: string, woId: string, targetStatus: string, currentStatus: string,
+  issuedAt: string,
+): string {
+  const payload = JSON.stringify({
+    srId, woId, targetStatus, currentStatus, issuedAt, action: 'status_transition',
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
 export function computeMessageApprovalHash(
   srId: string, woId: string, message: string, tenant: string,
   channel: string, recipientLabel: string, rowLabel: string,

@@ -17,6 +17,8 @@
  *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>] [--capture]
  *   npx tsx scripts/appfolio-browser-read.ts send-vendor-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts close-wo --wo <WO-number> [--date MM/DD/YYYY] [--remarks "<text>"] [--no-bill] [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts mark-work-done --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]
+ *   npx tsx scripts/appfolio-browser-read.ts mark-ready-to-bill --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]
  *   npx tsx scripts/appfolio-browser-read.ts photo-intake --wo <WO-number> [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
@@ -38,6 +40,7 @@ import {
   normalizeVendorName, vendorNameTokens, verifyVendorNameMatch,
   computeEmailApprovalHash, computeMessageApprovalHash,
   computeCloseWoApprovalHash,
+  computeStatusTransitionHash,
 } from './vendor-correspondence-utils.js';
 
 dotenvConfig({ path: resolve(process.cwd(), '../orgs/paseo-pm/secrets.env'), override: false });
@@ -1364,6 +1367,23 @@ function reserveCloseWoNonce(hash: string): 'reserved' | 'already_used' | 'error
   }
 }
 
+type WoStatusTransition = 'work_done' | 'ready_to_bill';
+
+const STATUS_TRANSITION_NONCE_DIR = resolve(process.cwd(), '.status-transition-nonces');
+
+function reserveStatusTransitionNonce(hash: string): 'reserved' | 'already_used' | 'error' {
+  try { mkdirSync(STATUS_TRANSITION_NONCE_DIR, { recursive: true }); } catch { return 'error'; }
+  const noncePath = resolve(STATUS_TRANSITION_NONCE_DIR, hash);
+  try {
+    const fd = openSync(noncePath, 'wx');
+    closeSync(fd);
+    return 'reserved';
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'already_used';
+    return 'error';
+  }
+}
+
 async function closeWorkOrder(
   woQuery: string,
   completedOn: string,
@@ -1555,6 +1575,261 @@ async function closeWorkOrder(
     remarks,
     no_bill: noBill,
     send_survey: false,
+    submit_result: submitJson,
+    hash_consumed: true,
+  };
+}
+
+const STATUS_TRANSITION_CONFIG: Record<WoStatusTransition, {
+  actionPath: (srId: string, woId: string) => string;
+  modalPath?: (srId: string, woId: string) => string;
+  formQuery?: string;
+  expectedBadge: string;
+  validFrom: RegExp;
+  label: string;
+}> = {
+  work_done: {
+    modalPath: (srId, woId) => `/maintenance/service_requests/${srId}/actions/mark_work_done/${woId}`,
+    actionPath: (srId, woId) => `/maintenance/service_requests/${srId}/actions/mark_work_done/${woId}/mark_work_done`,
+    formQuery: 'commit=Mark+Work+Done',
+    expectedBadge: 'Work Done',
+    validFrom: /^(assigned|scheduled|waiting)$/i,
+    label: 'Mark Work Done',
+  },
+  ready_to_bill: {
+    actionPath: (srId, woId) => `/maintenance/service_requests/${srId}/actions/mark_ready_to_bill/${woId}/mark_ready_to_bill`,
+    expectedBadge: 'Ready to Bill',
+    validFrom: /^(assigned|scheduled|waiting|work done)$/i,
+    label: 'Mark Ready to Bill',
+  },
+};
+
+async function transitionWoStatus(
+  woQuery: string,
+  transition: WoStatusTransition,
+  live: boolean,
+  approvalHash?: string,
+  issuedAt?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!WO_QUERY_RE.test(woQuery)) {
+    return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
+  }
+
+  const config = STATUS_TRANSITION_CONFIG[transition];
+  if (!config) {
+    return { error: 'invalid_transition', message: `Unknown transition "${transition}". Valid: work_done, ready_to_bill.` };
+  }
+
+  const woDetail = await readWorkOrder(woQuery, true);
+  if (woDetail.error) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      error: woDetail.error, message: woDetail.message,
+    };
+  }
+
+  const statusLower = (woDetail.status || '').toLowerCase();
+  if (/completed|canceled|cancelled/.test(statusLower)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      status: woDetail.status,
+      error: 'already_terminal', message: `WO is already "${woDetail.status}" — cannot transition to ${config.label}.`,
+    };
+  }
+
+  if (!config.validFrom.test(statusLower)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      status: woDetail.status,
+      error: 'invalid_current_status',
+      message: `WO status "${woDetail.status}" is not valid for ${config.label}. Expected: ${config.validFrom.source}.`,
+    };
+  }
+
+  const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let csrfToken = '';
+  try {
+    let ct = csrfResult.output;
+    if (ct.startsWith('"') && ct.endsWith('"')) ct = JSON.parse(ct) as string;
+    csrfToken = ct.trim();
+  } catch { /* stays empty */ }
+  if (!csrfToken) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
+  }
+
+  const actionUrl = `${APPFOLIO_URL}${config.actionPath(woDetail.sr_id, woDetail.wo_id)}`;
+  const dryRunIssuedAt = live ? (issuedAt || '') : new Date().toISOString();
+  const hashIssuedAt = live ? (issuedAt || '') : dryRunIssuedAt;
+  const expectedHash = computeStatusTransitionHash(woDetail.sr_id, woDetail.wo_id, transition, woDetail.status, hashIssuedAt);
+
+  if (!live) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      dry_run: true,
+      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> --issued-at <ts> only with chief + Albie greenlight.',
+      approval_hash: expectedHash,
+      issued_at: dryRunIssuedAt,
+      would_get: actionUrl,
+      csrf_token_extracted: true,
+      wo_page_verified: true,
+      transition,
+      label: config.label,
+      current_status: woDetail.status,
+      expected_status: config.expectedBadge,
+      params: {
+        sr_id: woDetail.sr_id,
+        wo_id: woDetail.wo_id,
+        wo_number: woDetail.wo_number,
+      },
+    };
+  }
+
+  if (!approvalHash) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash and --issued-at from a prior dry-run.' };
+  }
+  if (!issuedAt) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'missing_issued_at', message: 'Live execute requires --issued-at <timestamp> from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  const reVerifyStatus = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+  let currentStatus = '';
+  try {
+    let sv = reVerifyStatus.output;
+    if (sv.startsWith('"') && sv.endsWith('"')) sv = JSON.parse(sv) as string;
+    currentStatus = sv.trim();
+  } catch { /* */ }
+  if (/completed|canceled|cancelled/i.test(currentStatus)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      error: 'status_changed_before_submit', status: currentStatus,
+      message: `WO status changed to "${currentStatus}" between dry-run and execute. Fail closed.`,
+    };
+  }
+
+  const reVerifyCsrf = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let freshCsrf = '';
+  try {
+    let fc = reVerifyCsrf.output;
+    if (fc.startsWith('"') && fc.endsWith('"')) fc = JSON.parse(fc) as string;
+    freshCsrf = fc.trim();
+  } catch { /* */ }
+  if (freshCsrf && freshCsrf !== csrfToken) {
+    csrfToken = freshCsrf;
+  }
+
+  const nonceResult = reserveStatusTransitionNonce(expectedHash);
+  if (nonceResult === 'already_used') {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used. Run a new dry-run for a fresh hash.' };
+  }
+  if (nonceResult === 'error') {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
+  }
+
+  let submitResult: { ok: boolean; output: string };
+  if (config.modalPath) {
+    const modalUrl = `${APPFOLIO_URL}${config.modalPath(woDetail.sr_id, woDetail.wo_id)}`;
+    const modalScript = `fetch("${modalUrl}",{method:"GET",headers:{"X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest","Accept":"text/javascript, application/javascript, */*; q=0.01"}}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,body:t});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+    const modalResult = abEval(modalScript);
+
+    let modalJson: Record<string, unknown> = {};
+    try { let mi = modalResult.output; if (mi.startsWith('"') && mi.endsWith('"')) mi = JSON.parse(mi) as string; modalJson = JSON.parse(mi); } catch { /* */ }
+
+    const modalOk = modalResult.ok && (modalJson.ok === true || (typeof modalJson.status === 'number' && (modalJson.status as number) < 400));
+    if (!modalOk) {
+      const noncePath = resolve(STATUS_TRANSITION_NONCE_DIR, expectedHash);
+      const isModalNetworkFailure = !modalResult.ok || (typeof modalJson.error === 'string' && typeof modalJson.status === 'undefined');
+      if (isModalNetworkFailure) {
+        try { unlinkSync(noncePath); } catch { /* */ }
+      }
+      try { ab('close'); } catch { /* */ }
+      return {
+        error: 'modal_render_failed',
+        hash_consumed: !isModalNetworkFailure,
+        message: isModalNetworkFailure
+          ? `${config.label} modal render failed (network error). Nonce released — re-run dry-run to retry.`
+          : `${config.label} modal render failed (server error). Nonce consumed — verify WO status before retrying.`,
+      };
+    }
+
+    const modalBody = typeof modalJson.body === 'string' ? modalJson.body : '';
+    if (!modalBody.includes('edit_mark_work_done_form')) {
+      try { ab('close'); } catch { /* */ }
+      return {
+        error: 'modal_form_missing',
+        hash_consumed: true,
+        message: `${config.label} modal rendered but form not found in response. Nonce consumed — verify WO status before retrying.`,
+      };
+    }
+
+    const submitUrl = config.formQuery ? `${actionUrl}?${config.formQuery}` : actionUrl;
+    const formSubmitScript = `fetch("${submitUrl}",{method:"GET",headers:{"X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest","Accept":"text/javascript, application/javascript"}}).then(function(r){return r.text().then(function(){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+    submitResult = abEval(formSubmitScript);
+  } else {
+    const submitScript = `fetch("${actionUrl}",{method:"GET",headers:{"X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest","Accept":"text/javascript, application/javascript"}}).then(function(r){return r.text().then(function(){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+    submitResult = abEval(submitScript);
+  }
+
+  let submitJson: Record<string, unknown> = {};
+  try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
+
+  const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
+  const isNetworkFailure = !submitResult.ok || (typeof submitJson.error === 'string' && typeof submitJson.status === 'undefined');
+  if (!submitOk) {
+    if (isNetworkFailure) {
+      const noncePath = resolve(STATUS_TRANSITION_NONCE_DIR, expectedHash);
+      try { unlinkSync(noncePath); } catch { /* best-effort cleanup */ }
+    }
+    try { ab('close'); } catch { /* */ }
+    return {
+      error: 'submit_failed',
+      hash_consumed: !isNetworkFailure,
+      message: isNetworkFailure
+        ? `${config.label} failed (network error, no server contact). Nonce released — re-run dry-run to retry.`
+        : `${config.label} failed (server responded with error). Nonce consumed — mutation may have occurred. Verify WO status before retrying.`,
+      submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
+    };
+  }
+
+  abSafe('wait', '2000');
+  const woDetailUrl = `${APPFOLIO_URL}/maintenance/service_requests/${woDetail.sr_id}/work_orders/${woDetail.wo_id}`;
+  abSafe('open', woDetailUrl);
+  abSafe('wait', '--load', 'networkidle');
+
+  const postSubmitStatus = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+  let finalStatus = '';
+  try {
+    let fs = postSubmitStatus.output;
+    if (fs.startsWith('"') && fs.endsWith('"')) fs = JSON.parse(fs) as string;
+    finalStatus = fs.trim();
+  } catch { /* */ }
+
+  try { ab('close'); } catch { /* */ }
+
+  const verified = finalStatus.toLowerCase() === config.expectedBadge.toLowerCase();
+
+  return {
+    live: true,
+    verified,
+    sr_id: woDetail.sr_id,
+    wo_id: woDetail.wo_id,
+    wo_number: woDetail.wo_number,
+    transition,
+    label: config.label,
+    previous_status: woDetail.status,
+    final_status: finalStatus,
+    expected_status: config.expectedBadge,
     submit_result: submitJson,
     hash_consumed: true,
   };
@@ -4732,6 +5007,39 @@ async function main() {
       process.exit(resultCw.error || resultCw.verified === false ? 1 : 0);
       break;
     }
+    case 'mark-work-done':
+    case 'mark-ready-to-bill': {
+      const stWoIdx = cmdArgs.indexOf('--wo');
+      const stHashIdx = cmdArgs.indexOf('--approval-hash');
+      const stIssuedIdx = cmdArgs.indexOf('--issued-at');
+
+      if (stWoIdx === -1) {
+        console.error(`Usage: ${command} --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]`);
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> --issued-at <ts> only with chief + Albie greenlight.');
+        console.error('  INTERNAL: status transition does not auto-notify tenants/vendors.');
+        process.exit(1);
+      }
+      const stWoQuery = cmdArgs[stWoIdx + 1];
+      const stHashVal = stHashIdx !== -1 ? cmdArgs[stHashIdx + 1] : undefined;
+      const stIssuedAt = stIssuedIdx !== -1 ? cmdArgs[stIssuedIdx + 1] : undefined;
+
+      const consumedStIndices = new Set<number>();
+      if (stWoIdx !== -1) consumedStIndices.add(stWoIdx + 1);
+      if (stHashIdx !== -1) consumedStIndices.add(stHashIdx + 1);
+      if (stIssuedIdx !== -1) consumedStIndices.add(stIssuedIdx + 1);
+      const stLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedStIndices.has(i));
+
+      const stTransition: WoStatusTransition = command === 'mark-work-done' ? 'work_done' : 'ready_to_bill';
+
+      if (!stWoQuery) {
+        console.error(`${command}: --wo is required`);
+        process.exit(1);
+      }
+      const resultSt = await transitionWoStatus(stWoQuery, stTransition, stLive, stHashVal, stIssuedAt);
+      console.log(JSON.stringify(resultSt, null, 2));
+      process.exit(resultSt.error || resultSt.verified === false ? 1 : 0);
+      break;
+    }
     case 'photo-intake': {
       const piWoIdx = cmdArgs.indexOf('--wo');
       const piHashIdx = cmdArgs.indexOf('--approval-hash');
@@ -4786,6 +5094,10 @@ async function main() {
         '                                — send email to vendor; dry-run default, --execute + hash sends (GATED EXTERNAL)',
         '  close-wo --wo <WO-number> [--date MM/DD/YYYY] [--remarks "<text>"] [--no-bill] [--execute --approval-hash <hash>]',
         '                                — mark WO completed; dry-run default, --execute + hash submits PATCH (INTERNAL)',
+        '  mark-work-done --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]',
+        '                                — transition WO to Work Done (two-step modal); dry-run default, --execute + hash + issued-at fires GET (INTERNAL)',
+        '  mark-ready-to-bill --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]',
+        '                                — transition WO to Ready to Bill (direct); dry-run default, --execute + hash + issued-at fires GET (INTERNAL)',
         '  photo-intake --wo <WO-number> [--execute --approval-hash <hash>]',
         '                                — analyze inbound tenant photos via vision; dry-run default, --execute adds WO notes',
       ].join('\n'));
