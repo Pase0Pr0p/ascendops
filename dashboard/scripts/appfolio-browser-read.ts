@@ -2829,6 +2829,7 @@ interface PhotoIntakeResult {
     download_ok: boolean;
     vision?: VisionResult;
     note_added?: boolean;
+    already_posted?: boolean;
     error?: string;
   }>;
   error?: string;
@@ -3152,7 +3153,27 @@ async function photoIntake(woQuery: string, execute: boolean, approvalHash?: str
       const noteParams: AddNoteParams = { srId: storedPlan.sr_id, woId: storedPlan.wo_id, body: planned.body };
       const noteResult = await addWorkOrderNote(noteParams, true, planned.add_note_hash);
       const entry: PhotoIntakeResult['analyses'][number] = { url: planned.url, download_ok: true, vision: planned.vision };
-      if (noteResult.error) {
+      if (noteResult.error === 'hash_already_used') {
+        const woDetailUrl = `${APPFOLIO_URL}/maintenance/service_requests/${storedPlan.sr_id}/work_orders/${storedPlan.wo_id}`;
+        abSafe('open', APPFOLIO_URL);
+        abSafe('wait', '--load', 'networkidle');
+        abSafe('open', woDetailUrl);
+        abSafe('wait', '--load', 'networkidle');
+        const vr = abEval(`var nl=document.getElementById("notes-list");JSON.stringify({notes:nl?nl.textContent.trim().substring(0,4000):""})`);
+        let notesText = '';
+        try { let vi = vr.output; if (vi.startsWith('"') && vi.endsWith('"')) vi = JSON.parse(vi) as string; notesText = (JSON.parse(vi) as {notes:string}).notes; } catch { /* */ }
+        ab('close');
+        const bodySnippet = planned.body.substring(0, 40);
+        if (notesText.includes(bodySnippet)) {
+          entry.note_added = false;
+          entry.already_posted = true;
+          try { writeFileSync(postedMarker, ''); } catch { /* best-effort */ }
+        } else {
+          entry.error = 'note_failed: prior_post_unconfirmed';
+          entry.note_added = false;
+          noteFailed = true;
+        }
+      } else if (noteResult.error) {
         entry.error = `note_failed: ${noteResult.error}`;
         entry.note_added = false;
         noteFailed = true;
