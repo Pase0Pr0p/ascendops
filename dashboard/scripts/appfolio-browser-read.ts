@@ -16,6 +16,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts read-wo-messages <WO-number>
  *   npx tsx scripts/appfolio-browser-read.ts send-wo-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>] [--capture]
  *   npx tsx scripts/appfolio-browser-read.ts send-vendor-message --wo <WO-number> --message "<text>" [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts close-wo --wo <WO-number> [--date MM/DD/YYYY] [--remarks "<text>"] [--no-bill] [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts photo-intake --wo <WO-number> [--execute --approval-hash <hash>]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
@@ -36,6 +37,7 @@ import { tmpdir } from 'node:os';
 import {
   normalizeVendorName, vendorNameTokens, verifyVendorNameMatch,
   computeEmailApprovalHash, computeMessageApprovalHash,
+  computeCloseWoApprovalHash,
 } from './vendor-correspondence-utils.js';
 
 dotenvConfig({ path: resolve(process.cwd(), '../orgs/paseo-pm/secrets.env'), override: false });
@@ -1335,6 +1337,225 @@ async function addWorkOrderNote(
     final_url: String(submitJson.final_url ?? ''),
     submit_result: submitJson,
     verification,
+    hash_consumed: true,
+  };
+}
+
+interface CloseWorkOrderParams {
+  srId: string;
+  woId: string;
+  completedOn: string;
+  remarks: string;
+  noBill: boolean;
+}
+
+const CLOSE_WO_NONCE_DIR = resolve(process.cwd(), '.close-wo-nonces');
+
+function reserveCloseWoNonce(hash: string): 'reserved' | 'already_used' | 'error' {
+  try { mkdirSync(CLOSE_WO_NONCE_DIR, { recursive: true }); } catch { return 'error'; }
+  const noncePath = resolve(CLOSE_WO_NONCE_DIR, hash);
+  try {
+    const fd = openSync(noncePath, 'wx');
+    closeSync(fd);
+    return 'reserved';
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'already_used';
+    return 'error';
+  }
+}
+
+async function closeWorkOrder(
+  woQuery: string,
+  completedOn: string,
+  remarks: string,
+  noBill: boolean,
+  live: boolean,
+  approvalHash?: string,
+): Promise<{ error?: string; verified?: boolean; [key: string]: unknown }> {
+  if (!WO_QUERY_RE.test(woQuery)) {
+    return { error: 'invalid_query', message: `WO query must be digits with optional -N suffix (got "${woQuery.substring(0, 50)}").` };
+  }
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(completedOn)) {
+    return { error: 'invalid_date', message: `completedOn must be MM/DD/YYYY format (got "${completedOn}").` };
+  }
+  if (remarks.length > 140) {
+    return { error: 'remarks_too_long', message: `Remarks must be 140 characters or fewer (got ${remarks.length}).` };
+  }
+
+  const woDetail = await readWorkOrder(woQuery, true);
+  if (woDetail.error) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      error: woDetail.error, message: woDetail.message,
+    };
+  }
+
+  const statusLower = (woDetail.status || '').toLowerCase();
+  if (/completed|canceled|cancelled/.test(statusLower)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      status: woDetail.status,
+      error: 'already_terminal', message: `WO is already "${woDetail.status}" — cannot mark completed.`,
+    };
+  }
+
+  const csrfResult = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let csrfToken = '';
+  try {
+    let ct = csrfResult.output;
+    if (ct.startsWith('"') && ct.endsWith('"')) ct = JSON.parse(ct) as string;
+    csrfToken = ct.trim();
+  } catch { /* stays empty */ }
+  if (!csrfToken) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
+  }
+
+  const patchUrl = `${APPFOLIO_URL}/maintenance/service_requests/${woDetail.sr_id}/actions/mark_job_done/${woDetail.wo_id}`;
+  const formFields: Record<string, string> = {
+    'authenticity_token': csrfToken,
+    '_method': 'patch',
+    'mark_job_done_options[completed_on]': completedOn,
+    'mark_job_done_options[remarks]': remarks,
+    'mark_job_done_options[send_survey_to_tenants]': '0',
+    'mark_job_done_options[completed_no_bill]': noBill ? '1' : '0',
+  };
+
+  const params: CloseWorkOrderParams = {
+    srId: woDetail.sr_id,
+    woId: woDetail.wo_id,
+    completedOn,
+    remarks,
+    noBill,
+  };
+  const expectedHash = computeCloseWoApprovalHash(params.srId, params.woId, params.completedOn, params.remarks, params.noBill);
+
+  if (!live) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      dry_run: true,
+      guardrail: 'SUBMIT BLOCKED — default mode is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.',
+      approval_hash: expectedHash,
+      would_patch: patchUrl,
+      csrf_token_extracted: true,
+      csrf_token_prefix: csrfToken.slice(0, 8) + '…',
+      wo_page_verified: true,
+      current_status: woDetail.status,
+      params: {
+        sr_id: woDetail.sr_id,
+        wo_id: woDetail.wo_id,
+        wo_number: woDetail.wo_number,
+        completed_on: completedOn,
+        remarks,
+        no_bill: noBill,
+        send_survey: false,
+      },
+      field_map: formFields,
+    };
+  }
+
+  if (!approvalHash) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'missing_approval_hash', message: 'Live execute requires --approval-hash from a prior dry-run.' };
+  }
+  if (approvalHash !== expectedHash) {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'approval_hash_mismatch', provided: approvalHash, expected: expectedHash, message: 'Approval hash does not match current parameters. Re-run dry-run to get a fresh hash.' };
+  }
+
+  const reVerifyStatus = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+  let currentStatus = '';
+  try {
+    let sv = reVerifyStatus.output;
+    if (sv.startsWith('"') && sv.endsWith('"')) sv = JSON.parse(sv) as string;
+    currentStatus = sv.trim();
+  } catch { /* */ }
+  if (/completed|canceled|cancelled/i.test(currentStatus)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      error: 'status_changed_before_submit', status: currentStatus,
+      message: `WO status changed to "${currentStatus}" between dry-run and execute. Fail closed.`,
+    };
+  }
+
+  const reVerifyCsrf = abEval(`var m=document.querySelector("meta[name=csrf-token]");m?m.getAttribute("content"):""`);
+  let freshCsrf = '';
+  try {
+    let fc = reVerifyCsrf.output;
+    if (fc.startsWith('"') && fc.endsWith('"')) fc = JSON.parse(fc) as string;
+    freshCsrf = fc.trim();
+  } catch { /* */ }
+  if (freshCsrf && freshCsrf !== csrfToken) {
+    formFields['authenticity_token'] = freshCsrf;
+    csrfToken = freshCsrf;
+  }
+
+  const nonceResult = reserveCloseWoNonce(expectedHash);
+  if (nonceResult === 'already_used') {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'hash_already_used', approval_hash: expectedHash, message: 'This approval hash has already been used. Run a new dry-run for a fresh hash.' };
+  }
+  if (nonceResult === 'error') {
+    try { ab('close'); } catch { /* */ }
+    return { error: 'nonce_reserve_failed', message: 'Could not create nonce file for once-only guard.' };
+  }
+
+  const postBody = Object.entries(formFields)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+
+  const bodyLiteral = JSON.stringify(postBody);
+  const submitScript = `fetch("${patchUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral}}).then(function(r){return r.text().then(function(){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const submitResult = abEval(submitScript);
+
+  let submitJson: Record<string, unknown> = {};
+  try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
+
+  const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
+  if (!submitOk) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      error: 'submit_failed',
+      hash_consumed: true,
+      message: 'PATCH to mark_job_done failed but approval hash is consumed (once-only guard). Run a new dry-run for a fresh hash before retrying.',
+      submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
+    };
+  }
+
+  abSafe('wait', '2000');
+  const woDetailUrl = `${APPFOLIO_URL}/maintenance/service_requests/${woDetail.sr_id}/work_orders/${woDetail.wo_id}`;
+  abSafe('open', woDetailUrl);
+  abSafe('wait', '--load', 'networkidle');
+
+  const postSubmitStatus = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
+  let finalStatus = '';
+  try {
+    let fs = postSubmitStatus.output;
+    if (fs.startsWith('"') && fs.endsWith('"')) fs = JSON.parse(fs) as string;
+    finalStatus = fs.trim();
+  } catch { /* */ }
+
+  try { ab('close'); } catch { /* */ }
+
+  const expectedStatus = noBill ? 'Completed No Need to Bill' : 'Completed';
+  const verified = finalStatus.toLowerCase().includes('completed');
+
+  return {
+    live: true,
+    verified,
+    sr_id: woDetail.sr_id,
+    wo_id: woDetail.wo_id,
+    wo_number: woDetail.wo_number,
+    previous_status: woDetail.status,
+    final_status: finalStatus,
+    expected_status: expectedStatus,
+    completed_on: completedOn,
+    remarks,
+    no_bill: noBill,
+    send_survey: false,
+    submit_result: submitJson,
     hash_consumed: true,
   };
 }
@@ -4472,6 +4693,45 @@ async function main() {
       process.exit(result4c.error || result4c.verified === false ? 1 : 0);
       break;
     }
+    case 'close-wo': {
+      const cwWoIdx = cmdArgs.indexOf('--wo');
+      const cwDateIdx = cmdArgs.indexOf('--date');
+      const cwRemarksIdx = cmdArgs.indexOf('--remarks');
+      const cwHashIdx = cmdArgs.indexOf('--approval-hash');
+
+      if (cwWoIdx === -1) {
+        console.error('Usage: close-wo --wo <WO-number> [--date MM/DD/YYYY] [--remarks "<text>"] [--no-bill] [--execute --approval-hash <hash>]');
+        console.error('  Default is dry-run. Pass --execute --approval-hash <hash> only with chief + Albie greenlight.');
+        console.error('  --wo               WO number (required)');
+        console.error('  --date             Completion date in MM/DD/YYYY (default: today)');
+        console.error('  --remarks          Completion remarks, 140 char max');
+        console.error('  --no-bill          Set "Completed No Need to Bill" instead of "Completed"');
+        console.error('  --approval-hash    Hash from dry-run output (required with --execute)');
+        process.exit(1);
+      }
+      const cwWoQuery = cmdArgs[cwWoIdx + 1];
+      const cwHashVal = cwHashIdx !== -1 ? cmdArgs[cwHashIdx + 1] : undefined;
+
+      const consumedCwIndices = new Set<number>();
+      if (cwWoIdx !== -1) consumedCwIndices.add(cwWoIdx + 1);
+      if (cwDateIdx !== -1) consumedCwIndices.add(cwDateIdx + 1);
+      if (cwRemarksIdx !== -1) consumedCwIndices.add(cwRemarksIdx + 1);
+      if (cwHashIdx !== -1) consumedCwIndices.add(cwHashIdx + 1);
+      const cwLive = cmdArgs.some((arg, i) => arg === '--execute' && !consumedCwIndices.has(i));
+      const cwNoBill = cmdArgs.some((arg, i) => arg === '--no-bill' && !consumedCwIndices.has(i));
+
+      const cwDate = cwDateIdx !== -1 ? cmdArgs[cwDateIdx + 1] : new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
+      const cwRemarks = cwRemarksIdx !== -1 ? cmdArgs[cwRemarksIdx + 1] : '';
+
+      if (!cwWoQuery) {
+        console.error('close-wo: --wo is required');
+        process.exit(1);
+      }
+      const resultCw = await closeWorkOrder(cwWoQuery, cwDate, cwRemarks, cwNoBill, cwLive, cwHashVal);
+      console.log(JSON.stringify(resultCw, null, 2));
+      process.exit(resultCw.error || resultCw.verified === false ? 1 : 0);
+      break;
+    }
     case 'photo-intake': {
       const piWoIdx = cmdArgs.indexOf('--wo');
       const piHashIdx = cmdArgs.indexOf('--approval-hash');
@@ -4524,6 +4784,8 @@ async function main() {
         '                                — send SMS to vendor; dry-run default, --execute + hash sends (GATED EXTERNAL)',
         '  send-vendor-email --wo <WO-number> --subject "<text>" --message "<text>" [--execute --approval-hash <hash>]',
         '                                — send email to vendor; dry-run default, --execute + hash sends (GATED EXTERNAL)',
+        '  close-wo --wo <WO-number> [--date MM/DD/YYYY] [--remarks "<text>"] [--no-bill] [--execute --approval-hash <hash>]',
+        '                                — mark WO completed; dry-run default, --execute + hash submits PATCH (INTERNAL)',
         '  photo-intake --wo <WO-number> [--execute --approval-hash <hash>]',
         '                                — analyze inbound tenant photos via vision; dry-run default, --execute adds WO notes',
       ].join('\n'));

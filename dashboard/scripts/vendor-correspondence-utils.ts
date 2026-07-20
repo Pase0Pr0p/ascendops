@@ -47,6 +47,16 @@ export function computeEmailApprovalHash(
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
+export function computeCloseWoApprovalHash(
+  srId: string, woId: string, completedOn: string,
+  remarks: string, noBill: boolean,
+): string {
+  const payload = JSON.stringify({
+    srId, woId, completedOn, remarks, noBill,
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
 export function computeMessageApprovalHash(
   srId: string, woId: string, message: string, tenant: string,
   channel: string, recipientLabel: string, rowLabel: string,

@@ -5,6 +5,7 @@ import {
   verifyVendorNameMatch,
   computeEmailApprovalHash,
   computeMessageApprovalHash,
+  computeCloseWoApprovalHash,
 } from '../vendor-correspondence-utils.js';
 
 describe('normalizeVendorName', () => {
@@ -421,6 +422,105 @@ describe('computeMessageApprovalHash', () => {
       baseArgs.channel, baseArgs.recipientLabel, baseArgs.rowLabel,
       baseArgs.formAction, baseArgs.formMethod, baseArgs.textareaName,
       baseArgs.hiddenFieldNames, baseArgs.endpointContractHash,
+    );
+    expect(h1).not.toBe(h2);
+  });
+});
+
+describe('computeCloseWoApprovalHash', () => {
+  const baseArgs = {
+    srId: '8046', woId: '8286', completedOn: '07/19/2026',
+    remarks: 'Work verified complete', noBill: false,
+  };
+
+  it('returns a 16-char hex string', () => {
+    const hash = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    expect(hash).toMatch(/^[a-f0-9]{16}$/);
+  });
+
+  it('is deterministic', () => {
+    const h1 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    const h2 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    expect(h1).toBe(h2);
+  });
+
+  it('changes when completedOn changes', () => {
+    const h1 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    const h2 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, '01/01/2026',
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when remarks change', () => {
+    const h1 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    const h2 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      'Different remarks', baseArgs.noBill,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when noBill toggles', () => {
+    const h1 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, false,
+    );
+    const h2 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, true,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when WO IDs change', () => {
+    const h1 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    const h2 = computeCloseWoApprovalHash(
+      '9999', '9999', baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('changes when srId changes independently of woId', () => {
+    const h1 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    const h2 = computeCloseWoApprovalHash(
+      '9999', baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('empty remarks produces different hash from non-empty', () => {
+    const h1 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      '', baseArgs.noBill,
+    );
+    const h2 = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
     );
     expect(h1).not.toBe(h2);
   });
