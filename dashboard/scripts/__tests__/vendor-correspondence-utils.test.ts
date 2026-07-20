@@ -530,75 +530,88 @@ describe('computeCloseWoApprovalHash', () => {
 describe('computeStatusTransitionHash', () => {
   const baseArgs = {
     srId: '8046', woId: '8286', targetStatus: 'work_done', currentStatus: 'Assigned',
+    issuedAt: '2026-07-19T12:00:00.000Z',
   };
 
   it('returns a 16-char hex string', () => {
     const hash = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     expect(hash).toMatch(/^[a-f0-9]{16}$/);
   });
 
-  it('is deterministic', () => {
+  it('is deterministic for the same issuedAt', () => {
     const h1 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     const h2 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     expect(h1).toBe(h2);
   });
 
   it('changes when targetStatus changes', () => {
     const h1 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, 'work_done', baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, 'work_done', baseArgs.currentStatus, baseArgs.issuedAt,
     );
     const h2 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, 'ready_to_bill', baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, 'ready_to_bill', baseArgs.currentStatus, baseArgs.issuedAt,
     );
     expect(h1).not.toBe(h2);
   });
 
   it('changes when currentStatus changes', () => {
     const h1 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, 'Assigned',
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, 'Assigned', baseArgs.issuedAt,
     );
     const h2 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, 'Dispatched',
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, 'Dispatched', baseArgs.issuedAt,
     );
     expect(h1).not.toBe(h2);
   });
 
   it('changes when WO IDs change', () => {
     const h1 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     const h2 = computeStatusTransitionHash(
-      '9999', '9999', baseArgs.targetStatus, baseArgs.currentStatus,
+      '9999', '9999', baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     expect(h1).not.toBe(h2);
   });
 
   it('changes when srId changes independently of woId', () => {
     const h1 = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     const h2 = computeStatusTransitionHash(
-      '9999', baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      '9999', baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     expect(h1).not.toBe(h2);
   });
 
-  it('includes action field to namespace from other hash types', () => {
+  it('changes when issuedAt changes (fresh hash per dry-run)', () => {
+    const h1 = computeStatusTransitionHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      '2026-07-19T12:00:00.000Z',
+    );
+    const h2 = computeStatusTransitionHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      '2026-07-19T12:00:01.000Z',
+    );
+    expect(h1).not.toBe(h2);
+  });
+
+  it('includes action and issuedAt fields in hash payload', () => {
     const { createHash } = require('crypto');
     const withAction = JSON.stringify({
       srId: baseArgs.srId, woId: baseArgs.woId,
       targetStatus: baseArgs.targetStatus, currentStatus: baseArgs.currentStatus,
-      action: 'status_transition',
+      issuedAt: baseArgs.issuedAt, action: 'status_transition',
     });
     const expected = createHash('sha256').update(withAction).digest('hex').slice(0, 16);
     const actual = computeStatusTransitionHash(
-      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus,
+      baseArgs.srId, baseArgs.woId, baseArgs.targetStatus, baseArgs.currentStatus, baseArgs.issuedAt,
     );
     expect(actual).toBe(expected);
   });

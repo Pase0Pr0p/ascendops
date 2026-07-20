@@ -59,9 +59,10 @@ export function computeCloseWoApprovalHash(
 
 export function computeStatusTransitionHash(
   srId: string, woId: string, targetStatus: string, currentStatus: string,
+  issuedAt: string,
 ): string {
   const payload = JSON.stringify({
-    srId, woId, targetStatus, currentStatus, action: 'status_transition',
+    srId, woId, targetStatus, currentStatus, issuedAt, action: 'status_transition',
   });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
