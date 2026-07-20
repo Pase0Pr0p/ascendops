@@ -19,7 +19,7 @@
  *   npx tsx scripts/appfolio-browser-read.ts close-wo --wo <WO-number> [--date MM/DD/YYYY] [--remarks "<text>"] [--no-bill] [--execute --approval-hash <hash>]
  *   npx tsx scripts/appfolio-browser-read.ts mark-work-done --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]
  *   npx tsx scripts/appfolio-browser-read.ts mark-ready-to-bill --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]
- *   npx tsx scripts/appfolio-browser-read.ts photo-intake --wo <WO-number> [--execute --approval-hash <hash>]
+ *   npx tsx scripts/appfolio-browser-read.ts photo-intake --wo <WO-number> [--execute --approval-hash <hash>] [--auto]
  *
  * Session: persistent, keyed to 'appfolio-ops'. Established once by attended login;
  * subsequent runs restore automatically without human input.
@@ -5044,12 +5044,14 @@ async function main() {
       const piWoIdx = cmdArgs.indexOf('--wo');
       const piHashIdx = cmdArgs.indexOf('--approval-hash');
       const piExecute = cmdArgs.includes('--execute');
+      const piAuto = cmdArgs.includes('--auto');
       const piHashVal = piHashIdx !== -1 ? cmdArgs[piHashIdx + 1] : undefined;
 
       if (piWoIdx === -1) {
-        console.error('Usage: photo-intake --wo <WO-number> [--execute --approval-hash <hash>]');
+        console.error('Usage: photo-intake --wo <WO-number> [--execute --approval-hash <hash>] [--auto]');
         console.error('  Reads inbound tenant photos, runs vision analysis, adds note with findings.');
         console.error('  Default is dry-run (analyze only). --execute adds notes to the WO.');
+        console.error('  --auto: dry-run then auto-execute in one step (no human approval gate).');
         process.exit(1);
       }
       const piWoQuery = cmdArgs[piWoIdx + 1];
@@ -5057,9 +5059,29 @@ async function main() {
         console.error('photo-intake: --wo is required');
         process.exit(1);
       }
-      const result5 = await photoIntake(piWoQuery, piExecute, piHashVal);
-      console.log(JSON.stringify(result5, null, 2));
-      process.exit(result5.error ? 1 : 0);
+
+      if (piAuto) {
+        const dryResult = await photoIntake(piWoQuery, false);
+        const dryAny = dryResult as PhotoIntakeResult & { dry_run?: boolean; approval_hash?: string };
+        if (dryResult.error || !dryAny.approval_hash) {
+          console.log(JSON.stringify(dryResult, null, 2));
+          process.exit(dryResult.error ? 1 : 0);
+          break;
+        }
+        const plannedCount = (dryResult.analyses ?? []).filter(a => a.vision && a.vision.confidence !== 'low').length;
+        if (plannedCount === 0) {
+          console.log(JSON.stringify(dryResult, null, 2));
+          process.exit(0);
+          break;
+        }
+        const execResult = await photoIntake(piWoQuery, true, dryAny.approval_hash);
+        console.log(JSON.stringify({ ...execResult, auto: true, dry_run_hash: dryAny.approval_hash }, null, 2));
+        process.exit(execResult.error ? 1 : 0);
+      } else {
+        const result5 = await photoIntake(piWoQuery, piExecute, piHashVal);
+        console.log(JSON.stringify(result5, null, 2));
+        process.exit(result5.error ? 1 : 0);
+      }
       break;
     }
     default: {
@@ -5098,8 +5120,8 @@ async function main() {
         '                                — transition WO to Work Done (two-step modal); dry-run default, --execute + hash + issued-at fires GET (INTERNAL)',
         '  mark-ready-to-bill --wo <WO-number> [--execute --approval-hash <hash> --issued-at <ts>]',
         '                                — transition WO to Ready to Bill (direct); dry-run default, --execute + hash + issued-at fires GET (INTERNAL)',
-        '  photo-intake --wo <WO-number> [--execute --approval-hash <hash>]',
-        '                                — analyze inbound tenant photos via vision; dry-run default, --execute adds WO notes',
+        '  photo-intake --wo <WO-number> [--execute --approval-hash <hash>] [--auto]',
+        '                                — analyze inbound tenant photos via vision; dry-run default, --execute adds WO notes, --auto chains both',
       ].join('\n'));
       process.exit(1);
     }
