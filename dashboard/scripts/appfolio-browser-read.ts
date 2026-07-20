@@ -1732,14 +1732,19 @@ async function transitionWoStatus(
   try { let si = submitResult.output; if (si.startsWith('"') && si.endsWith('"')) si = JSON.parse(si) as string; submitJson = JSON.parse(si); } catch { /* use raw */ }
 
   const submitOk = submitResult.ok && (submitJson.ok === true || (typeof submitJson.status === 'number' && (submitJson.status as number) < 400));
+  const isNetworkFailure = !submitResult.ok || (typeof submitJson.error === 'string' && typeof submitJson.status === 'undefined');
   if (!submitOk) {
-    const noncePath = resolve(STATUS_TRANSITION_NONCE_DIR, expectedHash);
-    try { unlinkSync(noncePath); } catch { /* best-effort cleanup */ }
+    if (isNetworkFailure) {
+      const noncePath = resolve(STATUS_TRANSITION_NONCE_DIR, expectedHash);
+      try { unlinkSync(noncePath); } catch { /* best-effort cleanup */ }
+    }
     try { ab('close'); } catch { /* */ }
     return {
       error: 'submit_failed',
-      hash_consumed: false,
-      message: `${config.label} submit failed. Nonce released — re-run dry-run for a fresh hash to retry.`,
+      hash_consumed: !isNetworkFailure,
+      message: isNetworkFailure
+        ? `${config.label} failed (network error, no server contact). Nonce released — re-run dry-run to retry.`
+        : `${config.label} failed (server responded with error). Nonce consumed — mutation may have occurred. Verify WO status before retrying.`,
       submit_result: Object.keys(submitJson).length ? submitJson : submitResult.output,
     };
   }
