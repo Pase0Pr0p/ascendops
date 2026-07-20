@@ -98,21 +98,36 @@ export async function listCalendars(): Promise<CalendarInfo[]> {
   }));
 }
 
-export function pacificOffset(dateStr: string): string {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const probe = new Date(Date.UTC(y, m - 1, d, 20, 0, 0));
+function offsetAtUtcHour(y: number, m: number, d: number, utcHour: number): number {
+  const probe = new Date(Date.UTC(y, m - 1, d, utcHour, 0, 0));
   const laHour = parseInt(
     probe.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }),
     10,
   );
-  const hours = 20 - laHour;
+  return utcHour - (laHour === 24 ? 0 : laHour);
+}
+
+function formatOffset(hours: number): string {
   return `-${String(hours).padStart(2, '0')}:00`;
 }
 
+export function pacificOffset(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return formatOffset(offsetAtUtcHour(y, m, d, 20));
+}
+
+export function pacificDayBounds(dateStr: string): { timeMin: string; timeMax: string } {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const startOffset = offsetAtUtcHour(y, m, d, 8);
+  const endOffset = offsetAtUtcHour(y, m, d, 20);
+  return {
+    timeMin: `${dateStr}T00:00:00${formatOffset(startOffset)}`,
+    timeMax: `${dateStr}T23:59:59${formatOffset(endOffset)}`,
+  };
+}
+
 export async function getDayEvents(date: string, calendarId?: string): Promise<CalendarEvent[]> {
-  const offset = pacificOffset(date);
-  const timeMin = `${date}T00:00:00${offset}`;
-  const timeMax = `${date}T23:59:59${offset}`;
+  const { timeMin, timeMax } = pacificDayBounds(date);
   if (calendarId) {
     return listEvents({ calendarId, timeMin, timeMax });
   }

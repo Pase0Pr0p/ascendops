@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { pacificOffset } from '../calendar';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { pacificOffset, pacificDayBounds } from '../calendar';
 
 describe('pacificOffset', () => {
   it('returns -07:00 during PDT (summer)', () => {
@@ -10,11 +10,11 @@ describe('pacificOffset', () => {
     expect(pacificOffset('2026-12-15')).toBe('-08:00');
   });
 
-  it('returns -07:00 the day after spring-forward (Mar 8 2026)', () => {
+  it('returns -07:00 the day after spring-forward (Mar 9 2026)', () => {
     expect(pacificOffset('2026-03-09')).toBe('-07:00');
   });
 
-  it('returns -08:00 the day after fall-back (Nov 1 2026)', () => {
+  it('returns -08:00 the day after fall-back (Nov 2 2026)', () => {
     expect(pacificOffset('2026-11-02')).toBe('-08:00');
   });
 
@@ -24,6 +24,32 @@ describe('pacificOffset', () => {
 
   it('returns -07:00 on Jun 21 (summer solstice)', () => {
     expect(pacificOffset('2026-06-21')).toBe('-07:00');
+  });
+});
+
+describe('pacificDayBounds', () => {
+  it('uses same offset for normal summer day', () => {
+    const bounds = pacificDayBounds('2026-07-15');
+    expect(bounds.timeMin).toBe('2026-07-15T00:00:00-07:00');
+    expect(bounds.timeMax).toBe('2026-07-15T23:59:59-07:00');
+  });
+
+  it('uses same offset for normal winter day', () => {
+    const bounds = pacificDayBounds('2026-12-15');
+    expect(bounds.timeMin).toBe('2026-12-15T00:00:00-08:00');
+    expect(bounds.timeMax).toBe('2026-12-15T23:59:59-08:00');
+  });
+
+  it('uses independent offsets on spring-forward day (Mar 8 2026)', () => {
+    const bounds = pacificDayBounds('2026-03-08');
+    expect(bounds.timeMin).toBe('2026-03-08T00:00:00-08:00');
+    expect(bounds.timeMax).toBe('2026-03-08T23:59:59-07:00');
+  });
+
+  it('uses independent offsets on fall-back day (Nov 1 2026)', () => {
+    const bounds = pacificDayBounds('2026-11-01');
+    expect(bounds.timeMin).toBe('2026-11-01T00:00:00-07:00');
+    expect(bounds.timeMax).toBe('2026-11-01T23:59:59-08:00');
   });
 });
 
