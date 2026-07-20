@@ -72,11 +72,64 @@ export async function listEvents(opts: {
   });
 }
 
-export async function getDayEvents(date: string): Promise<CalendarEvent[]> {
-  // date: YYYY-MM-DD in PT
+export interface CalendarInfo {
+  id: string;
+  summary: string;
+  primary: boolean;
+}
+
+export async function listCalendars(): Promise<CalendarInfo[]> {
+  const token = await mintPamelaToken(CALENDAR_SCOPE);
+  const res = await fetch(`${CALENDAR_API}/users/me/calendarList`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    if (res.status === 403 && err.includes('has not been used in project')) {
+      throw new Error('Calendar API not enabled in GCP project. Rob must enable it at console.developers.google.com.');
+    }
+    throw new Error(`Calendar API error (${res.status}) /users/me/calendarList: ${err.slice(0, 200)}`);
+  }
+  const data = await res.json() as { items?: Array<Record<string, unknown>> };
+  return (data.items ?? []).map(c => ({
+    id: c.id as string ?? '',
+    summary: c.summary as string ?? '',
+    primary: c.primary as boolean ?? false,
+  }));
+}
+
+export async function getDayEvents(date: string, calendarId?: string): Promise<CalendarEvent[]> {
   const timeMin = `${date}T00:00:00-07:00`;
   const timeMax = `${date}T23:59:59-07:00`;
-  return listEvents({ timeMin, timeMax });
+  if (calendarId) {
+    return listEvents({ calendarId, timeMin, timeMax });
+  }
+  return getAllCalendarEvents({ timeMin, timeMax });
+}
+
+export async function getAllCalendarEvents(opts: {
+  timeMin: string;
+  timeMax: string;
+  maxResults?: number;
+}): Promise<CalendarEvent[]> {
+  const calendars = await listCalendars();
+  const allEvents: CalendarEvent[] = [];
+  let successes = 0;
+  let lastError: Error | null = null;
+  for (const cal of calendars) {
+    try {
+      const events = await listEvents({ calendarId: cal.id, ...opts });
+      allEvents.push(...events);
+      successes++;
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
+    }
+  }
+  if (successes === 0 && calendars.length > 0) {
+    throw lastError ?? new Error('All calendar reads failed but no error was captured');
+  }
+  allEvents.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+  return allEvents;
 }
 
 export function formatEventsForTelegram(events: CalendarEvent[], date: string): string {
