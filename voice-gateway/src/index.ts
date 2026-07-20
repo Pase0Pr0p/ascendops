@@ -235,19 +235,22 @@ async function handleLookupRecord(
 
   // Resolve caller identity — check caller_sessions cache, then voice_resolve_caller
   let resolved: Record<string, unknown> | null = null;
+  let resolverFailed = false;
   if (callerNumber) {
     const cacheHit = await pool.query(
       `SELECT resolved FROM caller_sessions WHERE phone_e164 = $1 AND expires_at > now() LIMIT 1`,
       [callerNumber],
-    ).catch(() => null);
+    ).catch(() => { resolverFailed = true; return null; });
 
     if (cacheHit?.rows[0]) {
       resolved = cacheHit.rows[0].resolved as Record<string, unknown>;
+      resolverFailed = false;
     } else {
+      resolverFailed = false;
       const resolveRow = await pool.query(
         `SELECT voice_resolve_caller($1) AS r`,
         [callerNumber],
-      ).catch(() => null);
+      ).catch(() => { resolverFailed = true; return null; });
       resolved = resolveRow?.rows[0]?.r as Record<string, unknown> | null;
 
       // Upsert into caller_sessions on match
@@ -278,6 +281,9 @@ async function handleLookupRecord(
   // ONLY hard gate: account financial data (balance/payment/lease/deposit) requires verified identity.
   // Everything else: serve by intent. Post-call routing handles Max/Lexi/Anna dispatch from conversation content.
   if (!resolved?.['matched']) {
+    if (resolverFailed && query === 'work_order_status') {
+      return sendResult("I wasn't able to check your work order status right now. Let me take a message and have someone follow up with you.");
+    }
     if (query === 'balance') {
       // Hard gate: financial data needs verified identity regardless of who is calling
       await pool.query(
@@ -460,9 +466,9 @@ async function handleLookupRecord(
           if (!verified || !scheduledStart) return 'scheduled with a technician';
           const d = new Date(scheduledStart);
           const dateStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' });
-          return `scheduled for ${dateStr}`;
+          return `scheduled for around ${dateStr}, though the vendor may have arranged a different time with you directly`;
         }
-        case 'in_progress': return 'currently being worked on';
+        case 'in_progress': return 'being worked on';
         case 'on_hold': return 'on hold — we\'ll follow up with you';
         default: return 'in progress';
       }
@@ -476,13 +482,13 @@ async function handleLookupRecord(
     if (wos.length === 1) {
       const wo = wos[0];
       return sendResult(
-        `You have an open work order for ${issueLabel(wo)}. It's currently ${statusPhrase(wo.status, wo.scheduled_start)}. Is there anything else I can help with?`,
+        `You have an open work order for ${issueLabel(wo)}. Based on our records, it's currently ${statusPhrase(wo.status, wo.scheduled_start)}. Is there anything else I can help with?`,
       );
     }
 
     const lines = wos.map((wo, i) => {
       const ordinal = i === 0 ? 'first' : i === 1 ? 'second' : i === 2 ? 'third' : `number ${i + 1}`;
-      return `The ${ordinal} is for ${issueLabel(wo)} — ${statusPhrase(wo.status, wo.scheduled_start)}.`;
+      return `The ${ordinal} is for ${issueLabel(wo)} — based on our records, ${statusPhrase(wo.status, wo.scheduled_start)}.`;
     });
     return sendResult(
       `You have ${wos.length} open work orders. ${lines.join(' ')} Would you like more details on any of these?`,
