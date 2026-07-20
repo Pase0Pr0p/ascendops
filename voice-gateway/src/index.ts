@@ -235,19 +235,22 @@ async function handleLookupRecord(
 
   // Resolve caller identity — check caller_sessions cache, then voice_resolve_caller
   let resolved: Record<string, unknown> | null = null;
+  let resolverFailed = false;
   if (callerNumber) {
     const cacheHit = await pool.query(
       `SELECT resolved FROM caller_sessions WHERE phone_e164 = $1 AND expires_at > now() LIMIT 1`,
       [callerNumber],
-    ).catch(() => null);
+    ).catch(() => { resolverFailed = true; return null; });
 
     if (cacheHit?.rows[0]) {
       resolved = cacheHit.rows[0].resolved as Record<string, unknown>;
+      resolverFailed = false;
     } else {
+      resolverFailed = false;
       const resolveRow = await pool.query(
         `SELECT voice_resolve_caller($1) AS r`,
         [callerNumber],
-      ).catch(() => null);
+      ).catch(() => { resolverFailed = true; return null; });
       resolved = resolveRow?.rows[0]?.r as Record<string, unknown> | null;
 
       // Upsert into caller_sessions on match
@@ -278,6 +281,9 @@ async function handleLookupRecord(
   // ONLY hard gate: account financial data (balance/payment/lease/deposit) requires verified identity.
   // Everything else: serve by intent. Post-call routing handles Max/Lexi/Anna dispatch from conversation content.
   if (!resolved?.['matched']) {
+    if (resolverFailed && query === 'work_order_status') {
+      return sendResult("I wasn't able to check your work order status right now. Let me take a message and have someone follow up with you.");
+    }
     if (query === 'balance') {
       // Hard gate: financial data needs verified identity regardless of who is calling
       await pool.query(
@@ -412,6 +418,80 @@ async function handleLookupRecord(
     const asOfStr = as_of ? new Date(as_of).toLocaleDateString('en-US', { month: 'long', day: 'numeric' }) : 'recently';
     return sendResult(
       `Our records show a balance of ${amt} as of ${asOfStr}. If you've made a payment recently it may not yet be reflected — please allow a few business days for processing. Would you like me to connect you with our accounting team?`,
+    );
+  }
+
+  if (query === 'work_order_status') {
+    const unitId = resolved['unit_id'] as string | null;
+    if (!unitId) {
+      return sendResult("I wasn't able to find an active unit for your account. Let me connect you with our team to check on your work order.");
+    }
+
+    const woResult = await pool.query<{
+      work_order_issue: string | null;
+      job_description: string | null;
+      status: string;
+      scheduled_start: string | null;
+    }>(
+      `SELECT work_order_issue, job_description, status::text, scheduled_start::text
+       FROM work_orders
+       WHERE unit_id = $1 AND status NOT IN ('completed', 'canceled')
+       ORDER BY
+         CASE priority::text
+           WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
+         END,
+         created_at_appfolio DESC NULLS LAST
+       LIMIT 5`,
+      [unitId],
+    ).catch(() => null);
+
+    if (!woResult) {
+      return sendResult("I wasn't able to check your work order status right now. Let me take a message and have someone follow up with you.");
+    }
+
+    const wos = woResult.rows;
+    if (wos.length === 0) {
+      return sendResult("I don't see any open work orders for your unit right now. Would you like to report a maintenance issue?");
+    }
+
+    const verified = autoVerified || (
+      (spokenDob || spokenMoveIn) ? (await runSpokenVerify()).verified : false
+    );
+
+    const statusPhrase = (status: string, scheduledStart: string | null): string => {
+      switch (status) {
+        case 'new': return 'being reviewed by our team';
+        case 'assigned': return 'assigned to a technician';
+        case 'scheduled': {
+          if (!verified || !scheduledStart) return 'scheduled with a technician';
+          const d = new Date(scheduledStart);
+          const dateStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' });
+          return `scheduled for around ${dateStr}, though the vendor may have arranged a different time with you directly`;
+        }
+        case 'in_progress': return 'being worked on';
+        case 'on_hold': return 'on hold — we\'ll follow up with you';
+        default: return 'in progress';
+      }
+    };
+
+    const issueLabel = (wo: typeof wos[number]): string => {
+      const desc = (wo.work_order_issue || wo.job_description || '').trim();
+      return desc || 'a maintenance request';
+    };
+
+    if (wos.length === 1) {
+      const wo = wos[0];
+      return sendResult(
+        `You have an open work order for ${issueLabel(wo)}. Based on our records, it's currently ${statusPhrase(wo.status, wo.scheduled_start)}. Is there anything else I can help with?`,
+      );
+    }
+
+    const lines = wos.map((wo, i) => {
+      const ordinal = i === 0 ? 'first' : i === 1 ? 'second' : i === 2 ? 'third' : `number ${i + 1}`;
+      return `The ${ordinal} is for ${issueLabel(wo)} — based on our records, ${statusPhrase(wo.status, wo.scheduled_start)}.`;
+    });
+    return sendResult(
+      `You have ${wos.length} open work orders. ${lines.join(' ')} Would you like more details on any of these?`,
     );
   }
 
