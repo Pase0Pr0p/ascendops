@@ -415,6 +415,80 @@ async function handleLookupRecord(
     );
   }
 
+  if (query === 'work_order_status') {
+    const unitId = resolved['unit_id'] as string | null;
+    if (!unitId) {
+      return sendResult("I wasn't able to find an active unit for your account. Let me connect you with our team to check on your work order.");
+    }
+
+    const woResult = await pool.query<{
+      work_order_issue: string | null;
+      job_description: string | null;
+      status: string;
+      scheduled_start: string | null;
+    }>(
+      `SELECT work_order_issue, job_description, status::text, scheduled_start::text
+       FROM work_orders
+       WHERE unit_id = $1 AND status NOT IN ('completed', 'canceled')
+       ORDER BY
+         CASE priority::text
+           WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
+         END,
+         created_at_appfolio DESC NULLS LAST
+       LIMIT 5`,
+      [unitId],
+    ).catch(() => null);
+
+    if (!woResult) {
+      return sendResult("I wasn't able to check your work order status right now. Let me take a message and have someone follow up with you.");
+    }
+
+    const wos = woResult.rows;
+    if (wos.length === 0) {
+      return sendResult("I don't see any open work orders for your unit right now. Would you like to report a maintenance issue?");
+    }
+
+    const verified = autoVerified || (
+      (spokenDob || spokenMoveIn) ? (await runSpokenVerify()).verified : false
+    );
+
+    const statusPhrase = (status: string, scheduledStart: string | null): string => {
+      switch (status) {
+        case 'new': return 'being reviewed by our team';
+        case 'assigned': return 'assigned to a technician';
+        case 'scheduled': {
+          if (!verified || !scheduledStart) return 'scheduled with a technician';
+          const d = new Date(scheduledStart);
+          const dateStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' });
+          return `scheduled for ${dateStr}`;
+        }
+        case 'in_progress': return 'currently being worked on';
+        case 'on_hold': return 'on hold — we\'ll follow up with you';
+        default: return 'in progress';
+      }
+    };
+
+    const issueLabel = (wo: typeof wos[number]): string => {
+      const desc = (wo.work_order_issue || wo.job_description || '').trim();
+      return desc || 'a maintenance request';
+    };
+
+    if (wos.length === 1) {
+      const wo = wos[0];
+      return sendResult(
+        `You have an open work order for ${issueLabel(wo)}. It's currently ${statusPhrase(wo.status, wo.scheduled_start)}. Is there anything else I can help with?`,
+      );
+    }
+
+    const lines = wos.map((wo, i) => {
+      const ordinal = i === 0 ? 'first' : i === 1 ? 'second' : i === 2 ? 'third' : `number ${i + 1}`;
+      return `The ${ordinal} is for ${issueLabel(wo)} — ${statusPhrase(wo.status, wo.scheduled_start)}.`;
+    });
+    return sendResult(
+      `You have ${wos.length} open work orders. ${lines.join(' ')} Would you like more details on any of these?`,
+    );
+  }
+
   if (query === 'request_handoff') {
     // Write handoff_request to voice_events for async pickup (claudia fast-checker sends Telegram alert)
     await pool.query(
