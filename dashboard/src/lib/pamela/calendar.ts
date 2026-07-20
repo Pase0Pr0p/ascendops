@@ -72,11 +72,107 @@ export async function listEvents(opts: {
   });
 }
 
-export async function getDayEvents(date: string): Promise<CalendarEvent[]> {
-  // date: YYYY-MM-DD in PT
-  const timeMin = `${date}T00:00:00-07:00`;
-  const timeMax = `${date}T23:59:59-07:00`;
-  return listEvents({ timeMin, timeMax });
+export interface CalendarInfo {
+  id: string;
+  summary: string;
+  primary: boolean;
+}
+
+export async function listCalendars(): Promise<CalendarInfo[]> {
+  const token = await mintPamelaToken(CALENDAR_SCOPE);
+  const res = await fetch(`${CALENDAR_API}/users/me/calendarList`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    if (res.status === 403 && err.includes('has not been used in project')) {
+      throw new Error('Calendar API not enabled in GCP project. Rob must enable it at console.developers.google.com.');
+    }
+    throw new Error(`Calendar API error (${res.status}) /users/me/calendarList: ${err.slice(0, 200)}`);
+  }
+  const data = await res.json() as { items?: Array<Record<string, unknown>> };
+  return (data.items ?? []).map(c => ({
+    id: c.id as string ?? '',
+    summary: c.summary as string ?? '',
+    primary: c.primary as boolean ?? false,
+  }));
+}
+
+function offsetAtUtcHour(y: number, m: number, d: number, utcHour: number): number {
+  const probe = new Date(Date.UTC(y, m - 1, d, utcHour, 0, 0));
+  const laHour = parseInt(
+    probe.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }),
+    10,
+  );
+  return utcHour - (laHour === 24 ? 0 : laHour);
+}
+
+function formatOffset(hours: number): string {
+  return `-${String(hours).padStart(2, '0')}:00`;
+}
+
+export function pacificOffset(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return formatOffset(offsetAtUtcHour(y, m, d, 20));
+}
+
+export function pacificDayBounds(dateStr: string): { timeMin: string; timeMax: string } {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const startOffset = offsetAtUtcHour(y, m, d, 8);
+  const endOffset = offsetAtUtcHour(y, m, d, 20);
+  return {
+    timeMin: `${dateStr}T00:00:00${formatOffset(startOffset)}`,
+    timeMax: `${dateStr}T23:59:59${formatOffset(endOffset)}`,
+  };
+}
+
+export async function getDayEvents(date: string, calendarId?: string): Promise<CalendarEvent[]> {
+  const { timeMin, timeMax } = pacificDayBounds(date);
+  if (calendarId) {
+    return listEvents({ calendarId, timeMin, timeMax });
+  }
+  const result = await getAllCalendarEvents({ timeMin, timeMax });
+  return result.events;
+}
+
+export interface CalendarFailure {
+  calendarId: string;
+  summary: string;
+  error: string;
+}
+
+export interface AllCalendarResult {
+  events: CalendarEvent[];
+  failedCalendars: CalendarFailure[];
+}
+
+export async function getAllCalendarEvents(opts: {
+  timeMin: string;
+  timeMax: string;
+  maxResults?: number;
+  allowPartial?: boolean;
+}): Promise<AllCalendarResult> {
+  const calendars = await listCalendars();
+  const allEvents: CalendarEvent[] = [];
+  const failures: CalendarFailure[] = [];
+  for (const cal of calendars) {
+    try {
+      const events = await listEvents({ calendarId: cal.id, timeMin: opts.timeMin, timeMax: opts.timeMax, maxResults: opts.maxResults });
+      allEvents.push(...events);
+    } catch (e) {
+      failures.push({
+        calendarId: cal.id,
+        summary: cal.summary,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  if (failures.length > 0 && !opts.allowPartial) {
+    const failedNames = failures.map(f => f.summary || f.calendarId).join(', ');
+    throw new Error(`Calendar read failed for: ${failedNames}. Use allowPartial to accept incomplete results.`);
+  }
+  allEvents.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+  return { events: allEvents, failedCalendars: failures };
 }
 
 export function formatEventsForTelegram(events: CalendarEvent[], date: string): string {

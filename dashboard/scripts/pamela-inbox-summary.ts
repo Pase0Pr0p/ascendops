@@ -27,7 +27,7 @@ async function main() {
 
   const [messages, events] = await Promise.all([
     listInboxMessages({ maxResults: maxMessages, query: 'in:inbox' }),
-    getDayEvents(targetDate ?? ''),
+    getDayEvents(targetDate ?? '', 'primary'),
   ]);
 
   // Calendar summary
