@@ -21,6 +21,7 @@ export default defineConfig({
       'tests/**/*.test.ts',
       'dashboard/src/**/__tests__/**/*.test.ts',
       'dashboard/scripts/__tests__/**/*.test.ts',
+      'voice-gateway/src/__tests__/**/*.test.ts',
     ],
   },
 });
