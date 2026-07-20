@@ -432,8 +432,10 @@ async function handleLookupRecord(
       job_description: string | null;
       status: string;
       scheduled_start: string | null;
+      has_vendor: boolean;
     }>(
-      `SELECT work_order_issue, job_description, status::text, scheduled_start::text
+      `SELECT work_order_issue, job_description, status::text, scheduled_start::text,
+              (vendor_contact_id IS NOT NULL) AS has_vendor
        FROM work_orders
        WHERE unit_id = $1 AND status NOT IN ('completed', 'canceled')
        ORDER BY
@@ -458,19 +460,22 @@ async function handleLookupRecord(
       (spokenDob || spokenMoveIn) ? (await runSpokenVerify()).verified : false
     );
 
-    const statusPhrase = (status: string, scheduledStart: string | null): string => {
+    const statusPhrase = (status: string, scheduledStart: string | null, hasVendor: boolean): string => {
+      const vendorSuffix = hasVendor ? ' — a vendor has been assigned and will be reaching out to you' : '';
       switch (status) {
-        case 'new': return 'being reviewed by our team';
-        case 'assigned': return 'assigned to a technician';
+        case 'new': return 'being reviewed by our team' + vendorSuffix;
+        case 'assigned': return hasVendor
+          ? 'assigned to a vendor who will be reaching out to you'
+          : 'assigned to a technician';
         case 'scheduled': {
-          if (!verified || !scheduledStart) return 'scheduled with a technician';
+          if (!verified || !scheduledStart) return (hasVendor ? 'scheduled with a vendor' : 'scheduled with a technician') + (hasVendor ? ' who will be reaching out to you' : '');
           const d = new Date(scheduledStart);
           const dateStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' });
           return `scheduled for around ${dateStr}, though the vendor may have arranged a different time with you directly`;
         }
-        case 'in_progress': return 'being worked on';
+        case 'in_progress': return 'being worked on' + vendorSuffix;
         case 'on_hold': return 'on hold — we\'ll follow up with you';
-        default: return 'in progress';
+        default: return 'in progress' + vendorSuffix;
       }
     };
 
@@ -482,13 +487,13 @@ async function handleLookupRecord(
     if (wos.length === 1) {
       const wo = wos[0];
       return sendResult(
-        `You have an open work order for ${issueLabel(wo)}. Based on our records, it's currently ${statusPhrase(wo.status, wo.scheduled_start)}. Is there anything else I can help with?`,
+        `You have an open work order for ${issueLabel(wo)}. Based on our records, it's currently ${statusPhrase(wo.status, wo.scheduled_start, wo.has_vendor)}. Is there anything else I can help with?`,
       );
     }
 
     const lines = wos.map((wo, i) => {
       const ordinal = i === 0 ? 'first' : i === 1 ? 'second' : i === 2 ? 'third' : `number ${i + 1}`;
-      return `The ${ordinal} is for ${issueLabel(wo)} — based on our records, ${statusPhrase(wo.status, wo.scheduled_start)}.`;
+      return `The ${ordinal} is for ${issueLabel(wo)} — based on our records, ${statusPhrase(wo.status, wo.scheduled_start, wo.has_vendor)}.`;
     });
     return sendResult(
       `You have ${wos.length} open work orders. ${lines.join(' ')} Would you like more details on any of these?`,

@@ -73,11 +73,11 @@ describe('work_order_status resolver-failure matrix', () => {
     expect(res.result).toContain('can still help');
   });
 
-  it('cache hit → resolverFailed cleared, WO query proceeds', async () => {
+  it('cache hit → resolverFailed cleared, WO query proceeds (no vendor)', async () => {
     mockQuery.mockImplementation(async (sql: string) => {
       if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
       if (sql.includes('work_orders')) return { rows: [
-        { work_order_issue: 'Leaky faucet', job_description: null, status: 'assigned', scheduled_start: null },
+        { work_order_issue: 'Leaky faucet', job_description: null, status: 'assigned', scheduled_start: null, has_vendor: false },
       ] };
       return { rows: [] };
     });
@@ -85,8 +85,40 @@ describe('work_order_status resolver-failure matrix', () => {
     const res = await postLookup({ caller_number: '+14155551234', query: 'work_order_status' });
     expect(res.status).toBe(200);
     expect(res.result).toContain('Leaky faucet');
-    expect(res.result).toContain('Based on our records');
+    expect(res.result).toContain('assigned to a technician');
+    expect(res.result).not.toContain('vendor');
     expect(res.result).not.toContain('take a message');
+  });
+
+  it('vendor assigned → "assigned to a vendor who will be reaching out"', async () => {
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
+      if (sql.includes('work_orders')) return { rows: [
+        { work_order_issue: 'Fridge not cooling', job_description: null, status: 'assigned', scheduled_start: null, has_vendor: true },
+      ] };
+      return { rows: [] };
+    });
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'work_order_status' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('Fridge not cooling');
+    expect(res.result).toContain('assigned to a vendor who will be reaching out');
+    expect(res.result).toContain('Based on our records');
+  });
+
+  it('vendor assigned + non-assigned status → vendor suffix appended', async () => {
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
+      if (sql.includes('work_orders')) return { rows: [
+        { work_order_issue: 'Door hinge', job_description: null, status: 'new', scheduled_start: null, has_vendor: true },
+      ] };
+      return { rows: [] };
+    });
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'work_order_status' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('being reviewed by our team');
+    expect(res.result).toContain('a vendor has been assigned and will be reaching out');
   });
 
   it('resolve success after cache miss → resolverFailed cleared, WO query proceeds', async () => {
@@ -95,7 +127,7 @@ describe('work_order_status resolver-failure matrix', () => {
       if (sql.includes('voice_resolve_caller')) return { rows: [{ r: MATCHED_RESOLVED }] };
       if (sql.includes('caller_sessions') && sql.includes('INSERT')) return { rows: [] };
       if (sql.includes('work_orders')) return { rows: [
-        { work_order_issue: 'Broken window', job_description: null, status: 'new', scheduled_start: null },
+        { work_order_issue: 'Broken window', job_description: null, status: 'new', scheduled_start: null, has_vendor: false },
       ] };
       return { rows: [] };
     });
