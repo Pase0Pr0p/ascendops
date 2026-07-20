@@ -525,6 +525,21 @@ describe('computeCloseWoApprovalHash', () => {
     );
     expect(h1).not.toBe(h2);
   });
+
+  it('binds write-packet fields (action, method, survey, completedNoBill)', () => {
+    const naivePayload = JSON.stringify({
+      srId: baseArgs.srId, woId: baseArgs.woId,
+      completedOn: baseArgs.completedOn, remarks: baseArgs.remarks,
+      noBill: baseArgs.noBill,
+    });
+    const { createHash } = require('crypto');
+    const naiveHash = createHash('sha256').update(naivePayload).digest('hex').slice(0, 16);
+    const actual = computeCloseWoApprovalHash(
+      baseArgs.srId, baseArgs.woId, baseArgs.completedOn,
+      baseArgs.remarks, baseArgs.noBill,
+    );
+    expect(actual).not.toBe(naiveHash);
+  });
 });
 
 describe('computeStatusTransitionHash', () => {

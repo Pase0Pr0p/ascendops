@@ -1411,8 +1411,15 @@ async function closeWorkOrder(
     };
   }
 
-  const statusLower = (woDetail.status || '').toLowerCase();
-  if (/completed|canceled|cancelled/.test(statusLower)) {
+  const currentStatus = (woDetail.status || '').trim();
+  if (!currentStatus) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
+      error: 'status_unknown', message: 'Could not read WO status — fail closed on unknown status.',
+    };
+  }
+  if (/^(Completed|Completed No Need to Bill|Canceled|Cancelled|Ready to Bill|Ready-to-Bill|Closed)$/i.test(currentStatus)) {
     try { ab('close'); } catch { /* */ }
     return {
       wo_number: woDetail.wo_number, sr_id: woDetail.sr_id, wo_id: woDetail.wo_id,
@@ -1486,17 +1493,24 @@ async function closeWorkOrder(
   }
 
   const reVerifyStatus = abEval(`(document.querySelector(".js-status-label")||{}).textContent||""`);
-  let currentStatus = '';
+  let liveStatus = '';
   try {
     let sv = reVerifyStatus.output;
     if (sv.startsWith('"') && sv.endsWith('"')) sv = JSON.parse(sv) as string;
-    currentStatus = sv.trim();
+    liveStatus = sv.trim();
   } catch { /* */ }
-  if (/completed|canceled|cancelled/i.test(currentStatus)) {
+  if (!liveStatus) {
     try { ab('close'); } catch { /* */ }
     return {
-      error: 'status_changed_before_submit', status: currentStatus,
-      message: `WO status changed to "${currentStatus}" between dry-run and execute. Fail closed.`,
+      error: 'status_unreadable_before_submit',
+      message: 'Could not read WO status at execute time — fail closed on unknown status.',
+    };
+  }
+  if (/^(Completed|Completed No Need to Bill|Canceled|Cancelled|Ready to Bill|Ready-to-Bill|Closed)$/i.test(liveStatus)) {
+    try { ab('close'); } catch { /* */ }
+    return {
+      error: 'status_changed_before_submit', status: liveStatus,
+      message: `WO status changed to "${liveStatus}" between dry-run and execute. Fail closed.`,
     };
   }
 
@@ -1560,7 +1574,7 @@ async function closeWorkOrder(
   try { ab('close'); } catch { /* */ }
 
   const expectedStatus = noBill ? 'Completed No Need to Bill' : 'Completed';
-  const verified = finalStatus.toLowerCase().includes('completed');
+  const verified = finalStatus.toLowerCase() === expectedStatus.toLowerCase();
 
   return {
     live: true,

@@ -53,6 +53,10 @@ export function computeCloseWoApprovalHash(
 ): string {
   const payload = JSON.stringify({
     srId, woId, completedOn, remarks, noBill,
+    action: 'mark_job_done',
+    method: 'patch',
+    sendSurvey: false,
+    completedNoBill: noBill ? '1' : '0',
   });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
