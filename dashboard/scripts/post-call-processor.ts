@@ -207,23 +207,31 @@ async function processPostCallEvents(): Promise<void> {
     // If channels stay down, the console.error log is captured in daemon logs.
     await sweepDeadLetters(pool);
 
-    // Stale-processing reaper: reset rows stuck in 'processing' for >10 min
-    // Uses received_at as proxy (no updated_at column); processing takes seconds
+    // Stale-processing reaper: reset rows stuck in 'processing' for >10 min.
+    // Uses _claimed_at from payload (set at claim time); falls back to received_at
+    // for legacy rows without the metadata.
     await pool.query(`
       UPDATE voice_events
       SET lifecycle_status = 'pending'
       WHERE event_type = 'elevenlabs_post_call'
         AND lifecycle_status = 'processing'
-        AND received_at < now() - interval '${STALE_PROCESSING_MINUTES} minutes'
+        AND COALESCE(
+          (payload->>'_claimed_at')::timestamptz,
+          received_at
+        ) < now() - interval '${STALE_PROCESSING_MINUTES} minutes'
     `).catch(() => {});
 
-    // Atomic claim: includes NULL (new rows), pending, and emergency_send_failed (retry)
+    // Atomic claim: includes NULL (new rows), pending, and emergency_send_failed (retry).
+    // Writes _claimed_at into payload so the reaper can distinguish fresh claims
+    // from stale ones (received_at is creation time, not claim time).
+    const claimedAt = new Date().toISOString();
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       const claimed = await client.query(`
         UPDATE voice_events
-        SET lifecycle_status = 'processing'
+        SET lifecycle_status = 'processing',
+            payload = payload || $1::jsonb
         WHERE id IN (
           SELECT id FROM voice_events
           WHERE event_type = 'elevenlabs_post_call'
@@ -235,7 +243,7 @@ async function processPostCallEvents(): Promise<void> {
           FOR UPDATE SKIP LOCKED
         )
         RETURNING id, payload, received_at
-      `);
+      `, [JSON.stringify({ _claimed_at: claimedAt })]);
       await client.query('COMMIT');
       client.release();
 

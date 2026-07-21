@@ -15,8 +15,9 @@ import type pg from 'pg';
 
 // ─── mocks (vi.hoisted ensures availability before hoisted vi.mock) ────────
 
-const { mockExecFileSync } = vi.hoisted(() => ({
+const { mockExecFileSync, MockPoolConstructor } = vi.hoisted(() => ({
   mockExecFileSync: vi.fn(),
+  MockPoolConstructor: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({
@@ -24,10 +25,10 @@ vi.mock('child_process', () => ({
 }));
 
 vi.mock('pg', () => ({
-  default: { Pool: vi.fn() },
+  default: { Pool: MockPoolConstructor },
 }));
 
-import { processOneEvent, sweepDeadLetters, MAX_EMERGENCY_RETRIES } from '../post-call-processor';
+import { processOneEvent, processPostCallEvents, sweepDeadLetters, MAX_EMERGENCY_RETRIES } from '../post-call-processor';
 import { computeSourceIdempotencyKey } from '../lib/post-call-intake';
 
 // ─── helpers ──────────────────────────────────────────────────────────────
@@ -417,6 +418,91 @@ describe('blank conversation_id fallback', () => {
     const dedupQ = findQuery(queries, 'source_idempotency_key');
     const expectedKey = computeSourceIdempotencyKey(eventId);
     expect(dedupQ!.params![0]).toBe(expectedKey);
+  });
+});
+
+describe('processPostCallEvents: claim + reaper SQL', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.VOICE_GATEWAY_DSN = 'postgres://test:test@localhost/test';
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+  });
+  afterEach(() => {
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.VOICE_GATEWAY_DSN;
+  });
+
+  function createFullMockPool(claimRows: Record<string, unknown>[] = []) {
+    const queries: TrackedQuery[] = [];
+    const mockClient = {
+      query: vi.fn(async (text: string, params?: unknown[]) => {
+        queries.push({ text, params });
+        if (text === 'BEGIN' || text === 'COMMIT') return {};
+        if (text.includes('RETURNING')) return { rows: claimRows };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const queryFn = vi.fn(async (text: string, params?: unknown[]) => {
+      queries.push({ text, params });
+      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) return { rows: [] };
+      return { rows: [] };
+    });
+    const pool = {
+      query: queryFn,
+      connect: vi.fn(async () => mockClient),
+      end: vi.fn(async () => {}),
+    };
+    MockPoolConstructor.mockImplementation(function () { return pool; });
+    return { pool, queries, mockClient };
+  }
+
+  it('reaper SQL uses _claimed_at (not received_at) for staleness check', async () => {
+    const { queries } = createFullMockPool();
+    await processPostCallEvents();
+
+    const reaperQ = queries.find(q =>
+      q.text.includes('lifecycle_status = \'pending\'') &&
+      q.text.includes('processing'),
+    );
+    expect(reaperQ).toBeTruthy();
+    expect(reaperQ!.text).toContain('_claimed_at');
+    expect(reaperQ!.text).toContain('COALESCE');
+  });
+
+  it('claim SQL writes _claimed_at into payload', async () => {
+    const { queries } = createFullMockPool();
+    await processPostCallEvents();
+
+    const claimQ = queries.find(q =>
+      q.text.includes('RETURNING') &&
+      q.text.includes('payload || $1::jsonb'),
+    );
+    expect(claimQ).toBeTruthy();
+    const claimMeta = JSON.parse(claimQ!.params![0] as string);
+    expect(claimMeta._claimed_at).toBeTruthy();
+    expect(typeof claimMeta._claimed_at).toBe('string');
+  });
+
+  it('claim selector includes emergency_send_failed with priority ordering', async () => {
+    const { queries } = createFullMockPool();
+    await processPostCallEvents();
+
+    const claimQ = queries.find(q => q.text.includes('RETURNING'));
+    expect(claimQ).toBeTruthy();
+    expect(claimQ!.text).toContain('emergency_send_failed');
+    expect(claimQ!.text).toContain('CASE WHEN lifecycle_status');
+    expect(claimQ!.text).toContain('FOR UPDATE SKIP LOCKED');
+  });
+
+  it('no events claimed → exits cleanly without processing', async () => {
+    const { queries } = createFullMockPool([]);
+    await processPostCallEvents();
+
+    // Should not have any processOneEvent-style queries (resolver, dedup, etc.)
+    expect(findQuery(queries, 'caller_sessions')).toBeFalsy();
+    expect(findQuery(queries, 'voice_resolve_caller')).toBeFalsy();
   });
 });
 
