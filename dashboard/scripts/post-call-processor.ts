@@ -4,7 +4,7 @@
  * Picks up elevenlabs_post_call events from voice_events, extracts structured
  * maintenance intake fields from data_collection_results, resolves caller identity,
  * applies fail-closed scope guards, and routes:
- *   - Emergency → immediate alert (Albie + Max)
+ *   - Emergency → immediate alert (Albie + Max), send-then-mark
  *   - Manual review → Albie alert (guards failed, low confidence, missing IDs)
  *   - Routine → Max's intake-triage queue (bus message)
  *
@@ -17,10 +17,8 @@ import pg from 'pg';
 import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import {
-  type DataCollectionField,
   type ResolvedCaller,
   type IntakeRecord,
-  type IntakeClassification,
   extractField,
   extractCallerPhone,
   extractConversationId,
@@ -58,24 +56,30 @@ function makePool(): pg.Pool {
   return new pg.Pool({ connectionString: dsn, ssl: { rejectUnauthorized: false } });
 }
 
-// ─── bus helpers ───────────────────────────────────────────────────────────────
+// ─── bus helpers (return success boolean for emergency delivery check) ─────────
 
-function sendTelegram(chatId: string, message: string): void {
+function sendTelegram(chatId: string, message: string): boolean {
   const token = process.env.TELEGRAM_BOT_TOKEN ?? process.env.BOT_TOKEN ?? '';
-  if (!token || !chatId) return;
+  if (!token || !chatId) return false;
   try {
     execFileSync('cortextos', ['bus', 'send-telegram', chatId, message, '--skip-lint'], {
       timeout: 15_000, stdio: 'pipe',
     });
-  } catch { /* best-effort */ }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function sendAgentMessage(agent: string, message: string): void {
+function sendAgentMessage(agent: string, message: string): boolean {
   try {
     execFileSync('cortextos', ['bus', 'send-message', agent, 'normal', message], {
       timeout: 15_000, stdio: 'pipe',
     });
-  } catch { /* best-effort */ }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function logEvent(category: string, action: string, level: string, meta: Record<string, unknown>): void {
@@ -84,7 +88,7 @@ function logEvent(category: string, action: string, level: string, meta: Record<
       'bus', 'log-event', category, action, level,
       '--meta', JSON.stringify(meta),
     ], { timeout: 10_000, stdio: 'pipe' });
-  } catch { /* best-effort */ }
+  } catch { /* best-effort for logging */ }
 }
 
 // ─── resolver + AppFolio ID lookup ─────────────────────────────────────────────
@@ -139,84 +143,60 @@ async function lookupAppFolioIds(
   return resolved;
 }
 
-// ─── idempotency ───────────────────────────────────────────────────────────────
-
-async function checkSourceDedup(
-  pool: pg.Pool,
-  conversationId: string,
-): Promise<{ duplicate: boolean; existingId?: string }> {
-  const sourceKey = computeSourceIdempotencyKey(conversationId);
-  try {
-    const existing = await pool.query(
-      `SELECT id FROM voice_events
-       WHERE event_type = 'wo_intake'
-         AND payload->>'source_idempotency_key' = $1
-       LIMIT 1`,
-      [sourceKey],
-    );
-    if (existing.rows[0]) return { duplicate: true, existingId: existing.rows[0].id as string };
-  } catch { /* proceed — better to process than to silently drop */ }
-  return { duplicate: false };
-}
-
-async function checkRepeatWindow(
-  pool: pg.Pool,
-  repeatKey: string,
-): Promise<{ isRepeat: boolean; priorIntakeId?: string }> {
-  try {
-    const existing = await pool.query(
-      `SELECT id FROM voice_events
-       WHERE event_type = 'wo_intake'
-         AND payload->>'repeat_window_key' = $1
-         AND created_at > now() - interval '${REPEAT_WINDOW_HOURS} hours'
-       LIMIT 1`,
-      [repeatKey],
-    );
-    if (existing.rows[0]) return { isRepeat: true, priorIntakeId: existing.rows[0].id as string };
-  } catch { /* proceed */ }
-  return { isRepeat: false };
-}
-
 // ─── main processor ────────────────────────────────────────────────────────────
 
 async function processPostCallEvents(): Promise<void> {
   const pool = makePool();
 
   try {
-    const rows = await pool.query(`
-      SELECT id, payload, created_at
-      FROM voice_events
-      WHERE event_type = 'elevenlabs_post_call'
-        AND (lifecycle_status IS NULL OR lifecycle_status = 'pending')
-      ORDER BY created_at ASC
-      LIMIT 10
-      FOR UPDATE SKIP LOCKED
-    `);
+    // 5a FIX: atomic claim via UPDATE...RETURNING inside a transaction
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const claimed = await client.query(`
+        UPDATE voice_events
+        SET lifecycle_status = 'processing'
+        WHERE id IN (
+          SELECT id FROM voice_events
+          WHERE event_type = 'elevenlabs_post_call'
+            AND (lifecycle_status IS NULL OR lifecycle_status = 'pending')
+          ORDER BY created_at ASC
+          LIMIT 10
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, payload, created_at
+      `);
+      await client.query('COMMIT');
+      client.release();
 
-    if (rows.rows.length === 0) {
-      console.log(JSON.stringify({ status: 'no_events' }));
-      await pool.end();
-      return;
-    }
-
-    for (const row of rows.rows) {
-      const eventId = row.id as string;
-      const payload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
-      const eventData = (payload['data'] ?? payload) as Record<string, unknown>;
-
-      try {
-        await processOneEvent(pool, eventId, eventData);
-      } catch (e) {
-        console.error(JSON.stringify({
-          error: 'event_processing_failed',
-          event_id: eventId,
-          detail: String(e).substring(0, 500),
-        }));
-        await pool.query(
-          `UPDATE voice_events SET lifecycle_status = 'process_error' WHERE id = $1`,
-          [eventId],
-        ).catch(() => {});
+      if (claimed.rows.length === 0) {
+        console.log(JSON.stringify({ status: 'no_events' }));
+        await pool.end();
+        return;
       }
+
+      for (const row of claimed.rows) {
+        const eventId = row.id as string;
+        const payload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
+        const eventData = (payload['data'] ?? payload) as Record<string, unknown>;
+
+        try {
+          await processOneEvent(pool, eventId, eventData);
+        } catch (e) {
+          console.error(JSON.stringify({
+            error: 'event_processing_failed',
+            event_id: eventId,
+            detail: String(e).substring(0, 500),
+          }));
+          await pool.query(
+            `UPDATE voice_events SET lifecycle_status = 'process_error' WHERE id = $1`,
+            [eventId],
+          ).catch(() => {});
+        }
+      }
+    } catch (e) {
+      client.release();
+      throw e;
     }
   } finally {
     await pool.end().catch(() => {});
@@ -234,15 +214,36 @@ async function processOneEvent(
   const transcriptSummary = extractTranscriptSummary(payload);
   const dcResults = extractDataCollection(payload);
 
-  // Mark as processing
-  await pool.query(
-    `UPDATE voice_events SET lifecycle_status = 'processing' WHERE id = $1`,
-    [eventId],
-  );
+  // 5b FIX: blank conversation_id falls back to source event ID
+  const effectiveSourceId = conversationId || eventId;
 
-  // Layer 1 dedup: same conversation_id already processed
-  const sourceDedup = await checkSourceDedup(pool, conversationId);
-  if (sourceDedup.duplicate) {
+  // Layer 1 dedup: same source already processed (fail-closed: DB error = reject)
+  const sourceKey = computeSourceIdempotencyKey(effectiveSourceId);
+  let sourceIsDuplicate = false;
+  try {
+    const existing = await pool.query(
+      `SELECT id FROM voice_events
+       WHERE event_type = 'wo_intake'
+         AND payload->>'source_idempotency_key' = $1
+       LIMIT 1`,
+      [sourceKey],
+    );
+    sourceIsDuplicate = !!existing.rows[0];
+  } catch {
+    // F2 FIX: dedup fail-CLOSED — if we can't verify uniqueness, mark error
+    await pool.query(
+      `UPDATE voice_events SET lifecycle_status = 'dedup_check_error' WHERE id = $1`,
+      [eventId],
+    ).catch(() => {});
+    console.error(JSON.stringify({
+      error: 'source_dedup_db_failure',
+      event_id: eventId,
+      source_id: effectiveSourceId,
+    }));
+    return;
+  }
+
+  if (sourceIsDuplicate) {
     await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'duplicate_skipped' WHERE id = $1`,
       [eventId],
@@ -250,7 +251,6 @@ async function processOneEvent(
     console.log(JSON.stringify({
       status: 'source_duplicate_skipped',
       event_id: eventId,
-      existing_intake: sourceDedup.existingId,
     }));
     return;
   }
@@ -326,8 +326,22 @@ async function processOneEvent(
   });
 
   // Layer 2 dedup: repeat-window (same caller + issue within time window)
+  // Fail-closed: DB error = flag as possible repeat (safer than silently passing)
   const repeatKey = computeRepeatWindowKey(callerPhone, unitAddress, issueDescription);
-  const repeatCheck = await checkRepeatWindow(pool, repeatKey);
+  let repeatCheck = { isRepeat: false, priorIntakeId: undefined as string | undefined };
+  try {
+    const existing = await pool.query(
+      `SELECT id FROM voice_events
+       WHERE event_type = 'wo_intake'
+         AND payload->>'repeat_window_key' = $1
+         AND created_at > now() - interval '${REPEAT_WINDOW_HOURS} hours'
+       LIMIT 1`,
+      [repeatKey],
+    );
+    if (existing.rows[0]) repeatCheck = { isRepeat: true, priorIntakeId: existing.rows[0].id as string };
+  } catch {
+    repeatCheck = { isRepeat: true, priorIntakeId: 'dedup_check_failed' };
+  }
 
   // Build the enriched intake record
   const intakeId = randomUUID();
@@ -373,11 +387,11 @@ async function processOneEvent(
   const effectiveRoute = repeatCheck.isRepeat && route === 'routine' ? 'manual_review' as const : route;
   const effectiveReviewReason = intake.manual_review_reason;
 
-  // Write wo_intake event
+  // Write wo_intake event (source_idempotency_key for unique index enforcement)
   const intakePayload = {
     ...intake,
     source_post_call_event_id: eventId,
-    source_idempotency_key: computeSourceIdempotencyKey(conversationId),
+    source_idempotency_key: sourceKey,
     repeat_window_key: repeatKey,
     guards_passed: guards.pass,
     classification,
@@ -386,33 +400,64 @@ async function processOneEvent(
   await pool.query(
     `INSERT INTO voice_events (event_type, source_event_id, payload)
      VALUES ('wo_intake', $1, $2)`,
-    [conversationId, JSON.stringify(intakePayload)],
+    [effectiveSourceId, JSON.stringify(intakePayload)],
   );
 
-  // Mark original event as processed
-  await pool.query(
-    `UPDATE voice_events SET lifecycle_status = 'processed' WHERE id = $1`,
-    [eventId],
-  );
-
-  // Route
+  // F1 FIX: SEND-THEN-MARK for emergency — do NOT mark processed until
+  // at least one emergency notification channel confirms delivery
   if (effectiveRoute === 'emergency') {
     const alertMsg = `EMERGENCY INTAKE from voice call:\n${tenantName} at ${unitAddress}\nIssue: ${issueDescription}\nSafety: ${safetyFlags.detail}\nCall ID: ${conversationId}\nAction needed immediately.`;
-    sendTelegram(CHAT_ALBIE, alertMsg);
-    sendAgentMessage('maintenance-coordinator', JSON.stringify({
+    const telegramSent = sendTelegram(CHAT_ALBIE, alertMsg);
+    const maxSent = sendAgentMessage('maintenance-coordinator', JSON.stringify({
       type: 'emergency_intake',
       ...intake,
     }));
+
+    if (!telegramSent && !maxSent) {
+      // BOTH channels failed — do NOT mark processed, leave for retry
+      await pool.query(
+        `UPDATE voice_events SET lifecycle_status = 'emergency_send_failed' WHERE id = $1`,
+        [eventId],
+      );
+      console.error(JSON.stringify({
+        error: 'emergency_alert_delivery_failed',
+        event_id: eventId,
+        intake_id: intakeId,
+        call_id: conversationId,
+        safety_detail: safetyFlags.detail,
+      }));
+      return;
+    }
+
+    // At least one channel confirmed — mark processed
+    await pool.query(
+      `UPDATE voice_events SET lifecycle_status = 'processed' WHERE id = $1`,
+      [eventId],
+    );
     logEvent('action', 'emergency_intake_detected', 'critical', {
       event_id: eventId,
       intake_id: intakeId,
       call_id: conversationId,
       safety_detail: safetyFlags.detail,
+      telegram_sent: telegramSent,
+      max_sent: maxSent,
       agent: 'claudia',
     });
-    console.log(JSON.stringify({ status: 'emergency_routed', event_id: eventId, intake_id: intakeId }));
+    console.log(JSON.stringify({
+      status: 'emergency_routed',
+      event_id: eventId,
+      intake_id: intakeId,
+      telegram_sent: telegramSent,
+      max_sent: maxSent,
+    }));
     return;
   }
+
+  // Non-emergency: mark processed, then send (best-effort delivery acceptable)
+  await pool.query(
+    `UPDATE voice_events SET lifecycle_status = 'processed' WHERE id = $1`,
+    [eventId],
+  );
 
   if (effectiveRoute === 'manual_review') {
     sendTelegram(CHAT_ALBIE, `Voice intake needs manual review:\n${tenantName} at ${unitAddress}\nIssue: ${issueDescription}\nReason: ${effectiveReviewReason}\nCall ID: ${conversationId}`);
