@@ -57,12 +57,19 @@ function readState(): IntakeState {
   }
 }
 
+const EVICTION_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
 function writeState(state: IntakeState): void {
+  const now = Date.now();
   const entries = Object.entries(state.staged);
-  if (entries.length > 100) {
-    const sorted = entries.sort(([, a], [, b]) => a.staged_at.localeCompare(b.staged_at));
-    state.staged = Object.fromEntries(sorted.slice(-100));
+  const kept = entries.filter(([, e]) => {
+    const age = now - new Date(e.staged_at).getTime();
+    return age < EVICTION_AGE_MS;
+  });
+  if (kept.length < entries.length) {
+    console.log(JSON.stringify({ evicted: entries.length - kept.length, reason: 'older_than_7_days' }));
   }
+  state.staged = Object.fromEntries(kept);
   try { writeFileSync(STATE_PATH, JSON.stringify(state, null, 2)); } catch { /* best-effort */ }
 }
 
@@ -142,9 +149,8 @@ function formatLocationRef(payload: Record<string, unknown>): string {
   const addr = String(payload['property_label'] ?? '');
   const unit = String(payload['unit_label'] ?? '');
   const addrParts = addr.split(/\s+/);
-  const first2addr = addrParts.slice(0, 1).join('-').substring(0, 4);
-  const streetParts = addrParts.slice(1);
-  const first2street = streetParts.slice(0, 1).join('-').substring(0, 4);
+  const first2addr = (addrParts[0] ?? '').substring(0, 2);
+  const first2street = (addrParts[1] ?? '').substring(0, 2);
   const unitShort = unit.replace(/^Unit\s*/i, '').trim();
   return `${first2addr}-${first2street}${unitShort ? '-' + unitShort : ''}`;
 }
@@ -189,6 +195,21 @@ async function pollAndStage() {
          )`,
     );
   } catch { /* best-effort — main path is more important */ }
+
+  // Detect rows stuck in 'creating' for >10 minutes (crash between claim and create)
+  try {
+    const stuck = await pool.query(
+      `SELECT id::text, payload->>'tenant_name' as tenant_name
+       FROM voice_events
+       WHERE event_type = 'wo_intake'
+         AND lifecycle_status = 'creating'
+         AND received_at < NOW() - INTERVAL '10 minutes'`,
+    );
+    for (const row of stuck.rows) {
+      sendTelegram(CHAT_ALBIE, `WO intake event ${row.id} (${row.tenant_name ?? 'unknown'}) stuck in 'creating' status for >10 min. Likely crash during create. Manual check needed.`);
+      logEvent('action', 'wo_intake_stuck_creating', 'error', { event_id: row.id, agent: 'claudia' });
+    }
+  } catch { /* best-effort */ }
 
   await pool.end().catch(() => {});
 
