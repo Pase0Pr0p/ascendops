@@ -57,3 +57,14 @@ else
   git -C "$FRAMEWORK_ROOT" fetch origin main
   git -C "$FRAMEWORK_ROOT" worktree add -b "$BASE_BRANCH" "$WORKTREE" origin/main
 fi
+
+# Symlink node_modules from the canonical tree so tests (vitest) can run in the worktree
+# without a separate npm install. Deps stay in sync automatically.
+for subdir in "" "dashboard/"; do
+  src="$FRAMEWORK_ROOT/${subdir}node_modules"
+  dst="$WORKTREE/${subdir}node_modules"
+  if [ -d "$src" ] && [ ! -e "$dst" ]; then
+    ln -sfn "$src" "$dst"
+    echo "init-agent-worktree.sh: symlinked ${subdir}node_modules"
+  fi
+done

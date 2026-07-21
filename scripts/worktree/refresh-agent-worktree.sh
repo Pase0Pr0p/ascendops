@@ -86,3 +86,16 @@ else
   git -C "$WORKTREE" checkout "$BASE_BRANCH"
   git -C "$WORKTREE" merge --ff-only origin/main
 fi
+
+# Re-establish node_modules symlinks (hard-reset or merge may remove them)
+FRAMEWORK_ROOT="${CTX_FRAMEWORK_ROOT:-}"
+if [ -n "$FRAMEWORK_ROOT" ] && [ -d "$FRAMEWORK_ROOT" ]; then
+  for subdir in "" "dashboard/"; do
+    src="$FRAMEWORK_ROOT/${subdir}node_modules"
+    dst="$WORKTREE/${subdir}node_modules"
+    if [ -d "$src" ] && [ ! -e "$dst" ]; then
+      ln -sfn "$src" "$dst"
+      echo "refresh-agent-worktree.sh: re-symlinked ${subdir}node_modules"
+    fi
+  done
+fi
