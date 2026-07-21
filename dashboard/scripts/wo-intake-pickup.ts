@@ -146,6 +146,21 @@ function makePool(): pg.Pool {
   return new pg.Pool({ connectionString: dsn, ssl: { rejectUnauthorized: false } });
 }
 
+function extractJson(raw: string): string {
+  let last = '';
+  let pos = raw.length;
+  while (pos > 0) {
+    const idx = raw.lastIndexOf('{', pos - 1);
+    if (idx < 0) break;
+    try {
+      JSON.parse(raw.slice(idx));
+      last = raw.slice(idx);
+      break;
+    } catch { pos = idx; }
+  }
+  return last || raw.trim();
+}
+
 function formatLocationRef(payload: Record<string, unknown>): string {
   const addr = String(payload['property_label'] ?? '');
   const unit = String(payload['unit_label'] ?? '');
@@ -266,7 +281,7 @@ async function pollAndStage() {
     const appfolioOccupancyId = String(p['appfolio_occupancy_id'] ?? '');
 
     // Dry-run createWorkOrder to get the approval hash
-    const pteFlag = permissionToEnter === true ? 'true' : permissionToEnter === false ? 'false' : 'not_applicable';
+    const pteFlag = String(permissionToEnter).toLowerCase() === 'true' ? 'true' : String(permissionToEnter).toLowerCase() === 'false' ? 'false' : 'not_applicable';
     const priority = severity === 'urgent' ? 'Urgent' : 'Normal';
     const description = `Voice intake from ${tenantName}: ${issueDescription}${locationDetail ? ' (' + locationDetail + ')' : ''}`;
 
@@ -288,9 +303,10 @@ async function pollAndStage() {
         stdio: 'pipe',
         cwd: resolve(process.cwd()),
       }).toString('utf-8');
-      dryRunResult = JSON.parse(output);
+      dryRunResult = JSON.parse(extractJson(output));
     } catch (e) {
-      console.error(JSON.stringify({ error: 'dry_run_failed', event_id: row.id, detail: String(e) }));
+      const childOut = (e as { stdout?: Buffer })?.stdout?.toString('utf-8') ?? '';
+      console.error(JSON.stringify({ error: 'dry_run_failed', event_id: row.id, detail: String(e), child_stdout: childOut.substring(0, 500) }));
       const failPool = makePool();
       await failPool.query(
         `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
@@ -407,6 +423,28 @@ async function executeApproval(eventId: string) {
 
   const pool = makePool();
 
+  // Event-level idempotency: refuse re-create if a WO/SR ID is already persisted on this event.
+  // This prevents duplicates even when a reporting bug marks a successfully-created WO as failed.
+  const existingCheck = await pool.query(
+    `SELECT payload->>'created_wo_id' as wo_id, payload->>'created_sr_id' as sr_id, lifecycle_status
+     FROM voice_events WHERE id = $1`,
+    [eventId],
+  ).catch(() => null);
+
+  if (existingCheck?.rows[0]?.wo_id || existingCheck?.rows[0]?.sr_id) {
+    const existing = existingCheck.rows[0];
+    console.error(JSON.stringify({
+      error: 'already_created',
+      event_id: eventId,
+      wo_id: existing.wo_id,
+      sr_id: existing.sr_id,
+      lifecycle_status: existing.lifecycle_status,
+      message: 'This event already has a WO/SR ID persisted. Refusing re-create.',
+    }));
+    await pool.end().catch(() => {});
+    process.exit(1);
+  }
+
   // Atomic claim: staged→creating. Prevents double-tap / duplicate callback race.
   const claim = await pool.query(
     `UPDATE voice_events SET lifecycle_status = 'creating'
@@ -426,7 +464,7 @@ async function executeApproval(eventId: string) {
   writeState(state);
 
   // Execute live create with the stored approval hash
-  const pteFlag = entry.permission_to_enter === true ? 'true' : entry.permission_to_enter === false ? 'false' : 'not_applicable';
+  const pteFlag = String(entry.permission_to_enter).toLowerCase() === 'true' ? 'true' : String(entry.permission_to_enter).toLowerCase() === 'false' ? 'false' : 'not_applicable';
   const priority = entry.severity === 'urgent' ? 'Urgent' : 'Normal';
   const description = `Voice intake from ${entry.tenant_name}: ${entry.issue_description}${entry.location_detail ? ' (' + entry.location_detail + ')' : ''}`;
 
@@ -450,50 +488,81 @@ async function executeApproval(eventId: string) {
       stdio: 'pipe',
       cwd: resolve(process.cwd()),
     }).toString('utf-8');
-    createResult = JSON.parse(output);
+    createResult = JSON.parse(extractJson(output));
   } catch (e) {
-    // Live create failed — mark as failed, notify
+    // Child exited non-zero — but may have still created the WO successfully
+    // (e.g., verified=false causes exit 1 even after a successful submit).
+    // Try to parse the child's stdout for a valid result before treating as failure.
+    const childStdout = (e as { stdout?: Buffer })?.stdout?.toString('utf-8') ?? '';
+    const childStderr = (e as { stderr?: Buffer })?.stderr?.toString('utf-8') ?? '';
+
+    try {
+      const recovered = JSON.parse(extractJson(childStdout));
+      if (recovered.live === true && recovered.hash_consumed === true) {
+        createResult = recovered;
+      }
+    } catch { /* child output not parseable, treat as real failure */ }
+
+    if (!createResult['live']) {
+      await pool.query(
+        `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
+        [eventId],
+      ).catch(() => {});
+      await pool.end().catch(() => {});
+
+      logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, agent: 'claudia' });
+      sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. Error: ${String(e).substring(0, 200)}. Manual WO needed.`);
+      console.error(JSON.stringify({ error: 'live_create_failed', event_id: eventId, detail: String(e), child_stdout: childStdout.substring(0, 500), child_stderr: childStderr.substring(0, 500) }));
+      process.exit(1);
+    }
+  }
+
+  if (createResult['error']) {
     await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
       [eventId],
     ).catch(() => {});
     await pool.end().catch(() => {});
 
-    logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, agent: 'claudia' });
-    sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. Error: ${String(e).substring(0, 200)}. Manual WO needed.`);
-    console.error(JSON.stringify({ error: 'live_create_failed', event_id: eventId, detail: String(e) }));
+    logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, error: createResult['error'], agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. Error: ${String(createResult['error'])}. Manual WO needed.`);
+    console.error(JSON.stringify({ error: 'create_failed', event_id: eventId, result: createResult }));
     process.exit(1);
   }
 
-  if (createResult['error'] || createResult['verified'] !== true) {
-    await pool.query(
-      `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
-      [eventId],
-    ).catch(() => {});
-    await pool.end().catch(() => {});
+  const woId = String(createResult['wo_id'] ?? '');
+  const srId = String(createResult['sr_id'] ?? '');
 
-    const reason = createResult['error'] ? `error: ${createResult['error']}` : `verified=${String(createResult['verified'])} (not true)`;
-    logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, error: createResult['error'], verified: createResult['verified'], agent: 'claudia' });
-    sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. ${reason}. Manual WO needed.`);
-    console.error(JSON.stringify({ error: 'create_failed', event_id: eventId, reason, result: createResult }));
-    process.exit(1);
-  }
+  // Persist WO/SR ID to the event IMMEDIATELY, before any verification check.
+  // This is the idempotency anchor: once a WO ID is persisted, no re-create can happen.
+  await pool.query(
+    `UPDATE voice_events
+     SET payload = payload || jsonb_build_object('created_wo_id', $2::text, 'created_sr_id', $3::text)
+     WHERE id = $1`,
+    [eventId, woId, srId],
+  ).catch(() => {
+    sendTelegram(CHAT_ALBIE, `WO was CREATED (WO#${woId || srId}) but failed to persist WO ID to event ${eventId}. Manual DB update needed.`);
+  });
 
-  // Success — mark as created. If this write fails, the nonce/hash is already consumed
-  // so a retry cannot double-create. Alert operator for manual reconciliation.
+  // Determine final lifecycle state based on verification
+  const verified = createResult['verified'] === true;
+  const finalStatus = verified ? 'created' : 'created_unverified';
+
   const markResult = await pool.query(
-    `UPDATE voice_events SET lifecycle_status = 'created' WHERE id = $1 RETURNING id`,
-    [eventId],
+    `UPDATE voice_events SET lifecycle_status = $2 WHERE id = $1 RETURNING id`,
+    [eventId, finalStatus],
   ).catch(() => null);
   await pool.end().catch(() => {});
 
   if (!markResult?.rows[0]) {
     logEvent('action', 'wo_created_mark_failed', 'error', { event_id: eventId, agent: 'claudia' });
-    sendTelegram(CHAT_ALBIE, `WO was CREATED for ${entry.tenant_name} but status update to 'created' failed in DB. Hash consumed (no double-create risk). Manual DB update needed: UPDATE voice_events SET lifecycle_status='created' WHERE id='${eventId}'`);
+    sendTelegram(CHAT_ALBIE, `WO was CREATED for ${entry.tenant_name} but status update to '${finalStatus}' failed in DB. WO ID persisted (no double-create risk). Manual DB update needed: UPDATE voice_events SET lifecycle_status='${finalStatus}' WHERE id='${eventId}'`);
   }
 
-  const woId = String(createResult['wo_id'] ?? '');
-  const srId = String(createResult['sr_id'] ?? '');
+  if (!verified) {
+    logEvent('action', 'wo_created_unverified', 'warning', { event_id: eventId, wo_id: woId, sr_id: srId, agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO#${woId || srId} CREATED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label} but post-create verification did not pass. Please verify WO details in AppFolio.`);
+  }
   const woUrl = srId ? `https://paseoproperties.appfolio.com/maintenance/service_requests/${srId}` : '';
 
   logEvent('action', 'wo_created', 'info', {

@@ -4853,7 +4853,7 @@ async function main() {
       }
       const result2 = await createWorkOrder(cwParams, live2, approvalHashVal2);
       console.log(JSON.stringify(result2, null, 2));
-      process.exit(result2.error || result2.verified === false ? 1 : 0);
+      process.exit(result2.error ? 1 : 0);
       break;
     }
     case 'add-note': {
