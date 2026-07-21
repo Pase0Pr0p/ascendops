@@ -15,9 +15,10 @@ import type pg from 'pg';
 
 // ─── mocks (vi.hoisted ensures availability before hoisted vi.mock) ────────
 
-const { mockExecFileSync, MockPoolConstructor } = vi.hoisted(() => ({
+const { mockExecFileSync, MockPoolConstructor, mockWriteFileSync } = vi.hoisted(() => ({
   mockExecFileSync: vi.fn(),
   MockPoolConstructor: vi.fn(),
+  mockWriteFileSync: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({
@@ -27,6 +28,11 @@ vi.mock('child_process', () => ({
 vi.mock('pg', () => ({
   default: { Pool: MockPoolConstructor },
 }));
+
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { ...actual, writeFileSync: mockWriteFileSync };
+});
 
 import { processOneEvent, processPostCallEvents, sweepDeadLetters, MAX_EMERGENCY_RETRIES, DEFAULT_EMERGENCY_META, type EmergencyMeta } from '../post-call-processor';
 import { computeSourceIdempotencyKey } from '../lib/post-call-intake';
@@ -696,5 +702,84 @@ describe('nullable-schema contract: availability_window and photo_attached', () 
 
     expect(intakePayload.availability_window).toBe('Weekdays 9am-5pm');
     expect(intakePayload.photo_attached).toBeNull();
+  });
+});
+
+describe('cron-liveness: run summary and state file', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.VOICE_GATEWAY_DSN = 'postgres://test:test@localhost/test';
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+  });
+  afterEach(() => {
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.VOICE_GATEWAY_DSN;
+  });
+
+  function createLivenessMockPool(claimRows: Record<string, unknown>[] = []) {
+    const queries: TrackedQuery[] = [];
+    const mockClient = {
+      query: vi.fn(async (text: string, params?: unknown[]) => {
+        queries.push({ text, params });
+        if (text === 'BEGIN' || text === 'COMMIT') return {};
+        if (text.includes('RETURNING')) return { rows: claimRows };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const queryFn = vi.fn(async (text: string, params?: unknown[]) => {
+      queries.push({ text, params });
+      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) return { rows: [] };
+      if (text.includes('caller_sessions')) return { rows: [] };
+      if (text.includes('voice_resolve_caller')) return { rows: [{ r: RESOLVED_CALLER }] };
+      if (text.includes('occupancies')) return { rows: [AF_IDS_ROW] };
+      if (text.includes('source_idempotency_key')) return { rows: [] };
+      if (text.includes('repeat_window_key')) return { rows: [] };
+      if (text.includes('INSERT INTO voice_events')) return { rows: [] };
+      if (text.includes('UPDATE voice_events')) return { rows: [] };
+      return { rows: [] };
+    });
+    const pool = {
+      query: queryFn,
+      connect: vi.fn(async () => mockClient),
+      end: vi.fn(async () => {}),
+    };
+    MockPoolConstructor.mockImplementation(function () { return pool; });
+    return { pool, queries, mockClient };
+  }
+
+  it('no events → writes liveness state with zero counts', async () => {
+    createLivenessMockPool([]);
+    const result = await processPostCallEvents();
+
+    expect(result.events_claimed).toBe(0);
+    expect(result.events_processed).toBe(0);
+    expect(result.events_errored).toBe(0);
+    expect(result.dead_letters_swept).toBe(0);
+    expect(result.last_run).toBeTruthy();
+
+    expect(mockWriteFileSync).toHaveBeenCalledOnce();
+    const written = JSON.parse(mockWriteFileSync.mock.calls[0][1] as string);
+    expect(written.last_run).toBe(result.last_run);
+    expect(written.events_claimed).toBe(0);
+  });
+
+  it('events claimed + processed → liveness reflects counts', async () => {
+    const payload = makePayload();
+    createLivenessMockPool([
+      { id: 'evt-a', payload, received_at: new Date().toISOString() },
+      { id: 'evt-b', payload, received_at: new Date().toISOString() },
+    ]);
+    const result = await processPostCallEvents();
+
+    expect(result.events_claimed).toBe(2);
+    expect(result.events_processed).toBe(2);
+    expect(result.events_errored).toBe(0);
+
+    expect(mockWriteFileSync).toHaveBeenCalledOnce();
+    const written = JSON.parse(mockWriteFileSync.mock.calls[0][1] as string);
+    expect(written.events_claimed).toBe(2);
+    expect(written.events_processed).toBe(2);
   });
 });

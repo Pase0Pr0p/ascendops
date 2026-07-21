@@ -16,6 +16,8 @@
 import pg from 'pg';
 import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
+import { writeFileSync } from 'fs';
+import { resolve } from 'path';
 import {
   type ResolvedCaller,
   type IntakeRecord,
@@ -42,6 +44,7 @@ import {
 
 const EXTRACTOR_VERSION = 'v1-data-collection';
 const REPEAT_WINDOW_HOURS = 4;
+const LIVENESS_STATE_PATH = resolve(process.cwd(), '.post-call-processor-state.json');
 
 const CHAT_ALBIE = process.env.TELEGRAM_CHAT_ALBIE ?? '6398997982';
 
@@ -224,14 +227,26 @@ export async function sweepDeadLetters(pool: pg.Pool): Promise<number> {
   return recovered;
 }
 
-async function processPostCallEvents(): Promise<void> {
+export interface ProcessorRunResult {
+  last_run: string;
+  events_claimed: number;
+  events_processed: number;
+  events_errored: number;
+  dead_letters_swept: number;
+}
+
+async function processPostCallEvents(): Promise<ProcessorRunResult> {
   const pool = makePool();
+  const runResult: ProcessorRunResult = {
+    last_run: new Date().toISOString(),
+    events_claimed: 0,
+    events_processed: 0,
+    events_errored: 0,
+    dead_letters_swept: 0,
+  };
 
   try {
-    // Dead-letter sweep: re-attempt delivery for any emergency_dead_letter rows.
-    // Runs every cron cycle — if channels recover, the emergency gets delivered.
-    // If channels stay down, the console.error log is captured in daemon logs.
-    await sweepDeadLetters(pool);
+    runResult.dead_letters_swept = await sweepDeadLetters(pool);
 
     // Stale-processing reaper: reset rows stuck in 'processing' for >10 min.
     // Uses _claimed_at from payload (set at claim time); falls back to received_at
@@ -276,8 +291,10 @@ async function processPostCallEvents(): Promise<void> {
       if (claimed.rows.length === 0) {
         console.log(JSON.stringify({ status: 'no_events' }));
         await pool.end();
-        return;
+        writeLiveness(runResult);
+        return runResult;
       }
+      runResult.events_claimed = claimed.rows.length;
 
       for (const row of claimed.rows) {
         const eventId = row.id as string;
@@ -292,7 +309,9 @@ async function processPostCallEvents(): Promise<void> {
 
         try {
           await processOneEvent(pool, eventId, eventData, emergencyMeta);
+          runResult.events_processed++;
         } catch (e) {
+          runResult.events_errored++;
           console.error(JSON.stringify({
             error: 'event_processing_failed',
             event_id: eventId,
@@ -311,6 +330,16 @@ async function processPostCallEvents(): Promise<void> {
   } finally {
     await pool.end().catch(() => {});
   }
+
+  console.log(JSON.stringify({ status: 'run_complete', ...runResult }));
+  writeLiveness(runResult);
+  return runResult;
+}
+
+function writeLiveness(result: ProcessorRunResult): void {
+  try {
+    writeFileSync(LIVENESS_STATE_PATH, JSON.stringify(result, null, 2) + '\n');
+  } catch { /* best-effort */ }
 }
 
 const DEFAULT_EMERGENCY_META: EmergencyMeta = { attempts: 0, telegram_confirmed: false, max_confirmed: false };
@@ -642,7 +671,7 @@ export async function processOneEvent(
 
 // ─── entry point ───────────────────────────────────────────────────────────────
 
-export { processPostCallEvents, MAX_EMERGENCY_RETRIES, DEFAULT_EMERGENCY_META };
+export { processPostCallEvents, MAX_EMERGENCY_RETRIES, DEFAULT_EMERGENCY_META, LIVENESS_STATE_PATH };
 
 if (!process.env.VITEST) {
   processPostCallEvents().catch((e) => {
