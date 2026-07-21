@@ -1142,7 +1142,8 @@ async function createWorkOrder(
 
   const hasCreatedPhrase = /Created/i.test(String(verification.first_log ?? ''));
   const redirectedToSr = !!srMatchResponse;
-  const hasWoNumber = !!(verification.wo_number || verification.sr_number);
+  const woNumberStr = String(verification.wo_number ?? '').trim();
+  const hasConcreteWoId = /WO[- ]?\d+|\d{4,}/.test(woNumberStr);
 
   // Multi-field echo-match: compare each verifiable field from the page against the submitted params
   const descOnPage = String(verification.description ?? '');
@@ -1150,33 +1151,37 @@ async function createWorkOrder(
   const descriptionMatches = descFirstWords.length > 0 && descOnPage.toLowerCase().includes(descFirstWords);
 
   const propOnPage = String(verification.property ?? '').toLowerCase();
-  const propertyMatches = propOnPage.length > 0; // property presence confirms correct SR; no param to compare against (propertyId is numeric)
+  const propertyMatches = propOnPage.length > 0;
 
   const prioOnPage = String(verification.priority ?? '').toLowerCase();
   const submittedPriority = (params.priority ?? 'Normal').toLowerCase();
-  const priorityMatches = prioOnPage.length > 0 && prioOnPage.includes(submittedPriority);
+  const priorityExposed = prioOnPage.length > 0;
+  const priorityMatches = priorityExposed && prioOnPage.includes(submittedPriority);
 
   const pteOnPage = String(verification.permission_to_enter ?? '').toLowerCase();
   const submittedPte = params.permissionToEnter ?? '';
-  // AppFolio renders "Yes"/"No"/"Not Applicable"; we submitted "true"/"false"/"not_applicable"
   const pteMap: Record<string, string> = { 'true': 'yes', 'false': 'no', 'not_applicable': 'not applicable' };
   const expectedPteLabel = pteMap[submittedPte] ?? '';
-  const pteMatches = expectedPteLabel.length > 0 && pteOnPage.includes(expectedPteLabel);
+  const pteExposed = pteOnPage.length > 0 && expectedPteLabel.length > 0;
+  const pteMatches = pteExposed && pteOnPage.includes(expectedPteLabel);
 
-  // Unit: no dedicated selector on the SR detail page. The property name sometimes
-  // includes the unit label (e.g. "72 Cherry St - Unit 4") but there is no separate
-  // .js-unit-name element to verify against.
   const fields_verified = {
     description: descriptionMatches,
     property_present: propertyMatches,
-    priority: prioOnPage.length > 0 ? priorityMatches : null,
-    permission_to_enter: pteOnPage.length > 0 ? pteMatches : null,
-    unit: null as boolean | null, // not verifiable: no dedicated selector on SR detail page
+    priority: priorityExposed ? priorityMatches : null,
+    permission_to_enter: pteExposed ? pteMatches : null,
+    unit: null as boolean | null,
   };
+
+  // verified=true requires: structural checks AND all exposed field echo-matches pass
+  const allExposedFieldsMatch =
+    descriptionMatches &&
+    (fields_verified.priority === null || fields_verified.priority) &&
+    (fields_verified.permission_to_enter === null || fields_verified.permission_to_enter);
 
   return {
     live: true,
-    verified: redirectedToSr && hasCreatedPhrase && hasWoNumber,
+    verified: redirectedToSr && hasCreatedPhrase && hasConcreteWoId && allExposedFieldsMatch,
     fields_verified,
     sr_id: srMatchResponse?.[1] ?? '',
     wo_id: woMatchResponse?.[1] ?? '',

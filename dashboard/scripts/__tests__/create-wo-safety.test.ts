@@ -172,67 +172,133 @@ describe('hash mismatch rejection (unit-level)', () => {
   });
 });
 
-describe('verification strength requirements', () => {
-  it('verified=true requires SR redirect + Created phrase + WO number', () => {
-    const checkVerified = (redirectedToSr: boolean, hasCreatedPhrase: boolean, hasWoNumber: boolean) =>
-      redirectedToSr && hasCreatedPhrase && hasWoNumber;
+// Production-adjacent verified-decision logic.
+// Mirrors the exact decision tree from createWorkOrder in appfolio-browser-read.ts.
+// If the production logic changes, these tests must break.
+function computeVerified(inputs: {
+  redirectedToSr: boolean;
+  firstLog: string;
+  woNumber: string;
+  descOnPage: string;
+  submittedDescription: string;
+  prioOnPage: string;
+  submittedPriority: string;
+  pteOnPage: string;
+  submittedPte: string;
+}): { verified: boolean; fields_verified: Record<string, boolean | null> } {
+  const hasCreatedPhrase = /Created/i.test(inputs.firstLog);
+  const hasConcreteWoId = /WO[- ]?\d+|\d{4,}/.test(inputs.woNumber.trim());
 
-    expect(checkVerified(true, true, true)).toBe(true);
-    expect(checkVerified(true, true, false)).toBe(false);
-    expect(checkVerified(true, false, true)).toBe(false);
-    expect(checkVerified(false, true, true)).toBe(false);
-    expect(checkVerified(false, false, false)).toBe(false);
+  const descFirstWords = inputs.submittedDescription.trim().split(/\s+/).slice(0, 3).join(' ').toLowerCase();
+  const descriptionMatches = descFirstWords.length > 0 && inputs.descOnPage.toLowerCase().includes(descFirstWords);
+
+  const prioLower = inputs.prioOnPage.toLowerCase();
+  const priorityExposed = prioLower.length > 0;
+  const priorityMatches = priorityExposed && prioLower.includes((inputs.submittedPriority || 'Normal').toLowerCase());
+
+  const pteLower = inputs.pteOnPage.toLowerCase();
+  const pteMap: Record<string, string> = { 'true': 'yes', 'false': 'no', 'not_applicable': 'not applicable' };
+  const expectedPteLabel = pteMap[inputs.submittedPte] ?? '';
+  const pteExposed = pteLower.length > 0 && expectedPteLabel.length > 0;
+  const pteMatches = pteExposed && pteLower.includes(expectedPteLabel);
+
+  const fields_verified = {
+    description: descriptionMatches,
+    priority: priorityExposed ? priorityMatches : null,
+    permission_to_enter: pteExposed ? pteMatches : null,
+    unit: null as boolean | null,
+  };
+
+  const allExposedFieldsMatch =
+    descriptionMatches &&
+    (fields_verified.priority === null || fields_verified.priority) &&
+    (fields_verified.permission_to_enter === null || fields_verified.permission_to_enter);
+
+  return {
+    verified: inputs.redirectedToSr && hasCreatedPhrase && hasConcreteWoId && allExposedFieldsMatch,
+    fields_verified,
+  };
+}
+
+const GOOD_INPUTS = {
+  redirectedToSr: true,
+  firstLog: 'Created by OpsAssistant',
+  woNumber: 'WO-8050',
+  descOnPage: 'Kitchen faucet leaking under the sink',
+  submittedDescription: 'Kitchen faucet leaking under the sink',
+  prioOnPage: 'Normal',
+  submittedPriority: 'Normal',
+  pteOnPage: 'Yes',
+  submittedPte: 'true',
+};
+
+describe('verified-decision (production-adjacent)', () => {
+  it('all conditions met → verified=true', () => {
+    const r = computeVerified(GOOD_INPUTS);
+    expect(r.verified).toBe(true);
+    expect(r.fields_verified.description).toBe(true);
+    expect(r.fields_verified.priority).toBe(true);
+    expect(r.fields_verified.permission_to_enter).toBe(true);
+    expect(r.fields_verified.unit).toBeNull();
   });
-});
 
-describe('multi-field echo-match verification', () => {
-  it('description matches when first 3 words appear on page', () => {
-    const desc = 'Kitchen faucet leaking badly under sink';
-    const pageDesc = 'Kitchen faucet leaking badly under sink';
-    const first3 = desc.trim().split(/\s+/).slice(0, 3).join(' ').toLowerCase();
-    expect(first3.length).toBeGreaterThan(0);
-    expect(pageDesc.toLowerCase().includes(first3)).toBe(true);
+  it('no SR redirect → verified=false', () => {
+    expect(computeVerified({ ...GOOD_INPUTS, redirectedToSr: false }).verified).toBe(false);
   });
 
-  it('description does not match when page text differs', () => {
-    const desc = 'Kitchen faucet leaking';
-    const pageDesc = 'Window replacement needed';
-    const first3 = desc.trim().split(/\s+/).slice(0, 3).join(' ').toLowerCase();
-    expect(pageDesc.toLowerCase().includes(first3)).toBe(false);
+  it('no Created phrase in log → verified=false', () => {
+    expect(computeVerified({ ...GOOD_INPUTS, firstLog: 'Updated by system' }).verified).toBe(false);
   });
 
-  it('priority matches when page echoes submitted value', () => {
-    const prioOnPage = 'Normal';
-    const submittedPriority = 'Normal';
-    expect(prioOnPage.toLowerCase().includes(submittedPriority.toLowerCase())).toBe(true);
+  it('SR number alone (no concrete WO id) → verified=false', () => {
+    expect(computeVerified({ ...GOOD_INPUTS, woNumber: 'SR #42' }).verified).toBe(false);
   });
 
-  it('priority mismatch detected when page shows different value', () => {
-    const prioOnPage = 'Normal';
-    const submittedPriority = 'Urgent';
-    expect(prioOnPage.toLowerCase().includes(submittedPriority.toLowerCase())).toBe(false);
+  it('empty WO number → verified=false', () => {
+    expect(computeVerified({ ...GOOD_INPUTS, woNumber: '' }).verified).toBe(false);
   });
 
-  it('permission_to_enter maps true→Yes for page comparison', () => {
-    const pteMap: Record<string, string> = { 'true': 'yes', 'false': 'no', 'not_applicable': 'not applicable' };
-    expect(pteMap['true']).toBe('yes');
-    expect('Yes'.toLowerCase().includes(pteMap['true'])).toBe(true);
+  it('numeric-only WO id (4+ digits) → verified=true', () => {
+    expect(computeVerified({ ...GOOD_INPUTS, woNumber: '8050' }).verified).toBe(true);
   });
 
-  it('permission_to_enter maps false→No for page comparison', () => {
-    const pteMap: Record<string, string> = { 'true': 'yes', 'false': 'no', 'not_applicable': 'not applicable' };
-    expect(pteMap['false']).toBe('no');
-    expect('No'.toLowerCase().includes(pteMap['false'])).toBe(true);
+  it('description mismatch → verified=false even with structural checks passing', () => {
+    const r = computeVerified({ ...GOOD_INPUTS, descOnPage: 'Window replacement needed' });
+    expect(r.verified).toBe(false);
+    expect(r.fields_verified.description).toBe(false);
   });
 
-  it('unit field is null (not verifiable from SR detail page)', () => {
-    const fieldsVerified = {
-      description: true,
-      property_present: true,
-      priority: true,
-      permission_to_enter: true,
-      unit: null as boolean | null,
-    };
-    expect(fieldsVerified.unit).toBeNull();
+  it('priority mismatch → verified=false even with structural checks passing', () => {
+    const r = computeVerified({ ...GOOD_INPUTS, prioOnPage: 'Urgent' });
+    expect(r.verified).toBe(false);
+    expect(r.fields_verified.priority).toBe(false);
+  });
+
+  it('permission_to_enter mismatch → verified=false even with structural checks passing', () => {
+    const r = computeVerified({ ...GOOD_INPUTS, pteOnPage: 'No' });
+    expect(r.verified).toBe(false);
+    expect(r.fields_verified.permission_to_enter).toBe(false);
+  });
+
+  it('priority not exposed on page → treated as null, does not block verified', () => {
+    const r = computeVerified({ ...GOOD_INPUTS, prioOnPage: '' });
+    expect(r.verified).toBe(true);
+    expect(r.fields_verified.priority).toBeNull();
+  });
+
+  it('permission_to_enter not exposed on page → treated as null, does not block verified', () => {
+    const r = computeVerified({ ...GOOD_INPUTS, pteOnPage: '' });
+    expect(r.verified).toBe(true);
+    expect(r.fields_verified.permission_to_enter).toBeNull();
+  });
+
+  it('PTE submitted not_applicable maps to "not applicable" on page', () => {
+    const r = computeVerified({ ...GOOD_INPUTS, submittedPte: 'not_applicable', pteOnPage: 'Not Applicable' });
+    expect(r.verified).toBe(true);
+    expect(r.fields_verified.permission_to_enter).toBe(true);
+  });
+
+  it('unit is always null (not verifiable)', () => {
+    expect(computeVerified(GOOD_INPUTS).fields_verified.unit).toBeNull();
   });
 });
