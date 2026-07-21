@@ -124,6 +124,9 @@ describe('open_work_order intake', () => {
     expect(payload.appfolio_unit_id).toBe(1001);
     expect(payload.appfolio_property_id).toBe(2001);
     expect(payload.appfolio_occupancy_id).toBe(3001);
+    expect(payload.appfolio_ready).toBe(true);
+    expect(payload.contact_id).toBe('c1');
+    expect(payload.timestamp_utc).toBeDefined();
     expect(payload.permission_to_enter).toBe(true);
     expect(payload.location_detail).toBe('under the kitchen sink');
   });
@@ -192,7 +195,7 @@ describe('open_work_order intake', () => {
     expect(res.result).toContain('call you back');
   });
 
-  it('AppFolio ID lookup failure → still captures event (IDs null)', async () => {
+  it('AppFolio ID lookup failure → event flagged appfolio_ready=false, confirmation says "verify"', async () => {
     const insertCalls: Array<[string, unknown[]]> = [];
     mockQuery.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
@@ -210,10 +213,12 @@ describe('open_work_order intake', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(res.result).toContain('maintenance request');
+    expect(res.result).toContain('verify');
+    expect(res.result).not.toContain('submitted your maintenance request');
 
     const payload = JSON.parse(insertCalls[0][1][2] as string);
     expect(payload.identified).toBe(true);
+    expect(payload.appfolio_ready).toBe(false);
     expect(payload.appfolio_unit_id).toBeNull();
     expect(payload.appfolio_property_id).toBeNull();
   });
@@ -222,7 +227,7 @@ describe('open_work_order intake', () => {
     const insertCalls: Array<[string, unknown[]]> = [];
     mockQuery.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
-      if (sql.includes('units')) return { rows: [{ appfolio_unit_id: 1001, appfolio_property_id: 2001, appfolio_occupancy_id: null }] };
+      if (sql.includes('units')) return { rows: [{ appfolio_unit_id: 1001, appfolio_property_id: 2001, appfolio_occupancy_id: 3001 }] };
       if (sql.includes('voice_events')) {
         insertCalls.push([sql, params ?? []]);
         return { rows: [] };
@@ -238,5 +243,56 @@ describe('open_work_order intake', () => {
     expect(res.status).toBe(200);
     const payload = JSON.parse(insertCalls[0][1][2] as string);
     expect(payload.severity).toBe('normal');
+    expect(payload.appfolio_ready).toBe(true);
+  });
+
+  it('Amanda-scope caller → redirected, no intake captured', async () => {
+    const amandaResolved = { ...MATCHED_RESOLVED, routing_scope: 'amanda' };
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: amandaResolved }] };
+      return { rows: [] };
+    });
+
+    const res = await postWoIntake({
+      caller_number: '+14155551234',
+      issue_description: 'Broken window',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('property management team');
+    expect(res.result).not.toContain('maintenance request');
+  });
+
+  it('paused-scope caller → redirected, no intake captured', async () => {
+    const pausedResolved = { ...MATCHED_RESOLVED, routing_scope: 'paused' };
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: pausedResolved }] };
+      return { rows: [] };
+    });
+
+    const res = await postWoIntake({
+      caller_number: '+14155551234',
+      issue_description: 'Leak in bathroom',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('property management team');
+  });
+
+  it('inactive tenant → rejected, no intake captured', async () => {
+    const inactiveResolved = { ...MATCHED_RESOLVED, has_active_occupancy: false, occupancy_id: null };
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: inactiveResolved }] };
+      return { rows: [] };
+    });
+
+    const res = await postWoIntake({
+      caller_number: '+14155551234',
+      issue_description: 'AC not working',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('former resident');
+    expect(res.result).toContain('current property manager');
   });
 });

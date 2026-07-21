@@ -672,6 +672,7 @@ async function handleOpenWorkOrder(
       severity,
       permission_to_enter: permissionToEnter ?? null,
       call_id: callId,
+      timestamp_utc: new Date().toISOString(),
       identified: false,
     };
     try {
@@ -687,8 +688,25 @@ async function handleOpenWorkOrder(
     return;
   }
 
+  // Scope guard: BLV/TIB = Amanda scope, paused properties not serviced
+  const routingScope = (resolved['routing_scope'] as string | undefined) ?? 'fleet';
+  if (routingScope === 'amanda' || routingScope === 'paused') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ result: "Let me connect you with our property management team who handles your property directly." }));
+    return;
+  }
+
+  // Inactive tenant guard
+  const occupancyId = resolved['occupancy_id'] as string | null;
+  if (resolved['resolved_type'] === 'tenant' && (!resolved['has_active_occupancy'] || !occupancyId)) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ result: "I see you're a former resident. For maintenance requests at your current address, please contact your current property manager." }));
+    return;
+  }
+
   const unitId = resolved['unit_id'] as string | null;
   const propertyId = resolved['property_id'] as string | null;
+  const contactId = resolved['contact_id'] as string | null;
   const displayName = (resolved['display_name'] as string | null) ?? '';
   const unitLabel = resolved['unit_label'] as string | null;
   const propertyLabel = (resolved['property_label'] as string | null) ?? (resolved['property_name'] as string | null);
@@ -697,6 +715,7 @@ async function handleOpenWorkOrder(
   let appfolioUnitId: number | null = null;
   let appfolioPropertyId: number | null = null;
   let appfolioOccupancyId: number | null = null;
+  let appfolioReady = false;
 
   if (unitId) {
     const idRow = await pool.query(
@@ -717,6 +736,9 @@ async function handleOpenWorkOrder(
     }
   }
 
+  // Async creator needs all three AppFolio IDs to submit; without them, flag for manual review
+  appfolioReady = !!(appfolioUnitId && appfolioPropertyId && appfolioOccupancyId);
+
   const intakePayload = {
     caller_number: callerNumber,
     issue_description: issueDescription,
@@ -724,8 +746,10 @@ async function handleOpenWorkOrder(
     severity,
     permission_to_enter: permissionToEnter ?? null,
     call_id: callId,
+    timestamp_utc: new Date().toISOString(),
     identified: true,
     tenant_name: displayName,
+    contact_id: contactId,
     unit_id: unitId,
     unit_label: unitLabel,
     property_id: propertyId,
@@ -733,6 +757,7 @@ async function handleOpenWorkOrder(
     appfolio_unit_id: appfolioUnitId,
     appfolio_property_id: appfolioPropertyId,
     appfolio_occupancy_id: appfolioOccupancyId,
+    appfolio_ready: appfolioReady,
   };
 
   try {
@@ -745,12 +770,14 @@ async function handleOpenWorkOrder(
   }
 
   const locationStr = [unitLabel, propertyLabel].filter(Boolean).join(', ');
-  console.log(`[voice-gateway] wo_intake logged | tenant="${displayName}" unit="${locationStr}" severity=${severity} call_id=${callId ?? 'none'}`);
+  console.log(`[voice-gateway] wo_intake logged | tenant="${displayName}" unit="${locationStr}" severity=${severity} appfolio_ready=${appfolioReady} call_id=${callId ?? 'none'}`);
+
+  const confirmationMsg = appfolioReady
+    ? `I've submitted your maintenance request for ${issueDescription.toLowerCase().substring(0, 80)}. Our maintenance team will review it and follow up with you. If the issue becomes urgent, please don't hesitate to call us back.`
+    : `I've noted your maintenance request for ${issueDescription.toLowerCase().substring(0, 80)}. Our team will need to verify a few details on our end before setting up the work order, but someone will follow up with you.`;
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    result: `I've submitted your maintenance request for ${issueDescription.toLowerCase().substring(0, 80)}. Our maintenance team will review it and follow up with you. If the issue becomes urgent, please don't hesitate to call us back.`,
-  }));
+  res.end(JSON.stringify({ result: confirmationMsg }));
 }
 
 type BodyParser = (rawBody: Buffer) => { payload: unknown; sourceEventId: string | null };
