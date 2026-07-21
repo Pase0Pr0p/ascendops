@@ -1076,7 +1076,7 @@ async function createWorkOrder(
 
   // ── LIVE SUBMIT ──
   const bodyLiteral = JSON.stringify(postBody);
-  const submitScript = `fetch("${postUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}","X-Requested-With":"XMLHttpRequest"},body:${bodyLiteral},redirect:"follow"}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url,body_preview:t.substring(0,500)});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
+  const submitScript = `fetch("${postUrl}",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":"${csrfToken}"},body:${bodyLiteral},redirect:"follow"}).then(function(r){return r.text().then(function(t){return JSON.stringify({status:r.status,ok:r.ok,final_url:r.url,body_preview:t.substring(0,2000)});});}).catch(function(e){return JSON.stringify({error:e.message});})`;
   const submitResult = abEval(submitScript);
 
   let submitJson: Record<string, unknown> = {};
@@ -1096,8 +1096,11 @@ async function createWorkOrder(
   // Post-create verification: navigate browser to the final_url from fetch response
   // (fetch follows redirects server-side but does NOT navigate the browser page)
   const fetchFinalUrl = String(submitJson.final_url ?? '');
-  const srMatchResponse = fetchFinalUrl.match(/\/service_requests\/(\d+)/);
-  const woMatchResponse = fetchFinalUrl.match(/\/work_orders\/(\d+)/);
+  const bodyPreview = String(submitJson.body_preview ?? '');
+  let srMatchResponse = fetchFinalUrl.match(/\/service_requests\/(\d+)/);
+  let woMatchResponse = fetchFinalUrl.match(/\/work_orders\/(\d+)/);
+  if (!srMatchResponse) srMatchResponse = bodyPreview.match(/\/service_requests\/(\d+)/);
+  if (!woMatchResponse) woMatchResponse = bodyPreview.match(/\/work_orders\/(\d+)/);
 
   let verification: Record<string, unknown> = {};
 
