@@ -76,14 +76,23 @@ function sendTelegramWithKeyboard(chatId: string, message: string, keyboard: obj
   const body = JSON.stringify({
     chat_id: chatId,
     text: message,
-    parse_mode: 'Markdown',
     reply_markup: keyboard,
   });
   try {
-    execFileSync('curl', ['-s', '-X', 'POST', url,
+    const raw = execFileSync('curl', ['-s', '-X', 'POST', url,
       '-H', 'Content-Type: application/json',
       '-d', body,
-    ], { timeout: 15_000, stdio: 'pipe' });
+    ], { timeout: 15_000, stdio: 'pipe' }).toString('utf-8');
+    try {
+      const resp = JSON.parse(raw);
+      if (resp.ok !== true) {
+        console.error(JSON.stringify({ error: 'telegram_api_rejected', description: resp.description }));
+        return false;
+      }
+    } catch {
+      console.error(JSON.stringify({ error: 'telegram_response_unparseable', raw: raw.substring(0, 200) }));
+      return false;
+    }
     return true;
   } catch (e) {
     console.error(JSON.stringify({ error: 'telegram_send_failed', detail: String(e) }));
@@ -293,15 +302,15 @@ async function pollAndStage() {
     const locationRef = formatLocationRef(p);
     const pteStr = permissionToEnter === true ? 'Yes' : permissionToEnter === false ? 'No' : 'Not specified';
     const approvalMsg = [
-      `*WO Intake Approval*`,
+      `WO Intake Approval`,
       ``,
-      `*Tenant:* ${tenantName}`,
-      `*Location:* ${unitLabel}, ${propertyLabel} (${locationRef})`,
-      `*Issue:* ${issueDescription}`,
-      locationDetail ? `*Where:* ${locationDetail}` : null,
-      `*Priority:* ${priority}`,
-      `*Permission to enter:* ${pteStr}`,
-      `*Source:* Voice/Alex${callId ? ' (call ' + callId.substring(0, 8) + ')' : ''}`,
+      `Tenant: ${tenantName}`,
+      `Location: ${unitLabel}, ${propertyLabel} (${locationRef})`,
+      `Issue: ${issueDescription}`,
+      locationDetail ? `Where: ${locationDetail}` : null,
+      `Priority: ${priority}`,
+      `Permission to enter: ${pteStr}`,
+      `Source: Voice/Alex${callId ? ' (call ' + callId.substring(0, 8) + ')' : ''}`,
       ``,
       `Tap Approve to create this WO in AppFolio.`,
     ].filter(Boolean).join('\n');
@@ -323,6 +332,7 @@ async function pollAndStage() {
       ).catch(() => {});
       await failPool.end().catch(() => {});
       logEvent('action', 'wo_intake_approval_send_failed', 'error', { event_id: row.id, agent: 'claudia' });
+      sendTelegram(CHAT_ALBIE, `WO approval message failed to send for ${tenantName} at ${propertyLabel} (event ${row.id}). Marked failed, manual WO needed.`);
       console.error(JSON.stringify({ error: 'approval_send_failed', event_id: row.id }));
       continue;
     }
