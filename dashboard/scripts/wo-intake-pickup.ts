@@ -164,7 +164,8 @@ async function pollAndStage() {
   try {
     const res = await pool.query<IntakeRow>(
       `UPDATE voice_events
-         SET lifecycle_status = 'staged'
+         SET lifecycle_status = 'staged',
+             payload = payload || jsonb_build_object('staged_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
        WHERE id IN (
          SELECT id FROM voice_events
           WHERE event_type = 'wo_intake'
@@ -218,14 +219,14 @@ async function pollAndStage() {
   } catch { /* best-effort */ }
 
   // Expire stale staged rows — prevents zombie DB rows when local state evicts.
-  // Uses 8 days (vs local 7-day eviction on staged_at) because DB received_at
-  // predates staged_at; the extra day prevents DB expiry racing ahead of local eviction.
+  // Both DB sweep and local eviction use the same staged_at timestamp (written to
+  // payload during pending→staged claim) with matching 7-day cutoff.
   try {
     const stale = await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'failed'
        WHERE event_type = 'wo_intake'
          AND lifecycle_status = 'staged'
-         AND received_at < NOW() - INTERVAL '8 days'
+         AND (payload->>'staged_at')::timestamptz < NOW() - INTERVAL '7 days'
        RETURNING id::text, payload->>'tenant_name' as tenant_name`,
     );
     if (stale.rows.length > 0) {
