@@ -145,11 +145,24 @@ async function lookupAppFolioIds(
 
 // ─── main processor ────────────────────────────────────────────────────────────
 
+const STALE_PROCESSING_MINUTES = 10;
+const MAX_EMERGENCY_RETRIES = 5;
+
 async function processPostCallEvents(): Promise<void> {
   const pool = makePool();
 
   try {
-    // 5a FIX: atomic claim via UPDATE...RETURNING inside a transaction
+    // Stale-processing reaper: reset rows stuck in 'processing' for >10 min
+    // Uses received_at as proxy (no updated_at column); processing takes seconds
+    await pool.query(`
+      UPDATE voice_events
+      SET lifecycle_status = 'pending'
+      WHERE event_type = 'elevenlabs_post_call'
+        AND lifecycle_status = 'processing'
+        AND received_at < now() - interval '${STALE_PROCESSING_MINUTES} minutes'
+    `).catch(() => {});
+
+    // Atomic claim: includes NULL (new rows), pending, and emergency_send_failed (retry)
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -159,12 +172,14 @@ async function processPostCallEvents(): Promise<void> {
         WHERE id IN (
           SELECT id FROM voice_events
           WHERE event_type = 'elevenlabs_post_call'
-            AND (lifecycle_status IS NULL OR lifecycle_status = 'pending')
-          ORDER BY created_at ASC
+            AND (lifecycle_status IS NULL OR lifecycle_status IN ('pending', 'emergency_send_failed'))
+          ORDER BY
+            CASE WHEN lifecycle_status = 'emergency_send_failed' THEN 0 ELSE 1 END,
+            received_at ASC
           LIMIT 10
           FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, payload, created_at
+        RETURNING id, payload, received_at
       `);
       await client.query('COMMIT');
       client.release();
@@ -177,11 +192,12 @@ async function processPostCallEvents(): Promise<void> {
 
       for (const row of claimed.rows) {
         const eventId = row.id as string;
-        const payload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
-        const eventData = (payload['data'] ?? payload) as Record<string, unknown>;
+        const rawPayload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
+        const eventData = (rawPayload['data'] ?? rawPayload) as Record<string, unknown>;
+        const emergencyAttempts = (rawPayload['_emergency_meta'] as { attempts?: number } | undefined)?.attempts ?? 0;
 
         try {
-          await processOneEvent(pool, eventId, eventData);
+          await processOneEvent(pool, eventId, eventData, emergencyAttempts);
         } catch (e) {
           console.error(JSON.stringify({
             error: 'event_processing_failed',
@@ -203,10 +219,11 @@ async function processPostCallEvents(): Promise<void> {
   }
 }
 
-async function processOneEvent(
+export async function processOneEvent(
   pool: pg.Pool,
   eventId: string,
   payload: Record<string, unknown>,
+  emergencyAttempts = 0,
 ): Promise<void> {
   const conversationId = extractConversationId(payload);
   const callerPhone = extractCallerPhone(payload);
@@ -334,7 +351,7 @@ async function processOneEvent(
       `SELECT id FROM voice_events
        WHERE event_type = 'wo_intake'
          AND payload->>'repeat_window_key' = $1
-         AND created_at > now() - interval '${REPEAT_WINDOW_HOURS} hours'
+         AND received_at > now() - interval '${REPEAT_WINDOW_HOURS} hours'
        LIMIT 1`,
       [repeatKey],
     );
@@ -414,17 +431,37 @@ async function processOneEvent(
     }));
 
     if (!telegramSent && !maxSent) {
-      // BOTH channels failed — do NOT mark processed, leave for retry
+      const newAttempts = emergencyAttempts + 1;
+
+      if (newAttempts >= MAX_EMERGENCY_RETRIES) {
+        await pool.query(
+          `UPDATE voice_events SET lifecycle_status = 'emergency_dead_letter' WHERE id = $1`,
+          [eventId],
+        );
+        sendTelegram(CHAT_ALBIE, `DEAD LETTER: Emergency intake FAILED delivery after ${newAttempts} attempts!\n${tenantName} at ${unitAddress}\nIssue: ${issueDescription}\nCall ID: ${conversationId}\nManual intervention required — voice_events id: ${eventId}`);
+        logEvent('action', 'emergency_dead_letter', 'critical', {
+          event_id: eventId, intake_id: intakeId, attempts: newAttempts,
+          call_id: conversationId, agent: 'claudia',
+        });
+        console.error(JSON.stringify({
+          error: 'emergency_dead_letter',
+          event_id: eventId, intake_id: intakeId, attempts: newAttempts,
+        }));
+        return;
+      }
+
       await pool.query(
-        `UPDATE voice_events SET lifecycle_status = 'emergency_send_failed' WHERE id = $1`,
-        [eventId],
+        `UPDATE voice_events
+         SET lifecycle_status = 'emergency_send_failed',
+             payload = payload || $2::jsonb
+         WHERE id = $1`,
+        [eventId, JSON.stringify({ _emergency_meta: { attempts: newAttempts, last_failed_at: new Date().toISOString() } })],
       );
       console.error(JSON.stringify({
         error: 'emergency_alert_delivery_failed',
-        event_id: eventId,
-        intake_id: intakeId,
-        call_id: conversationId,
-        safety_detail: safetyFlags.detail,
+        event_id: eventId, intake_id: intakeId,
+        attempt: newAttempts, max_retries: MAX_EMERGENCY_RETRIES,
+        call_id: conversationId, safety_detail: safetyFlags.detail,
       }));
       return;
     }
@@ -490,7 +527,11 @@ async function processOneEvent(
 
 // ─── entry point ───────────────────────────────────────────────────────────────
 
-processPostCallEvents().catch((e) => {
-  console.error(JSON.stringify({ error: 'processor_fatal', detail: String(e).substring(0, 500) }));
-  process.exit(1);
-});
+export { processPostCallEvents, MAX_EMERGENCY_RETRIES };
+
+if (!process.env.VITEST) {
+  processPostCallEvents().catch((e) => {
+    console.error(JSON.stringify({ error: 'processor_fatal', detail: String(e).substring(0, 500) }));
+    process.exit(1);
+  });
+}
