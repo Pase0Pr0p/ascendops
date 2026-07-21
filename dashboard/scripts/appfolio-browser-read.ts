@@ -36,6 +36,7 @@ import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync
 import { config as dotenvConfig } from 'dotenv';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { computeCreateWoVerified } from './lib/create-wo-verify';
 import {
   normalizeVendorName, vendorNameTokens, verifyVendorNameMatch,
   computeEmailApprovalHash, computeMessageApprovalHash,
@@ -1140,49 +1141,23 @@ async function createWorkOrder(
 
   ab('close');
 
-  const hasCreatedPhrase = /Created/i.test(String(verification.first_log ?? ''));
-  const redirectedToSr = !!srMatchResponse;
-  const woNumberStr = String(verification.wo_number ?? '').trim();
-  const hasConcreteWoId = /WO[- ]?\d+|\d{4,}/.test(woNumberStr);
-
-  // Multi-field echo-match: compare each verifiable field from the page against the submitted params
-  const descOnPage = String(verification.description ?? '');
-  const descFirstWords = params.description.trim().split(/\s+/).slice(0, 3).join(' ').toLowerCase();
-  const descriptionMatches = descFirstWords.length > 0 && descOnPage.toLowerCase().includes(descFirstWords);
-
-  const propOnPage = String(verification.property ?? '').toLowerCase();
-  const propertyMatches = propOnPage.length > 0;
-
-  const prioOnPage = String(verification.priority ?? '').toLowerCase();
-  const submittedPriority = (params.priority ?? 'Normal').toLowerCase();
-  const priorityExposed = prioOnPage.length > 0;
-  const priorityMatches = priorityExposed && prioOnPage.includes(submittedPriority);
-
-  const pteOnPage = String(verification.permission_to_enter ?? '').toLowerCase();
-  const submittedPte = params.permissionToEnter ?? '';
-  const pteMap: Record<string, string> = { 'true': 'yes', 'false': 'no', 'not_applicable': 'not applicable' };
-  const expectedPteLabel = pteMap[submittedPte] ?? '';
-  const pteExposed = pteOnPage.length > 0 && expectedPteLabel.length > 0;
-  const pteMatches = pteExposed && pteOnPage.includes(expectedPteLabel);
-
-  const fields_verified = {
-    description: descriptionMatches,
-    property_present: propertyMatches,
-    priority: priorityExposed ? priorityMatches : null,
-    permission_to_enter: pteExposed ? pteMatches : null,
-    unit: null as boolean | null,
-  };
-
-  // verified=true requires: structural checks AND all exposed field echo-matches pass
-  const allExposedFieldsMatch =
-    descriptionMatches &&
-    (fields_verified.priority === null || fields_verified.priority) &&
-    (fields_verified.permission_to_enter === null || fields_verified.permission_to_enter);
+  const vResult = computeCreateWoVerified({
+    redirectedToSr: !!srMatchResponse,
+    firstLog: String(verification.first_log ?? ''),
+    woNumber: String(verification.wo_number ?? ''),
+    descOnPage: String(verification.description ?? ''),
+    submittedDescription: params.description,
+    propOnPage: String(verification.property ?? ''),
+    prioOnPage: String(verification.priority ?? ''),
+    submittedPriority: params.priority ?? 'Normal',
+    pteOnPage: String(verification.permission_to_enter ?? ''),
+    submittedPte: params.permissionToEnter ?? '',
+  });
 
   return {
     live: true,
-    verified: redirectedToSr && hasCreatedPhrase && hasConcreteWoId && allExposedFieldsMatch,
-    fields_verified,
+    verified: vResult.verified,
+    fields_verified: vResult.fields_verified,
     sr_id: srMatchResponse?.[1] ?? '',
     wo_id: woMatchResponse?.[1] ?? '',
     final_url: fetchFinalUrl,
