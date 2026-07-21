@@ -534,6 +534,18 @@ async function executeApproval(eventId: string) {
   const srId = String(createResult['sr_id'] ?? '');
   const woUrl = srId ? `https://paseoproperties.appfolio.com/maintenance/service_requests/${srId}` : '';
 
+  if (!woId && !srId) {
+    await pool.query(
+      `UPDATE voice_events SET lifecycle_status = 'created_unverified' WHERE id = $1`,
+      [eventId],
+    ).catch(() => {});
+    await pool.end().catch(() => {});
+    logEvent('action', 'wo_no_ids_returned', 'error', { event_id: eventId, agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO submit returned success but NEITHER wo_id nor sr_id were present in the result for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. No Max handoff. Manual reconciliation needed — check AppFolio for a newly created WO.`);
+    console.error(JSON.stringify({ error: 'no_wo_or_sr_id', event_id: eventId }));
+    process.exit(1);
+  }
+
   // Persist WO/SR ID to the event IMMEDIATELY, before any verification check.
   // This is the idempotency anchor: once a WO ID is persisted, no re-create can happen.
   // If this write fails, STOP — no normal success, no Max handoff. Manual reconciliation only.
