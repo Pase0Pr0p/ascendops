@@ -148,6 +148,12 @@ async function lookupAppFolioIds(
 const STALE_PROCESSING_MINUTES = 10;
 const MAX_EMERGENCY_RETRIES = 5;
 
+export interface EmergencyMeta {
+  attempts: number;
+  telegram_confirmed: boolean;
+  max_confirmed: boolean;
+}
+
 // ─── dead-letter sweep ────────────────────────────────────────────────────
 
 export async function sweepDeadLetters(pool: pg.Pool): Promise<number> {
@@ -178,26 +184,31 @@ export async function sweepDeadLetters(pool: pg.Pool): Promise<number> {
       for (const row of deadLetters.rows) {
         const rawPayload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
         const eventData = (rawPayload['data'] ?? rawPayload) as Record<string, unknown>;
+        const rawMeta = rawPayload['_emergency_meta'] as Partial<EmergencyMeta> | undefined;
+        const priorTelegram = rawMeta?.telegram_confirmed ?? false;
+        const priorMax = rawMeta?.max_confirmed ?? false;
         const dcResults = extractDataCollection(eventData);
         const issueField = extractField(dcResults, 'maintenance_issue_description');
         const callerNameField = extractField(dcResults, 'caller_name');
         const convId = extractConversationId(eventData);
         const summary = `Emergency dead-letter retry — ${callerNameField ? String(callerNameField.value) : 'unknown caller'}: ${issueField ? String(issueField.value) : 'unknown issue'} (call ${convId || row.id})`;
 
-        const telegramSent = sendTelegram(CHAT_ALBIE, `DEAD LETTER RETRY:\n${summary}\nvoice_events id: ${row.id}\nManual intervention required.`);
-        const maxSent = sendAgentMessage('maintenance-coordinator', JSON.stringify({
-          type: 'emergency_dead_letter_retry',
-          event_id: row.id,
-          summary,
-        }));
+        const telegramOk = priorTelegram
+          || sendTelegram(CHAT_ALBIE, `DEAD LETTER RETRY:\n${summary}\nvoice_events id: ${row.id}\nManual intervention required.`);
+        const maxOk = priorMax
+          || sendAgentMessage('maintenance-coordinator', JSON.stringify({
+            type: 'emergency_dead_letter_retry',
+            event_id: row.id,
+            summary,
+          }));
 
-        if (telegramSent || maxSent) {
+        if (telegramOk && maxOk) {
           await client.query(
             `UPDATE voice_events SET lifecycle_status = 'dead_letter_delivered' WHERE id = $1`,
             [row.id],
           );
           logEvent('action', 'dead_letter_recovered', 'critical', {
-            event_id: row.id, channel: telegramSent ? 'telegram' : 'max', agent: 'claudia',
+            event_id: row.id, channel: 'both', agent: 'claudia',
           });
           recovered++;
         }
@@ -272,10 +283,15 @@ async function processPostCallEvents(): Promise<void> {
         const eventId = row.id as string;
         const rawPayload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
         const eventData = (rawPayload['data'] ?? rawPayload) as Record<string, unknown>;
-        const emergencyAttempts = (rawPayload['_emergency_meta'] as { attempts?: number } | undefined)?.attempts ?? 0;
+        const rawMeta = rawPayload['_emergency_meta'] as Partial<EmergencyMeta> | undefined;
+        const emergencyMeta: EmergencyMeta = {
+          attempts: rawMeta?.attempts ?? 0,
+          telegram_confirmed: rawMeta?.telegram_confirmed ?? false,
+          max_confirmed: rawMeta?.max_confirmed ?? false,
+        };
 
         try {
-          await processOneEvent(pool, eventId, eventData, emergencyAttempts);
+          await processOneEvent(pool, eventId, eventData, emergencyMeta);
         } catch (e) {
           console.error(JSON.stringify({
             error: 'event_processing_failed',
@@ -297,11 +313,13 @@ async function processPostCallEvents(): Promise<void> {
   }
 }
 
+const DEFAULT_EMERGENCY_META: EmergencyMeta = { attempts: 0, telegram_confirmed: false, max_confirmed: false };
+
 export async function processOneEvent(
   pool: pg.Pool,
   eventId: string,
   payload: Record<string, unknown>,
-  emergencyAttempts = 0,
+  emergencyMeta: EmergencyMeta = DEFAULT_EMERGENCY_META,
 ): Promise<void> {
   const conversationId = extractConversationId(payload);
   const callerPhone = extractCallerPhone(payload);
@@ -499,22 +517,31 @@ export async function processOneEvent(
   );
 
   // ── EMERGENCY PATH ──────────────────────────────────────────────────────
-  // wo_intake is written ONLY after at least one delivery channel confirms,
-  // or on dead-letter (for the manual-review record). This prevents the
-  // source dedup from blocking retries of failed emergency deliveries.
+  // wo_intake is written ONLY after BOTH delivery channels confirm
+  // (cumulatively across retries), or on dead-letter (for manual review).
+  // Per-channel state in _emergency_meta prevents duplicate alerts on retry:
+  // only unconfirmed channels are re-fired.
   if (effectiveRoute === 'emergency') {
     const alertMsg = `EMERGENCY INTAKE from voice call:\n${tenantName} at ${unitAddress}\nIssue: ${issueDescription}\nSafety: ${safetyFlags.detail}\nCall ID: ${conversationId}\nAction needed immediately.`;
-    const telegramSent = sendTelegram(CHAT_ALBIE, alertMsg);
-    const maxSent = sendAgentMessage('maintenance-coordinator', JSON.stringify({
-      type: 'emergency_intake',
-      ...intake,
-    }));
 
-    if (!telegramSent && !maxSent) {
-      const newAttempts = emergencyAttempts + 1;
+    const telegramOk = emergencyMeta.telegram_confirmed
+      || sendTelegram(CHAT_ALBIE, alertMsg);
+    const maxOk = emergencyMeta.max_confirmed
+      || sendAgentMessage('maintenance-coordinator', JSON.stringify({
+        type: 'emergency_intake',
+        ...intake,
+      }));
+
+    if (!telegramOk || !maxOk) {
+      const newAttempts = emergencyMeta.attempts + 1;
+      const updatedMeta: EmergencyMeta & { last_failed_at: string } = {
+        attempts: newAttempts,
+        telegram_confirmed: telegramOk,
+        max_confirmed: maxOk,
+        last_failed_at: new Date().toISOString(),
+      };
 
       if (newAttempts >= MAX_EMERGENCY_RETRIES) {
-        // Terminal: write the intake record for manual review, then dead-letter
         await writeWoIntake();
         await pool.query(
           `UPDATE voice_events SET lifecycle_status = 'emergency_dead_letter' WHERE id = $1`,
@@ -523,33 +550,35 @@ export async function processOneEvent(
         sendTelegram(CHAT_ALBIE, `DEAD LETTER: Emergency intake FAILED delivery after ${newAttempts} attempts!\n${tenantName} at ${unitAddress}\nIssue: ${issueDescription}\nCall ID: ${conversationId}\nManual intervention required — voice_events id: ${eventId}`);
         logEvent('action', 'emergency_dead_letter', 'critical', {
           event_id: eventId, intake_id: intakeId, attempts: newAttempts,
+          telegram_confirmed: telegramOk, max_confirmed: maxOk,
           call_id: conversationId, agent: 'claudia',
         });
         console.error(JSON.stringify({
           error: 'emergency_dead_letter',
           event_id: eventId, intake_id: intakeId, attempts: newAttempts,
+          telegram_confirmed: telegramOk, max_confirmed: maxOk,
         }));
         return;
       }
 
-      // Retryable: do NOT write wo_intake — next run re-processes from scratch
       await pool.query(
         `UPDATE voice_events
          SET lifecycle_status = 'emergency_send_failed',
              payload = payload || $2::jsonb
          WHERE id = $1`,
-        [eventId, JSON.stringify({ _emergency_meta: { attempts: newAttempts, last_failed_at: new Date().toISOString() } })],
+        [eventId, JSON.stringify({ _emergency_meta: updatedMeta })],
       );
       console.error(JSON.stringify({
         error: 'emergency_alert_delivery_failed',
         event_id: eventId, intake_id: intakeId,
         attempt: newAttempts, max_retries: MAX_EMERGENCY_RETRIES,
+        telegram_confirmed: telegramOk, max_confirmed: maxOk,
         call_id: conversationId, safety_detail: safetyFlags.detail,
       }));
       return;
     }
 
-    // At least one channel confirmed — write intake record, then mark processed
+    // Both channels confirmed — write intake record, then mark processed
     await writeWoIntake();
     await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'processed' WHERE id = $1`,
@@ -560,16 +589,16 @@ export async function processOneEvent(
       intake_id: intakeId,
       call_id: conversationId,
       safety_detail: safetyFlags.detail,
-      telegram_sent: telegramSent,
-      max_sent: maxSent,
+      telegram_confirmed: true,
+      max_confirmed: true,
       agent: 'claudia',
     });
     console.log(JSON.stringify({
       status: 'emergency_routed',
       event_id: eventId,
       intake_id: intakeId,
-      telegram_sent: telegramSent,
-      max_sent: maxSent,
+      telegram_confirmed: true,
+      max_confirmed: true,
     }));
     return;
   }
@@ -613,7 +642,7 @@ export async function processOneEvent(
 
 // ─── entry point ───────────────────────────────────────────────────────────────
 
-export { processPostCallEvents, MAX_EMERGENCY_RETRIES };
+export { processPostCallEvents, MAX_EMERGENCY_RETRIES, DEFAULT_EMERGENCY_META };
 
 if (!process.env.VITEST) {
   processPostCallEvents().catch((e) => {

@@ -28,7 +28,7 @@ vi.mock('pg', () => ({
   default: { Pool: MockPoolConstructor },
 }));
 
-import { processOneEvent, processPostCallEvents, sweepDeadLetters, MAX_EMERGENCY_RETRIES } from '../post-call-processor';
+import { processOneEvent, processPostCallEvents, sweepDeadLetters, MAX_EMERGENCY_RETRIES, DEFAULT_EMERGENCY_META, type EmergencyMeta } from '../post-call-processor';
 import { computeSourceIdempotencyKey } from '../lib/post-call-intake';
 
 // ─── helpers ──────────────────────────────────────────────────────────────
@@ -128,6 +128,10 @@ function createMockPool(
   return { pool, queries };
 }
 
+function makeMeta(attempts: number, tg = false, mx = false): EmergencyMeta {
+  return { attempts, telegram_confirmed: tg, max_confirmed: mx };
+}
+
 function findQuery(queries: TrackedQuery[], pattern: string): TrackedQuery | undefined {
   return queries.find(q => q.text.includes(pattern));
 }
@@ -146,62 +150,85 @@ describe('emergency delivery lifecycle', () => {
   });
   afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
 
-  it('at least one send succeeds → wo_intake written + lifecycle=processed', async () => {
+  it('both channels succeed → wo_intake written + lifecycle=processed', async () => {
     const { pool, queries } = createMockPool();
-    await processOneEvent(pool, 'evt-1', makeEmergencyPayload(), 0);
+    await processOneEvent(pool, 'evt-1', makeEmergencyPayload(), makeMeta(0));
 
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, "'processed'")).toBeTruthy();
     expect(findQuery(queries, 'emergency_send_failed')).toBeFalsy();
   });
 
-  it('Telegram succeeds, Max fails → wo_intake written + processed', async () => {
+  it('Telegram ok, Max fail → emergency_send_failed with per-channel state', async () => {
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes('send-message')) throw new Error('agent down');
       return Buffer.from('ok');
     });
     const { pool, queries } = createMockPool();
-    await processOneEvent(pool, 'evt-2', makeEmergencyPayload(), 0);
+    await processOneEvent(pool, 'evt-2', makeEmergencyPayload(), makeMeta(0));
 
-    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
+    const failQ = findQuery(queries, 'emergency_send_failed');
+    expect(failQ).toBeTruthy();
+    const savedMeta = JSON.parse(failQ!.params![1] as string);
+    expect(savedMeta._emergency_meta.telegram_confirmed).toBe(true);
+    expect(savedMeta._emergency_meta.max_confirmed).toBe(false);
+    expect(savedMeta._emergency_meta.attempts).toBe(1);
+  });
+
+  it('retry with telegram_confirmed → only Max fires, Telegram skipped', async () => {
+    const { pool, queries } = createMockPool();
+    await processOneEvent(pool, 'evt-2b', makeEmergencyPayload(), makeMeta(1, true, false));
+
     expect(findQuery(queries, "'processed'")).toBeTruthy();
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
+    // Telegram should NOT have been called (already confirmed)
+    const tgCalls = mockExecFileSync.mock.calls.filter(
+      (c: unknown[]) => (c[1] as string[]).includes('send-telegram'),
+    );
+    expect(tgCalls.length).toBe(0);
+    // Max should have been called
+    const maxCalls = mockExecFileSync.mock.calls.filter(
+      (c: unknown[]) => (c[1] as string[]).includes('send-message'),
+    );
+    expect(maxCalls.length).toBe(1);
   });
 
   it('both sends fail, first attempt → emergency_send_failed, NO wo_intake written', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
     const { pool, queries } = createMockPool();
 
-    await processOneEvent(pool, 'evt-3', makeEmergencyPayload(), 0);
+    await processOneEvent(pool, 'evt-3', makeEmergencyPayload(), makeMeta(0));
 
-    // wo_intake must NOT be written — prevents dedup from blocking retries
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
 
     const failQ = findQuery(queries, 'emergency_send_failed');
     expect(failQ).toBeTruthy();
-    const meta = JSON.parse(failQ!.params![1] as string);
-    expect(meta._emergency_meta.attempts).toBe(1);
+    const savedMeta = JSON.parse(failQ!.params![1] as string);
+    expect(savedMeta._emergency_meta.attempts).toBe(1);
+    expect(savedMeta._emergency_meta.telegram_confirmed).toBe(false);
+    expect(savedMeta._emergency_meta.max_confirmed).toBe(false);
   });
 
   it('both sends fail on attempt 3 → emergency_send_failed, NO wo_intake', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
     const { pool, queries } = createMockPool();
 
-    await processOneEvent(pool, 'evt-4', makeEmergencyPayload(), 3);
+    await processOneEvent(pool, 'evt-4', makeEmergencyPayload(), makeMeta(3));
 
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
     const failQ = findQuery(queries, 'emergency_send_failed');
     expect(failQ).toBeTruthy();
-    const meta = JSON.parse(failQ!.params![1] as string);
-    expect(meta._emergency_meta.attempts).toBe(4);
+    const savedMeta = JSON.parse(failQ!.params![1] as string);
+    expect(savedMeta._emergency_meta.attempts).toBe(4);
   });
 
   it('retry exhaustion → emergency_dead_letter + wo_intake written (for manual record)', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
     const { pool, queries } = createMockPool();
 
-    await processOneEvent(pool, 'evt-5', makeEmergencyPayload(), MAX_EMERGENCY_RETRIES - 1);
+    await processOneEvent(pool, 'evt-5', makeEmergencyPayload(), makeMeta(MAX_EMERGENCY_RETRIES - 1));
 
-    // Dead-letter IS terminal — wo_intake is written for the manual-review record
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, 'emergency_dead_letter')).toBeTruthy();
     expect(findQuery(queries, 'emergency_send_failed')).toBeFalsy();
@@ -216,43 +243,67 @@ describe('emergency retry: dedup must not block re-delivery (regression)', () =>
   afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
 
   it('first attempt fails → no wo_intake → retry finds no source dup → re-sends → delivered', async () => {
-    // FIRST ATTEMPT: both sends fail
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
     const { pool: pool1, queries: q1 } = createMockPool();
-    await processOneEvent(pool1, 'evt-retry', makeEmergencyPayload(), 0);
+    await processOneEvent(pool1, 'evt-retry', makeEmergencyPayload(), makeMeta(0));
 
-    // Verify: no wo_intake was written on failure
     expect(findQuery(q1, 'INSERT INTO voice_events')).toBeFalsy();
     expect(findQuery(q1, 'emergency_send_failed')).toBeTruthy();
 
-    // SECOND ATTEMPT (retry): sends succeed now
     mockExecFileSync.mockReturnValue(Buffer.from('ok'));
     const { pool: pool2, queries: q2 } = createMockPool();
-    await processOneEvent(pool2, 'evt-retry', makeEmergencyPayload(), 1);
+    await processOneEvent(pool2, 'evt-retry', makeEmergencyPayload(), makeMeta(1));
 
-    // Verify: source dedup check passes (no prior wo_intake)
     expect(findQuery(q2, 'duplicate_skipped')).toBeFalsy();
-    // Verify: wo_intake written after successful delivery
     expect(findQuery(q2, 'INSERT INTO voice_events')).toBeTruthy();
-    // Verify: marked processed
     expect(findQuery(q2, "'processed'")).toBeTruthy();
   });
 
+  it('partial delivery: Telegram ok, Max fail → retry with cumulative state → both confirmed', async () => {
+    // FIRST ATTEMPT: Telegram ok, Max fail → emergency_send_failed with telegram_confirmed
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('send-message')) throw new Error('agent down');
+      return Buffer.from('ok');
+    });
+    const { pool: pool1, queries: q1 } = createMockPool();
+    await processOneEvent(pool1, 'evt-partial', makeEmergencyPayload(), makeMeta(0));
+
+    expect(findQuery(q1, 'INSERT INTO voice_events')).toBeFalsy();
+    const failQ = findQuery(q1, 'emergency_send_failed');
+    expect(failQ).toBeTruthy();
+    const savedMeta = JSON.parse(failQ!.params![1] as string);
+    expect(savedMeta._emergency_meta.telegram_confirmed).toBe(true);
+    expect(savedMeta._emergency_meta.max_confirmed).toBe(false);
+
+    // SECOND ATTEMPT: pass cumulative state, Max now succeeds
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+    const { pool: pool2, queries: q2 } = createMockPool();
+    await processOneEvent(pool2, 'evt-partial', makeEmergencyPayload(), makeMeta(1, true, false));
+
+    // Both confirmed cumulatively → processed
+    expect(findQuery(q2, 'INSERT INTO voice_events')).toBeTruthy();
+    expect(findQuery(q2, "'processed'")).toBeTruthy();
+    // Telegram should NOT have been re-sent (already confirmed)
+    const tgCalls = mockExecFileSync.mock.calls.filter(
+      (c: unknown[]) => (c[1] as string[]).includes('send-telegram'),
+    );
+    expect(tgCalls.length).toBe(0);
+  });
+
   it('first attempt fails → retry fails → retry fails → retry succeeds → delivered', async () => {
-    // Simulate 3 failures then success, each as separate processOneEvent calls
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const { pool, queries } = createMockPool();
-      await processOneEvent(pool, 'evt-multi-retry', makeEmergencyPayload(), attempt);
+      await processOneEvent(pool, 'evt-multi-retry', makeEmergencyPayload(), makeMeta(attempt));
       expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
       expect(findQuery(queries, 'emergency_send_failed')).toBeTruthy();
     }
 
-    // Fourth attempt: sends succeed
     mockExecFileSync.mockReturnValue(Buffer.from('ok'));
     const { pool, queries } = createMockPool();
-    await processOneEvent(pool, 'evt-multi-retry', makeEmergencyPayload(), 3);
+    await processOneEvent(pool, 'evt-multi-retry', makeEmergencyPayload(), makeMeta(3));
 
     expect(findQuery(queries, 'duplicate_skipped')).toBeFalsy();
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
@@ -262,18 +313,15 @@ describe('emergency retry: dedup must not block re-delivery (regression)', () =>
   it('exhaustion after MAX_EMERGENCY_RETRIES → dead-letter with intake record', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
 
-    // All attempts fail
     for (let attempt = 0; attempt < MAX_EMERGENCY_RETRIES - 1; attempt++) {
       const { pool, queries } = createMockPool();
-      await processOneEvent(pool, 'evt-exhaust', makeEmergencyPayload(), attempt);
+      await processOneEvent(pool, 'evt-exhaust', makeEmergencyPayload(), makeMeta(attempt));
       expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
     }
 
-    // Final attempt: still fails → dead-letter
     const { pool, queries } = createMockPool();
-    await processOneEvent(pool, 'evt-exhaust', makeEmergencyPayload(), MAX_EMERGENCY_RETRIES - 1);
+    await processOneEvent(pool, 'evt-exhaust', makeEmergencyPayload(), makeMeta(MAX_EMERGENCY_RETRIES - 1));
 
-    // Dead-letter writes the intake record (for manual review)
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, 'emergency_dead_letter')).toBeTruthy();
   });
@@ -320,7 +368,7 @@ describe('dead-letter sweep', () => {
     expect(selectQ!.text).toContain('FOR UPDATE SKIP LOCKED');
   });
 
-  it('dead-letter found + delivery succeeds → transitions to dead_letter_delivered', async () => {
+  it('dead-letter found + both channels succeed → transitions to dead_letter_delivered', async () => {
     const deadLetterPayload = makeEmergencyPayload();
     const { pool, queries } = createSweepMockPool([{ id: 'dead-1', payload: deadLetterPayload }]);
 
@@ -329,7 +377,20 @@ describe('dead-letter sweep', () => {
     expect(findQuery(queries, 'dead_letter_delivered')).toBeTruthy();
   });
 
-  it('dead-letter found + delivery still fails → stays as dead_letter (not transitioned)', async () => {
+  it('dead-letter + one channel fails → stays as dead_letter (both required)', async () => {
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('send-message')) throw new Error('agent down');
+      return Buffer.from('ok');
+    });
+    const deadLetterPayload = makeEmergencyPayload();
+    const { pool, queries } = createSweepMockPool([{ id: 'dead-partial', payload: deadLetterPayload }]);
+
+    const count = await sweepDeadLetters(pool);
+    expect(count).toBe(0);
+    expect(findQuery(queries, 'dead_letter_delivered')).toBeFalsy();
+  });
+
+  it('dead-letter + both channels fail → stays as dead_letter', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('still failing'); });
     const deadLetterPayload = makeEmergencyPayload();
     const { pool, queries } = createSweepMockPool([{ id: 'dead-2', payload: deadLetterPayload }]);
@@ -354,7 +415,7 @@ describe('source dedup fail-closed', () => {
       return null;
     });
 
-    await processOneEvent(pool, 'evt-dedup', makePayload(), 0);
+    await processOneEvent(pool, 'evt-dedup', makePayload(), makeMeta(0));
 
     expect(findQuery(queries, 'dedup_check_error')).toBeTruthy();
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
@@ -368,7 +429,7 @@ describe('source dedup fail-closed', () => {
       return null;
     });
 
-    await processOneEvent(pool, 'evt-dup', makePayload(), 0);
+    await processOneEvent(pool, 'evt-dup', makePayload(), makeMeta(0));
 
     expect(findQuery(queries, 'duplicate_skipped')).toBeTruthy();
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
@@ -389,7 +450,7 @@ describe('repeat-window dedup fail-closed', () => {
       return null;
     });
 
-    await processOneEvent(pool, 'evt-repeat', makePayload(), 0);
+    await processOneEvent(pool, 'evt-repeat', makePayload(), makeMeta(0));
 
     const insertQ = findQuery(queries, 'INSERT INTO voice_events');
     expect(insertQ).toBeTruthy();
@@ -410,7 +471,7 @@ describe('blank conversation_id fallback', () => {
     const eventId = 'evt-fallback-id';
     const { pool, queries } = createMockPool();
 
-    await processOneEvent(pool, eventId, makePayload({ conversation_id: '' }), 0);
+    await processOneEvent(pool, eventId, makePayload({ conversation_id: '' }), makeMeta(0));
 
     const dedupQ = findQuery(queries, 'source_idempotency_key');
     expect(dedupQ).toBeTruthy();
@@ -424,7 +485,7 @@ describe('blank conversation_id fallback', () => {
     delete payload['conversation_id'];
     const { pool, queries } = createMockPool();
 
-    await processOneEvent(pool, eventId, payload, 0);
+    await processOneEvent(pool, eventId, payload, makeMeta(0));
 
     const dedupQ = findQuery(queries, 'source_idempotency_key');
     const expectedKey = computeSourceIdempotencyKey(eventId);
@@ -527,7 +588,7 @@ describe('non-emergency path', () => {
 
   it('routine → wo_intake written + lifecycle=processed + sent to Max', async () => {
     const { pool, queries } = createMockPool();
-    await processOneEvent(pool, 'evt-routine', makePayload(), 0);
+    await processOneEvent(pool, 'evt-routine', makePayload(), makeMeta(0));
 
     expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, "'processed'")).toBeTruthy();
@@ -608,7 +669,7 @@ describe('nullable-schema contract: availability_window and photo_attached', () 
     delete dc['photo_attached'];
 
     const { pool, queries } = createMockPool();
-    await processOneEvent(pool, 'evt-schema', payloadWithoutOptionals, 0);
+    await processOneEvent(pool, 'evt-schema', payloadWithoutOptionals, makeMeta(0));
 
     const insertQ = findQuery(queries, 'INSERT INTO voice_events');
     expect(insertQ).toBeTruthy();
@@ -627,7 +688,7 @@ describe('nullable-schema contract: availability_window and photo_attached', () 
     dc['availability_window'] = { value: 'Weekdays 9am-5pm', rationale: 'r', data_collection_id: 'd' };
 
     const { pool, queries } = createMockPool();
-    await processOneEvent(pool, 'evt-schema-filled', payloadWithOptionals, 0);
+    await processOneEvent(pool, 'evt-schema-filled', payloadWithOptionals, makeMeta(0));
 
     const insertQ = findQuery(queries, 'INSERT INTO voice_events');
     expect(insertQ).toBeTruthy();
