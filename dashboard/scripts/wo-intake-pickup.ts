@@ -1,0 +1,497 @@
+#!/usr/bin/env node
+/**
+ * WO intake pickup — claudia cron script (every 5 minutes).
+ *
+ * Polls voice_events for pending wo_intake rows where appfolio_ready=true,
+ * claims them atomically (lifecycle_status pending→staged), dry-runs the
+ * AppFolio WO creation, and sends a Telegram approval message to Albie
+ * with an inline keyboard. On approval callback, the agent calls
+ * createWorkOrder live and hands off to Max.
+ *
+ * Usage: npx tsx scripts/wo-intake-pickup.ts
+ *        npx tsx scripts/wo-intake-pickup.ts --approve <event_id>
+ *        npx tsx scripts/wo-intake-pickup.ts --auto (skip approval, future toggle)
+ */
+
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { config as dotenvConfig } from 'dotenv';
+import { resolve } from 'node:path';
+import pg from 'pg';
+
+dotenvConfig({ path: resolve(process.cwd(), '../orgs/paseo-pm/secrets.env'), override: false });
+dotenvConfig({ path: resolve(process.cwd(), '.env.local'), override: false });
+
+const STATE_PATH = resolve(process.cwd(), '.wo-intake-state.json');
+const CHAT_ALBIE = '6398997982';
+
+interface IntakeState {
+  staged: Record<string, StagedEntry>;
+  last_run: string;
+}
+
+interface StagedEntry {
+  event_id: string;
+  approval_hash: string;
+  tenant_name: string;
+  unit_label: string;
+  property_label: string;
+  issue_description: string;
+  severity: string;
+  staged_at: string;
+  appfolio_property_id: string;
+  appfolio_unit_id: string;
+  appfolio_occupancy_id: string;
+  caller_number: string;
+  permission_to_enter: boolean | null;
+  location_detail: string;
+  contact_id: string | null;
+  call_id: string | null;
+}
+
+function readState(): IntakeState {
+  try {
+    return JSON.parse(readFileSync(STATE_PATH, 'utf-8')) as IntakeState;
+  } catch {
+    return { staged: {}, last_run: new Date(0).toISOString() };
+  }
+}
+
+function writeState(state: IntakeState): void {
+  const entries = Object.entries(state.staged);
+  if (entries.length > 100) {
+    const sorted = entries.sort(([, a], [, b]) => a.staged_at.localeCompare(b.staged_at));
+    state.staged = Object.fromEntries(sorted.slice(-100));
+  }
+  try { writeFileSync(STATE_PATH, JSON.stringify(state, null, 2)); } catch { /* best-effort */ }
+}
+
+function sendTelegramWithKeyboard(chatId: string, message: string, keyboard: object): void {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN ?? process.env.BOT_TOKEN ?? '';
+  if (!botToken) {
+    console.error(JSON.stringify({ error: 'no_bot_token' }));
+    return;
+  }
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const body = JSON.stringify({
+    chat_id: chatId,
+    text: message,
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+  try {
+    execFileSync('curl', ['-s', '-X', 'POST', url,
+      '-H', 'Content-Type: application/json',
+      '-d', body,
+    ], { timeout: 15_000, stdio: 'pipe' });
+  } catch (e) {
+    console.error(JSON.stringify({ error: 'telegram_send_failed', detail: String(e) }));
+  }
+}
+
+function sendTelegram(chatId: string, message: string): void {
+  try {
+    execFileSync('cortextos', ['bus', 'send-telegram', chatId, message], { timeout: 10_000, stdio: 'pipe' });
+  } catch { /* best-effort */ }
+}
+
+function sendToMax(message: string): void {
+  try {
+    execFileSync('cortextos', ['bus', 'send-message', 'maintenance-coordinator', 'normal', message], { timeout: 15_000, stdio: 'pipe' });
+  } catch (e) {
+    console.error(JSON.stringify({ error: 'max_dispatch_failed', detail: String(e) }));
+  }
+}
+
+function logEvent(action: string, eventType: string, level: string, meta: Record<string, unknown>): void {
+  try {
+    execFileSync('cortextos', ['bus', 'log-event', action, eventType, level, '--meta', JSON.stringify(meta)], { timeout: 10_000, stdio: 'pipe' });
+  } catch { /* best-effort */ }
+}
+
+interface IntakeRow {
+  id: string;
+  source_event_id: string | null;
+  received_at: string;
+  payload: Record<string, unknown>;
+}
+
+function makePool(): pg.Pool {
+  const dsn = (process.env.VOICE_GATEWAY_DSN ?? '').replace(/[?&]sslmode=[^&]*/g, '');
+  if (!dsn) {
+    console.error(JSON.stringify({ error: 'VOICE_GATEWAY_DSN not configured' }));
+    process.exit(1);
+  }
+  return new pg.Pool({ connectionString: dsn, ssl: { rejectUnauthorized: false } });
+}
+
+function formatLocationRef(payload: Record<string, unknown>): string {
+  const addr = String(payload['property_label'] ?? '');
+  const unit = String(payload['unit_label'] ?? '');
+  const addrParts = addr.split(/\s+/);
+  const first2addr = addrParts.slice(0, 1).join('-').substring(0, 4);
+  const streetParts = addrParts.slice(1);
+  const first2street = streetParts.slice(0, 1).join('-').substring(0, 4);
+  const unitShort = unit.replace(/^Unit\s*/i, '').trim();
+  return `${first2addr}-${first2street}${unitShort ? '-' + unitShort : ''}`;
+}
+
+async function pollAndStage() {
+  const state = readState();
+  const pool = makePool();
+
+  let rows: IntakeRow[] = [];
+  try {
+    const res = await pool.query<IntakeRow>(
+      `UPDATE voice_events
+         SET lifecycle_status = 'staged'
+       WHERE id IN (
+         SELECT id FROM voice_events
+          WHERE event_type = 'wo_intake'
+            AND lifecycle_status = 'pending'
+            AND (payload->>'appfolio_ready')::boolean = true
+          ORDER BY received_at ASC
+          LIMIT 5
+          FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id::text, source_event_id, received_at, payload`,
+    );
+    rows = res.rows;
+  } catch (e) {
+    console.error(JSON.stringify({ error: 'db_claim_failed', detail: String(e) }));
+    await pool.end().catch(() => {});
+    process.exit(1);
+  }
+
+  // Also mark appfolio_ready=false events as skipped
+  try {
+    await pool.query(
+      `UPDATE voice_events
+         SET lifecycle_status = 'skipped'
+       WHERE event_type = 'wo_intake'
+         AND lifecycle_status = 'pending'
+         AND (
+           (payload->>'appfolio_ready')::boolean = false
+           OR payload->>'appfolio_ready' IS NULL
+         )`,
+    );
+  } catch { /* best-effort — main path is more important */ }
+
+  await pool.end().catch(() => {});
+
+  if (rows.length === 0) {
+    writeState({ ...state, last_run: new Date().toISOString() });
+    console.log(JSON.stringify({ status: 'ok', new_intakes: 0, staged: 0 }));
+    return;
+  }
+
+  let staged = 0;
+  for (const row of rows) {
+    const p = row.payload;
+    const tenantName = String(p['tenant_name'] ?? 'Unknown');
+    const unitLabel = String(p['unit_label'] ?? '');
+    const propertyLabel = String(p['property_label'] ?? '');
+    const issueDescription = String(p['issue_description'] ?? '');
+    const severity = String(p['severity'] ?? 'normal');
+    const permissionToEnter = p['permission_to_enter'] as boolean | null;
+    const locationDetail = String(p['location_detail'] ?? '');
+    const callerNumber = String(p['caller_number'] ?? '');
+    const contactId = (p['contact_id'] as string | null) ?? null;
+    const callId = (p['call_id'] as string | null) ?? row.source_event_id;
+    const appfolioPropertyId = String(p['appfolio_property_id'] ?? '');
+    const appfolioUnitId = String(p['appfolio_unit_id'] ?? '');
+    const appfolioOccupancyId = String(p['appfolio_occupancy_id'] ?? '');
+
+    // Dry-run createWorkOrder to get the approval hash
+    const pteFlag = permissionToEnter === true ? 'true' : permissionToEnter === false ? 'false' : 'not_applicable';
+    const priority = severity === 'urgent' ? 'Urgent' : 'Normal';
+    const description = `Voice intake from ${tenantName}: ${issueDescription}${locationDetail ? ' (' + locationDetail + ')' : ''}`;
+
+    const dryRunArgs = [
+      'scripts/appfolio-browser-read.ts', 'create-work-order',
+      '--property-id', appfolioPropertyId,
+      '--unit-id', appfolioUnitId,
+      '--occupancy-id', appfolioOccupancyId,
+      '--description', description,
+      '--priority', priority,
+      '--permission-to-enter', pteFlag,
+      '--request-type', 'tenant_requested',
+    ];
+
+    let dryRunResult: Record<string, unknown> = {};
+    try {
+      const output = execFileSync('npx', ['tsx', ...dryRunArgs], {
+        timeout: 60_000,
+        stdio: 'pipe',
+        cwd: resolve(process.cwd()),
+      }).toString('utf-8');
+      dryRunResult = JSON.parse(output);
+    } catch (e) {
+      console.error(JSON.stringify({ error: 'dry_run_failed', event_id: row.id, detail: String(e) }));
+      // Mark as failed, not staged — don't strand
+      const failPool = makePool();
+      await failPool.query(
+        `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
+        [row.id],
+      ).catch(() => {});
+      await failPool.end().catch(() => {});
+      logEvent('action', 'wo_intake_dry_run_failed', 'error', { event_id: row.id, agent: 'claudia' });
+      continue;
+    }
+
+    if (dryRunResult['error']) {
+      console.error(JSON.stringify({ error: 'dry_run_error', event_id: row.id, result: dryRunResult }));
+      const failPool = makePool();
+      await failPool.query(
+        `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
+        [row.id],
+      ).catch(() => {});
+      await failPool.end().catch(() => {});
+      logEvent('action', 'wo_intake_dry_run_failed', 'error', { event_id: row.id, error: dryRunResult['error'], agent: 'claudia' });
+      continue;
+    }
+
+    const approvalHash = String(dryRunResult['approval_hash'] ?? '');
+    if (!approvalHash) {
+      console.error(JSON.stringify({ error: 'no_approval_hash', event_id: row.id }));
+      continue;
+    }
+
+    // Save staged entry
+    const entry: StagedEntry = {
+      event_id: row.id,
+      approval_hash: approvalHash,
+      tenant_name: tenantName,
+      unit_label: unitLabel,
+      property_label: propertyLabel,
+      issue_description: issueDescription,
+      severity,
+      staged_at: new Date().toISOString(),
+      appfolio_property_id: appfolioPropertyId,
+      appfolio_unit_id: appfolioUnitId,
+      appfolio_occupancy_id: appfolioOccupancyId,
+      caller_number: callerNumber,
+      permission_to_enter: permissionToEnter,
+      location_detail: locationDetail,
+      contact_id: contactId,
+      call_id: callId,
+    };
+    state.staged[row.id] = entry;
+
+    // Send Telegram approval to Albie with inline keyboard
+    const locationRef = formatLocationRef(p);
+    const pteStr = permissionToEnter === true ? 'Yes' : permissionToEnter === false ? 'No' : 'Not specified';
+    const approvalMsg = [
+      `*WO Intake Approval*`,
+      ``,
+      `*Tenant:* ${tenantName}`,
+      `*Location:* ${unitLabel}, ${propertyLabel} (${locationRef})`,
+      `*Issue:* ${issueDescription}`,
+      locationDetail ? `*Where:* ${locationDetail}` : null,
+      `*Priority:* ${priority}`,
+      `*Permission to enter:* ${pteStr}`,
+      `*Source:* Voice/Alex${callId ? ' (call ' + callId.substring(0, 8) + ')' : ''}`,
+      ``,
+      `Tap Approve to create this WO in AppFolio.`,
+    ].filter(Boolean).join('\n');
+
+    // callback_data: 64-byte limit. Use prefix + event_id
+    const keyboard = {
+      inline_keyboard: [[
+        { text: 'Approve', callback_data: `wo_ok_${row.id}` },
+        { text: 'Skip', callback_data: `wo_skip_${row.id}` },
+      ]],
+    };
+
+    sendTelegramWithKeyboard(CHAT_ALBIE, approvalMsg, keyboard);
+    logEvent('action', 'wo_intake_staged', 'info', { event_id: row.id, tenant: tenantName, agent: 'claudia' });
+    staged++;
+    console.log(JSON.stringify({ staged: true, event_id: row.id, tenant: tenantName, approval_hash: approvalHash.substring(0, 8) + '...' }));
+  }
+
+  writeState({ ...state, last_run: new Date().toISOString() });
+  console.log(JSON.stringify({ status: 'ok', new_intakes: rows.length, staged }));
+}
+
+async function executeApproval(eventId: string) {
+  const state = readState();
+  const entry = state.staged[eventId];
+  if (!entry) {
+    console.error(JSON.stringify({ error: 'not_staged', event_id: eventId }));
+    process.exit(1);
+  }
+
+  const pool = makePool();
+
+  // Verify the event is still in staged status (no replay)
+  const check = await pool.query(
+    `SELECT lifecycle_status FROM voice_events WHERE id = $1`,
+    [eventId],
+  ).catch(() => null);
+
+  if (!check?.rows[0] || check.rows[0].lifecycle_status !== 'staged') {
+    console.error(JSON.stringify({ error: 'not_in_staged_status', event_id: eventId, current: check?.rows[0]?.lifecycle_status }));
+    await pool.end().catch(() => {});
+    process.exit(1);
+  }
+
+  // Execute live create with the stored approval hash
+  const pteFlag = entry.permission_to_enter === true ? 'true' : entry.permission_to_enter === false ? 'false' : 'not_applicable';
+  const priority = entry.severity === 'urgent' ? 'Urgent' : 'Normal';
+  const description = `Voice intake from ${entry.tenant_name}: ${entry.issue_description}${entry.location_detail ? ' (' + entry.location_detail + ')' : ''}`;
+
+  const liveArgs = [
+    'scripts/appfolio-browser-read.ts', 'create-work-order',
+    '--property-id', entry.appfolio_property_id,
+    '--unit-id', entry.appfolio_unit_id,
+    '--occupancy-id', entry.appfolio_occupancy_id,
+    '--description', description,
+    '--priority', priority,
+    '--permission-to-enter', pteFlag,
+    '--request-type', 'tenant_requested',
+    '--execute',
+    '--approval-hash', entry.approval_hash,
+  ];
+
+  let createResult: Record<string, unknown> = {};
+  try {
+    const output = execFileSync('npx', ['tsx', ...liveArgs], {
+      timeout: 120_000,
+      stdio: 'pipe',
+      cwd: resolve(process.cwd()),
+    }).toString('utf-8');
+    createResult = JSON.parse(output);
+  } catch (e) {
+    // Live create failed — mark as failed, notify
+    await pool.query(
+      `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
+      [eventId],
+    ).catch(() => {});
+    await pool.end().catch(() => {});
+
+    logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. Error: ${String(e).substring(0, 200)}. Manual WO needed.`);
+    console.error(JSON.stringify({ error: 'live_create_failed', event_id: eventId, detail: String(e) }));
+    process.exit(1);
+  }
+
+  if (createResult['error'] || createResult['verified'] === false) {
+    // Create returned error — mark failed
+    await pool.query(
+      `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
+      [eventId],
+    ).catch(() => {});
+    await pool.end().catch(() => {});
+
+    logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, error: createResult['error'], agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. Result: ${JSON.stringify(createResult).substring(0, 200)}. Manual WO needed.`);
+    console.error(JSON.stringify({ error: 'create_error', event_id: eventId, result: createResult }));
+    process.exit(1);
+  }
+
+  // Success — mark as created
+  await pool.query(
+    `UPDATE voice_events SET lifecycle_status = 'created' WHERE id = $1`,
+    [eventId],
+  ).catch(() => {});
+  await pool.end().catch(() => {});
+
+  const woId = String(createResult['wo_id'] ?? '');
+  const srId = String(createResult['sr_id'] ?? '');
+  const woUrl = srId ? `https://paseoproperties.appfolio.com/maintenance/service_requests/${srId}` : '';
+
+  logEvent('action', 'wo_created', 'info', {
+    event_id: eventId,
+    wo_id: woId,
+    sr_id: srId,
+    tenant: entry.tenant_name,
+    agent: 'claudia',
+  });
+
+  // Notify Albie
+  sendTelegram(CHAT_ALBIE, `WO created for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. WO#${woId || srId}${woUrl ? '\n' + woUrl : ''}`);
+
+  // Hand off to Max
+  const locationRef = formatLocationRef(entry as unknown as Record<string, unknown>);
+  const maxHandoff = JSON.stringify({
+    type: 'wo_voice_intake',
+    wo_id: woId || null,
+    sr_id: srId || null,
+    wo_url: woUrl || null,
+    location_ref: locationRef,
+    full_address: `${entry.unit_label}, ${entry.property_label}`,
+    tenant_name: entry.tenant_name,
+    callback_number: entry.caller_number,
+    unit_id: entry.appfolio_unit_id,
+    issue_description: entry.issue_description,
+    severity: entry.severity,
+    permission_to_enter: entry.permission_to_enter,
+    location_detail: entry.location_detail,
+    source: 'voice/Alex',
+    call_id: entry.call_id,
+    availability_window: null,
+    photo_submitted: null,
+  });
+
+  sendToMax(maxHandoff);
+  logEvent('action', 'wo_handoff_to_max', 'info', {
+    event_id: eventId,
+    wo_id: woId,
+    tenant: entry.tenant_name,
+    agent: 'claudia',
+  });
+
+  // Clean up staged entry
+  delete state.staged[eventId];
+  writeState(state);
+
+  console.log(JSON.stringify({
+    status: 'created',
+    event_id: eventId,
+    wo_id: woId,
+    sr_id: srId,
+    tenant: entry.tenant_name,
+    handed_to_max: true,
+  }));
+}
+
+async function skipIntake(eventId: string) {
+  const state = readState();
+  const pool = makePool();
+
+  await pool.query(
+    `UPDATE voice_events SET lifecycle_status = 'skipped' WHERE id = $1`,
+    [eventId],
+  ).catch(() => {});
+  await pool.end().catch(() => {});
+
+  logEvent('action', 'wo_intake_skipped', 'info', { event_id: eventId, agent: 'claudia' });
+
+  if (state.staged[eventId]) {
+    delete state.staged[eventId];
+    writeState(state);
+  }
+
+  console.log(JSON.stringify({ status: 'skipped', event_id: eventId }));
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+
+  if (args[0] === '--approve' && args[1]) {
+    await executeApproval(args[1]);
+    return;
+  }
+
+  if (args[0] === '--skip' && args[1]) {
+    await skipIntake(args[1]);
+    return;
+  }
+
+  await pollAndStage();
+}
+
+main().catch(err => {
+  console.error(JSON.stringify({ error: String(err) }));
+  process.exit(1);
+});
