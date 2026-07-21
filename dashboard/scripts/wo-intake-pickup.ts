@@ -211,6 +211,21 @@ async function pollAndStage() {
     }
   } catch { /* best-effort */ }
 
+  // Expire stale staged rows (>7 days) — prevents zombie DB rows when local state evicts
+  try {
+    const stale = await pool.query(
+      `UPDATE voice_events SET lifecycle_status = 'failed'
+       WHERE event_type = 'wo_intake'
+         AND lifecycle_status = 'staged'
+         AND received_at < NOW() - INTERVAL '7 days'
+       RETURNING id::text, payload->>'tenant_name' as tenant_name`,
+    );
+    for (const row of stale.rows) {
+      sendTelegram(CHAT_ALBIE, `WO intake event ${row.id} (${row.tenant_name ?? 'unknown'}) was staged >7 days without approval. Marked failed. Manual WO needed if still relevant.`);
+      logEvent('action', 'wo_intake_expired', 'error', { event_id: row.id, agent: 'claudia' });
+    }
+  } catch { /* best-effort */ }
+
   await pool.end().catch(() => {});
 
   if (rows.length === 0) {
