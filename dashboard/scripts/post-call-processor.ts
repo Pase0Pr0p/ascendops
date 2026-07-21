@@ -153,46 +153,61 @@ const MAX_EMERGENCY_RETRIES = 5;
 export async function sweepDeadLetters(pool: pg.Pool): Promise<number> {
   let recovered = 0;
   try {
-    const deadLetters = await pool.query(
-      `SELECT id, payload FROM voice_events
-       WHERE event_type = 'elevenlabs_post_call'
-         AND lifecycle_status = 'emergency_dead_letter'
-       LIMIT 10`,
-    );
-    if (deadLetters.rows.length === 0) return 0;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const deadLetters = await client.query(
+        `SELECT id, payload FROM voice_events
+         WHERE event_type = 'elevenlabs_post_call'
+           AND lifecycle_status = 'emergency_dead_letter'
+         LIMIT 10
+         FOR UPDATE SKIP LOCKED`,
+      );
+      if (deadLetters.rows.length === 0) {
+        await client.query('COMMIT');
+        client.release();
+        return 0;
+      }
 
-    console.error(JSON.stringify({
-      alert: 'dead_letter_sweep',
-      count: deadLetters.rows.length,
-      ids: deadLetters.rows.map((r: Record<string, unknown>) => r.id),
-    }));
-
-    for (const row of deadLetters.rows) {
-      const rawPayload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
-      const eventData = (rawPayload['data'] ?? rawPayload) as Record<string, unknown>;
-      const dcResults = extractDataCollection(eventData);
-      const issueField = extractField(dcResults, 'maintenance_issue_description');
-      const callerNameField = extractField(dcResults, 'caller_name');
-      const convId = extractConversationId(eventData);
-      const summary = `Emergency dead-letter retry — ${callerNameField ? String(callerNameField.value) : 'unknown caller'}: ${issueField ? String(issueField.value) : 'unknown issue'} (call ${convId || row.id})`;
-
-      const telegramSent = sendTelegram(CHAT_ALBIE, `DEAD LETTER RETRY:\n${summary}\nvoice_events id: ${row.id}\nManual intervention required.`);
-      const maxSent = sendAgentMessage('maintenance-coordinator', JSON.stringify({
-        type: 'emergency_dead_letter_retry',
-        event_id: row.id,
-        summary,
+      console.error(JSON.stringify({
+        alert: 'dead_letter_sweep',
+        count: deadLetters.rows.length,
+        ids: deadLetters.rows.map((r: Record<string, unknown>) => r.id),
       }));
 
-      if (telegramSent || maxSent) {
-        await pool.query(
-          `UPDATE voice_events SET lifecycle_status = 'dead_letter_delivered' WHERE id = $1`,
-          [row.id],
-        );
-        logEvent('action', 'dead_letter_recovered', 'critical', {
-          event_id: row.id, channel: telegramSent ? 'telegram' : 'max', agent: 'claudia',
-        });
-        recovered++;
+      for (const row of deadLetters.rows) {
+        const rawPayload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
+        const eventData = (rawPayload['data'] ?? rawPayload) as Record<string, unknown>;
+        const dcResults = extractDataCollection(eventData);
+        const issueField = extractField(dcResults, 'maintenance_issue_description');
+        const callerNameField = extractField(dcResults, 'caller_name');
+        const convId = extractConversationId(eventData);
+        const summary = `Emergency dead-letter retry — ${callerNameField ? String(callerNameField.value) : 'unknown caller'}: ${issueField ? String(issueField.value) : 'unknown issue'} (call ${convId || row.id})`;
+
+        const telegramSent = sendTelegram(CHAT_ALBIE, `DEAD LETTER RETRY:\n${summary}\nvoice_events id: ${row.id}\nManual intervention required.`);
+        const maxSent = sendAgentMessage('maintenance-coordinator', JSON.stringify({
+          type: 'emergency_dead_letter_retry',
+          event_id: row.id,
+          summary,
+        }));
+
+        if (telegramSent || maxSent) {
+          await client.query(
+            `UPDATE voice_events SET lifecycle_status = 'dead_letter_delivered' WHERE id = $1`,
+            [row.id],
+          );
+          logEvent('action', 'dead_letter_recovered', 'critical', {
+            event_id: row.id, channel: telegramSent ? 'telegram' : 'max', agent: 'claudia',
+          });
+          recovered++;
+        }
       }
+      await client.query('COMMIT');
+      client.release();
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch { /* ignore rollback errors */ }
+      client.release();
+      throw err;
     }
   } catch { /* sweep is best-effort; main processing continues */ }
   return recovered;

@@ -287,25 +287,42 @@ describe('dead-letter sweep', () => {
   });
   afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
 
-  it('no dead-letters → sweep returns 0', async () => {
-    const { pool } = createMockPool((text) => {
-      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) {
+  function createSweepMockPool(selectRows: Record<string, unknown>[] = []) {
+    const queries: TrackedQuery[] = [];
+    const mockClient = {
+      query: vi.fn(async (text: string, params?: unknown[]) => {
+        queries.push({ text, params });
+        if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return {};
+        if (text.includes('emergency_dead_letter') && text.includes('SELECT')) return { rows: selectRows };
+        if (text.includes('UPDATE')) return { rows: [] };
         return { rows: [] };
-      }
-      return null;
-    });
+      }),
+      release: vi.fn(),
+    };
+    const pool = {
+      query: vi.fn(),
+      connect: vi.fn(async () => mockClient),
+    } as unknown as pg.Pool;
+    return { pool, queries, mockClient };
+  }
+
+  it('no dead-letters → sweep returns 0', async () => {
+    const { pool } = createSweepMockPool([]);
     const count = await sweepDeadLetters(pool);
     expect(count).toBe(0);
   });
 
+  it('sweep SELECT uses FOR UPDATE SKIP LOCKED', async () => {
+    const { pool, queries } = createSweepMockPool([]);
+    await sweepDeadLetters(pool);
+    const selectQ = findQuery(queries, 'emergency_dead_letter');
+    expect(selectQ).toBeTruthy();
+    expect(selectQ!.text).toContain('FOR UPDATE SKIP LOCKED');
+  });
+
   it('dead-letter found + delivery succeeds → transitions to dead_letter_delivered', async () => {
     const deadLetterPayload = makeEmergencyPayload();
-    const { pool, queries } = createMockPool((text) => {
-      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) {
-        return { rows: [{ id: 'dead-1', payload: deadLetterPayload }] };
-      }
-      return null;
-    });
+    const { pool, queries } = createSweepMockPool([{ id: 'dead-1', payload: deadLetterPayload }]);
 
     const count = await sweepDeadLetters(pool);
     expect(count).toBe(1);
@@ -315,16 +332,10 @@ describe('dead-letter sweep', () => {
   it('dead-letter found + delivery still fails → stays as dead_letter (not transitioned)', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('still failing'); });
     const deadLetterPayload = makeEmergencyPayload();
-    const { pool, queries } = createMockPool((text) => {
-      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) {
-        return { rows: [{ id: 'dead-2', payload: deadLetterPayload }] };
-      }
-      return null;
-    });
+    const { pool, queries } = createSweepMockPool([{ id: 'dead-2', payload: deadLetterPayload }]);
 
     const count = await sweepDeadLetters(pool);
     expect(count).toBe(0);
-    // Should NOT transition — still failing
     expect(findQuery(queries, 'dead_letter_delivered')).toBeFalsy();
   });
 });
@@ -524,5 +535,105 @@ describe('non-emergency path', () => {
       (c: unknown[]) => (c[1] as string[]).includes('send-message'),
     );
     expect(maxCalls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('stale-processing reaper: behavioral clock test', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.VOICE_GATEWAY_DSN = 'postgres://test:test@localhost/test';
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+  });
+  afterEach(() => {
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.VOICE_GATEWAY_DSN;
+  });
+
+  it('reaper uses COALESCE(_claimed_at, received_at) — claim time, not creation time', async () => {
+    const queries: TrackedQuery[] = [];
+    const mockClient = {
+      query: vi.fn(async (text: string, params?: unknown[]) => {
+        queries.push({ text, params });
+        if (text === 'BEGIN' || text === 'COMMIT') return {};
+        if (text.includes('RETURNING')) return { rows: [] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const queryFn = vi.fn(async (text: string, params?: unknown[]) => {
+      queries.push({ text, params });
+      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) return { rows: [] };
+      return { rows: [] };
+    });
+    const pool = {
+      query: queryFn,
+      connect: vi.fn(async () => mockClient),
+      end: vi.fn(async () => {}),
+    };
+    MockPoolConstructor.mockImplementation(function () { return pool; });
+
+    await processPostCallEvents();
+
+    const reaperQ = queries.find(q =>
+      q.text.includes("lifecycle_status = 'pending'") &&
+      q.text.includes('processing'),
+    );
+    expect(reaperQ).toBeTruthy();
+
+    // Must use _claimed_at (claim time) with received_at as fallback, not received_at alone
+    expect(reaperQ!.text).toContain("payload->>'_claimed_at'");
+    expect(reaperQ!.text).toContain('COALESCE');
+    expect(reaperQ!.text).toContain('received_at');
+
+    // The COALESCE must put _claimed_at FIRST (primary clock)
+    const claimedAtPos = reaperQ!.text.indexOf("_claimed_at");
+    const receivedAtPos = reaperQ!.text.indexOf('received_at');
+    expect(claimedAtPos).toBeLessThan(receivedAtPos);
+  });
+});
+
+describe('nullable-schema contract: availability_window and photo_attached', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+  });
+  afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
+
+  it('uncollected optional fields are explicit null in wo_intake payload, not omitted', async () => {
+    const payloadWithoutOptionals = makePayload();
+    const dc = (payloadWithoutOptionals.analysis as Record<string, unknown>).data_collection_results as Record<string, unknown>;
+    delete dc['availability_window'];
+    delete dc['photo_attached'];
+
+    const { pool, queries } = createMockPool();
+    await processOneEvent(pool, 'evt-schema', payloadWithoutOptionals, 0);
+
+    const insertQ = findQuery(queries, 'INSERT INTO voice_events');
+    expect(insertQ).toBeTruthy();
+    const intakePayload = JSON.parse(insertQ!.params![1] as string);
+
+    // Fields must be present with null value — JSON.stringify preserves null but drops undefined
+    expect(intakePayload).toHaveProperty('availability_window');
+    expect(intakePayload.availability_window).toBeNull();
+    expect(intakePayload).toHaveProperty('photo_attached');
+    expect(intakePayload.photo_attached).toBeNull();
+  });
+
+  it('collected optional fields pass through their values', async () => {
+    const payloadWithOptionals = makePayload();
+    const dc = (payloadWithOptionals.analysis as Record<string, unknown>).data_collection_results as Record<string, unknown>;
+    dc['availability_window'] = { value: 'Weekdays 9am-5pm', rationale: 'r', data_collection_id: 'd' };
+
+    const { pool, queries } = createMockPool();
+    await processOneEvent(pool, 'evt-schema-filled', payloadWithOptionals, 0);
+
+    const insertQ = findQuery(queries, 'INSERT INTO voice_events');
+    expect(insertQ).toBeTruthy();
+    const intakePayload = JSON.parse(insertQ!.params![1] as string);
+
+    expect(intakePayload.availability_window).toBe('Weekdays 9am-5pm');
+    expect(intakePayload.photo_attached).toBeNull();
   });
 });
