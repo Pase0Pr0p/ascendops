@@ -221,18 +221,19 @@ async function pollAndStage() {
   // Expire stale staged rows — prevents zombie DB rows when local state evicts.
   // Both DB sweep and local eviction use the same staged_at timestamp (written to
   // payload during pending→staged claim) with matching 7-day cutoff.
+  // Legacy rows without payload.staged_at fall back to received_at.
   try {
     const stale = await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'failed'
        WHERE event_type = 'wo_intake'
          AND lifecycle_status = 'staged'
-         AND (payload->>'staged_at')::timestamptz < NOW() - INTERVAL '7 days'
+         AND COALESCE((payload->>'staged_at')::timestamptz, received_at) < NOW() - INTERVAL '7 days'
        RETURNING id::text, payload->>'tenant_name' as tenant_name`,
     );
     if (stale.rows.length > 0) {
       const names = stale.rows.map(r => `${r.id} (${r.tenant_name ?? 'unknown'})`).slice(0, 5).join(', ');
       const suffix = stale.rows.length > 5 ? ` +${stale.rows.length - 5} more` : '';
-      sendTelegram(CHAT_ALBIE, `${stale.rows.length} stale WO intake(s) expired (staged >8 days without approval): ${names}${suffix}. Marked failed.`);
+      sendTelegram(CHAT_ALBIE, `${stale.rows.length} stale WO intake(s) expired (staged >7 days without approval): ${names}${suffix}. Marked failed.`);
       for (const row of stale.rows) {
         logEvent('action', 'wo_intake_expired', 'error', { event_id: row.id, agent: 'claudia' });
       }
@@ -337,7 +338,7 @@ async function pollAndStage() {
       property_label: propertyLabel,
       issue_description: issueDescription,
       severity,
-      staged_at: new Date().toISOString(),
+      staged_at: String(row.payload['staged_at'] ?? new Date().toISOString()),
       appfolio_property_id: appfolioPropertyId,
       appfolio_unit_id: appfolioUnitId,
       appfolio_occupancy_id: appfolioOccupancyId,
