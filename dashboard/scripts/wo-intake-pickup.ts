@@ -102,15 +102,17 @@ function sendTelegramWithKeyboard(chatId: string, message: string, keyboard: obj
 
 function sendTelegram(chatId: string, message: string): void {
   try {
-    execFileSync('cortextos', ['bus', 'send-telegram', chatId, message], { timeout: 10_000, stdio: 'pipe' });
+    execFileSync('cortextos', ['bus', 'send-telegram', chatId, message, '--skip-lint'], { timeout: 10_000, stdio: 'pipe' });
   } catch { /* best-effort */ }
 }
 
-function sendToMax(message: string): void {
+function sendToMax(message: string): boolean {
   try {
-    execFileSync('cortextos', ['bus', 'send-message', 'maintenance-coordinator', 'normal', message], { timeout: 15_000, stdio: 'pipe' });
+    execFileSync('cortextos', ['bus', 'send-message', 'maintenance-coordinator', 'normal', message, '--skip-lint'], { timeout: 15_000, stdio: 'pipe' });
+    return true;
   } catch (e) {
     console.error(JSON.stringify({ error: 'max_dispatch_failed', detail: String(e) }));
+    return false;
   }
 }
 
@@ -473,13 +475,18 @@ async function executeApproval(eventId: string) {
     photo_submitted: null,
   });
 
-  sendToMax(maxHandoff);
-  logEvent('action', 'wo_handoff_to_max', 'info', {
-    event_id: eventId,
-    wo_id: woId,
-    tenant: entry.tenant_name,
-    agent: 'claudia',
-  });
+  const maxSent = sendToMax(maxHandoff);
+  if (!maxSent) {
+    logEvent('action', 'wo_max_handoff_failed', 'error', { event_id: eventId, wo_id: woId, agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO#${woId || srId} created for ${entry.tenant_name} but Max handoff FAILED. Manual handoff needed.`);
+  } else {
+    logEvent('action', 'wo_handoff_to_max', 'info', {
+      event_id: eventId,
+      wo_id: woId,
+      tenant: entry.tenant_name,
+      agent: 'claudia',
+    });
+  }
 
   // Clean up staged entry
   delete state.staged[eventId];
