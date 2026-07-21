@@ -66,11 +66,11 @@ function writeState(state: IntakeState): void {
   try { writeFileSync(STATE_PATH, JSON.stringify(state, null, 2)); } catch { /* best-effort */ }
 }
 
-function sendTelegramWithKeyboard(chatId: string, message: string, keyboard: object): void {
+function sendTelegramWithKeyboard(chatId: string, message: string, keyboard: object): boolean {
   const botToken = process.env.TELEGRAM_BOT_TOKEN ?? process.env.BOT_TOKEN ?? '';
   if (!botToken) {
     console.error(JSON.stringify({ error: 'no_bot_token' }));
-    return;
+    return false;
   }
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const body = JSON.stringify({
@@ -84,8 +84,10 @@ function sendTelegramWithKeyboard(chatId: string, message: string, keyboard: obj
       '-H', 'Content-Type: application/json',
       '-d', body,
     ], { timeout: 15_000, stdio: 'pipe' });
+    return true;
   } catch (e) {
     console.error(JSON.stringify({ error: 'telegram_send_failed', detail: String(e) }));
+    return false;
   }
 }
 
@@ -228,7 +230,6 @@ async function pollAndStage() {
       dryRunResult = JSON.parse(output);
     } catch (e) {
       console.error(JSON.stringify({ error: 'dry_run_failed', event_id: row.id, detail: String(e) }));
-      // Mark as failed, not staged — don't strand
       const failPool = makePool();
       await failPool.query(
         `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
@@ -236,6 +237,7 @@ async function pollAndStage() {
       ).catch(() => {});
       await failPool.end().catch(() => {});
       logEvent('action', 'wo_intake_dry_run_failed', 'error', { event_id: row.id, agent: 'claudia' });
+      sendTelegram(CHAT_ALBIE, `WO intake dry-run FAILED for ${tenantName} at ${unitLabel}, ${propertyLabel} (event ${row.id}). Error: ${String(e).substring(0, 200)}. Manual WO needed.`);
       continue;
     }
 
@@ -248,12 +250,21 @@ async function pollAndStage() {
       ).catch(() => {});
       await failPool.end().catch(() => {});
       logEvent('action', 'wo_intake_dry_run_failed', 'error', { event_id: row.id, error: dryRunResult['error'], agent: 'claudia' });
+      sendTelegram(CHAT_ALBIE, `WO intake dry-run error for ${tenantName} at ${unitLabel}, ${propertyLabel} (event ${row.id}). Result: ${String(dryRunResult['error']).substring(0, 200)}. Manual WO needed.`);
       continue;
     }
 
     const approvalHash = String(dryRunResult['approval_hash'] ?? '');
     if (!approvalHash) {
       console.error(JSON.stringify({ error: 'no_approval_hash', event_id: row.id }));
+      const failPool = makePool();
+      await failPool.query(
+        `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
+        [row.id],
+      ).catch(() => {});
+      await failPool.end().catch(() => {});
+      logEvent('action', 'wo_intake_dry_run_failed', 'error', { event_id: row.id, reason: 'no_approval_hash', agent: 'claudia' });
+      sendTelegram(CHAT_ALBIE, `WO intake dry-run produced no approval hash for event ${row.id} (${tenantName}). Marked failed, manual review needed.`);
       continue;
     }
 
@@ -303,7 +314,18 @@ async function pollAndStage() {
       ]],
     };
 
-    sendTelegramWithKeyboard(CHAT_ALBIE, approvalMsg, keyboard);
+    const sent = sendTelegramWithKeyboard(CHAT_ALBIE, approvalMsg, keyboard);
+    if (!sent) {
+      const failPool = makePool();
+      await failPool.query(
+        `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
+        [row.id],
+      ).catch(() => {});
+      await failPool.end().catch(() => {});
+      logEvent('action', 'wo_intake_approval_send_failed', 'error', { event_id: row.id, agent: 'claudia' });
+      console.error(JSON.stringify({ error: 'approval_send_failed', event_id: row.id }));
+      continue;
+    }
     logEvent('action', 'wo_intake_staged', 'info', { event_id: row.id, tenant: tenantName, agent: 'claudia' });
     staged++;
     console.log(JSON.stringify({ staged: true, event_id: row.id, tenant: tenantName, approval_hash: approvalHash.substring(0, 8) + '...' }));
@@ -323,14 +345,16 @@ async function executeApproval(eventId: string) {
 
   const pool = makePool();
 
-  // Verify the event is still in staged status (no replay)
-  const check = await pool.query(
-    `SELECT lifecycle_status FROM voice_events WHERE id = $1`,
+  // Atomic claim: staged→creating. Prevents double-tap / duplicate callback race.
+  const claim = await pool.query(
+    `UPDATE voice_events SET lifecycle_status = 'creating'
+     WHERE id = $1 AND lifecycle_status = 'staged'
+     RETURNING id`,
     [eventId],
   ).catch(() => null);
 
-  if (!check?.rows[0] || check.rows[0].lifecycle_status !== 'staged') {
-    console.error(JSON.stringify({ error: 'not_in_staged_status', event_id: eventId, current: check?.rows[0]?.lifecycle_status }));
+  if (!claim?.rows[0]) {
+    console.error(JSON.stringify({ error: 'atomic_claim_failed', event_id: eventId, message: 'Event not in staged status — duplicate callback or already processed' }));
     await pool.end().catch(() => {});
     process.exit(1);
   }
@@ -375,26 +399,32 @@ async function executeApproval(eventId: string) {
     process.exit(1);
   }
 
-  if (createResult['error'] || createResult['verified'] === false) {
-    // Create returned error — mark failed
+  if (createResult['error'] || createResult['verified'] !== true) {
     await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'failed' WHERE id = $1`,
       [eventId],
     ).catch(() => {});
     await pool.end().catch(() => {});
 
-    logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, error: createResult['error'], agent: 'claudia' });
-    sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. Result: ${JSON.stringify(createResult).substring(0, 200)}. Manual WO needed.`);
-    console.error(JSON.stringify({ error: 'create_error', event_id: eventId, result: createResult }));
+    const reason = createResult['error'] ? `error: ${createResult['error']}` : `verified=${String(createResult['verified'])} (not true)`;
+    logEvent('action', 'wo_create_failed', 'error', { event_id: eventId, error: createResult['error'], verified: createResult['verified'], agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO creation FAILED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. ${reason}. Manual WO needed.`);
+    console.error(JSON.stringify({ error: 'create_failed', event_id: eventId, reason, result: createResult }));
     process.exit(1);
   }
 
-  // Success — mark as created
-  await pool.query(
-    `UPDATE voice_events SET lifecycle_status = 'created' WHERE id = $1`,
+  // Success — mark as created. If this write fails, the nonce/hash is already consumed
+  // so a retry cannot double-create. Alert operator for manual reconciliation.
+  const markResult = await pool.query(
+    `UPDATE voice_events SET lifecycle_status = 'created' WHERE id = $1 RETURNING id`,
     [eventId],
-  ).catch(() => {});
+  ).catch(() => null);
   await pool.end().catch(() => {});
+
+  if (!markResult?.rows[0]) {
+    logEvent('action', 'wo_created_mark_failed', 'error', { event_id: eventId, agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO was CREATED for ${entry.tenant_name} but status update to 'created' failed in DB. Hash consumed (no double-create risk). Manual DB update needed: UPDATE voice_events SET lifecycle_status='created' WHERE id='${eventId}'`);
+  }
 
   const woId = String(createResult['wo_id'] ?? '');
   const srId = String(createResult['sr_id'] ?? '');
