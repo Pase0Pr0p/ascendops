@@ -32,6 +32,12 @@ agents/*/local/
 agents/*/telegram-images/
 agents/*/memory/
 
+# WO intake runtime artifacts (nonce dirs + state file)
+.add-note-nonces/
+.create-wo-nonces/
+.send-msg-nonces/
+.wo-intake-state.json
+
 # macOS metadata
 .DS_Store
 

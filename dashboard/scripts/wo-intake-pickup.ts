@@ -578,13 +578,16 @@ async function executeApproval(eventId: string) {
   ).catch(() => {});
 
   if (!verified) {
-    // Unverified: alert Albie, clean up local state, but do NOT hand off to Max or log normal success.
+    const fieldsVerified = createResult['fields_verified'] as Record<string, unknown> | undefined;
+    const failedFields = fieldsVerified
+      ? Object.entries(fieldsVerified).filter(([, v]) => v === false).map(([k]) => k)
+      : ['unknown (fields_verified missing)'];
     await pool.end().catch(() => {});
-    logEvent('action', 'wo_created_unverified', 'warning', { event_id: eventId, wo_id: woId, sr_id: srId, agent: 'claudia' });
-    sendTelegram(CHAT_ALBIE, `WO#${woId || srId} CREATED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label} but post-create verification did not pass. Please verify WO details in AppFolio. No Max handoff until verified.${woUrl ? '\n' + woUrl : ''}`);
+    logEvent('action', 'wo_created_unverified', 'warning', { event_id: eventId, wo_id: woId, sr_id: srId, failed_fields: failedFields, fields_verified: fieldsVerified, agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO#${woId || srId} CREATED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label} but post-create verification did not pass. Failed: ${failedFields.join(', ')}. Please verify WO details in AppFolio. No Max handoff until verified.${woUrl ? '\n' + woUrl : ''}`);
     delete state.staged[eventId];
     writeState(state);
-    console.log(JSON.stringify({ status: 'created_unverified', event_id: eventId, wo_id: woId, sr_id: srId, tenant: entry.tenant_name }));
+    console.log(JSON.stringify({ status: 'created_unverified', event_id: eventId, wo_id: woId, sr_id: srId, tenant: entry.tenant_name, fields_verified: fieldsVerified, failed_fields: failedFields }));
     return;
   }
 
