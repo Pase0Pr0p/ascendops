@@ -1110,6 +1110,14 @@ async function createWorkOrder(
       var woNum = header ? header.textContent.trim() : "";
       var srTitle = document.querySelector("h2.js-service-request-title");
       var srNum = srTitle ? srTitle.textContent.trim() : "";
+      var descEl = document.querySelector(".js-service-request-description, [data-test='description'], .service-request-description");
+      var descText = descEl ? descEl.textContent.trim() : "";
+      var propEl = document.querySelector(".js-property-name, [data-test='property-name']");
+      var propText = propEl ? propEl.textContent.trim() : "";
+      var prioEl = document.querySelector(".js-service-request-header-priority");
+      var prioText = prioEl ? prioEl.textContent.trim() : "";
+      var pteEl = document.querySelector(".js-service-request-header-permission-to-enter");
+      var pteText = pteEl ? pteEl.textContent.trim() : "";
       var logH3 = null;
       var h3s = document.querySelectorAll("h3");
       for (var i = 0; i < h3s.length; i++) {
@@ -1120,7 +1128,7 @@ async function createWorkOrder(
         var sib = logH3.nextElementSibling;
         if (sib) firstLog = sib.textContent.trim().split("\\n").map(function(l){return l.trim();}).filter(function(l){return l.length>0;}).slice(0,3).join(" | ");
       }
-      JSON.stringify({ wo_number: woNum, sr_number: srNum, first_log: firstLog });
+      JSON.stringify({ wo_number: woNum, sr_number: srNum, first_log: firstLog, description: descText, property: propText, priority: prioText, permission_to_enter: pteText });
     `);
 
     try {
@@ -1134,16 +1142,49 @@ async function createWorkOrder(
 
   const hasCreatedPhrase = /Created/i.test(String(verification.first_log ?? ''));
   const redirectedToSr = !!srMatchResponse;
+  const hasWoNumber = !!(verification.wo_number || verification.sr_number);
+
+  // Multi-field echo-match: compare each verifiable field from the page against the submitted params
+  const descOnPage = String(verification.description ?? '');
+  const descFirstWords = params.description.trim().split(/\s+/).slice(0, 3).join(' ').toLowerCase();
+  const descriptionMatches = descFirstWords.length > 0 && descOnPage.toLowerCase().includes(descFirstWords);
+
+  const propOnPage = String(verification.property ?? '').toLowerCase();
+  const propertyMatches = propOnPage.length > 0; // property presence confirms correct SR; no param to compare against (propertyId is numeric)
+
+  const prioOnPage = String(verification.priority ?? '').toLowerCase();
+  const submittedPriority = (params.priority ?? 'Normal').toLowerCase();
+  const priorityMatches = prioOnPage.length > 0 && prioOnPage.includes(submittedPriority);
+
+  const pteOnPage = String(verification.permission_to_enter ?? '').toLowerCase();
+  const submittedPte = params.permissionToEnter ?? '';
+  // AppFolio renders "Yes"/"No"/"Not Applicable"; we submitted "true"/"false"/"not_applicable"
+  const pteMap: Record<string, string> = { 'true': 'yes', 'false': 'no', 'not_applicable': 'not applicable' };
+  const expectedPteLabel = pteMap[submittedPte] ?? '';
+  const pteMatches = expectedPteLabel.length > 0 && pteOnPage.includes(expectedPteLabel);
+
+  // Unit: no dedicated selector on the SR detail page. The property name sometimes
+  // includes the unit label (e.g. "72 Cherry St - Unit 4") but there is no separate
+  // .js-unit-name element to verify against.
+  const fields_verified = {
+    description: descriptionMatches,
+    property_present: propertyMatches,
+    priority: prioOnPage.length > 0 ? priorityMatches : null,
+    permission_to_enter: pteOnPage.length > 0 ? pteMatches : null,
+    unit: null as boolean | null, // not verifiable: no dedicated selector on SR detail page
+  };
 
   return {
     live: true,
-    verified: redirectedToSr && hasCreatedPhrase,
+    verified: redirectedToSr && hasCreatedPhrase && hasWoNumber,
+    fields_verified,
     sr_id: srMatchResponse?.[1] ?? '',
     wo_id: woMatchResponse?.[1] ?? '',
     final_url: fetchFinalUrl,
     submit_result: submitJson,
     verification,
     hash_consumed: true,
+    not_verifiable_from_page: ['unit'],
   };
 }
 
