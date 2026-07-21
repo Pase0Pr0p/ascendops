@@ -1105,7 +1105,8 @@ async function createWorkOrder(
   let verification: Record<string, unknown> = {};
 
   if (srMatchResponse) {
-    const verifyUrl = fetchFinalUrl.startsWith('http') ? fetchFinalUrl : `${APPFOLIO_URL}${fetchFinalUrl}`;
+    const srPath = `/maintenance/service_requests/${srMatchResponse[1]}${woMatchResponse ? '/work_orders/' + woMatchResponse[1] : ''}`;
+    const verifyUrl = `${APPFOLIO_URL}${srPath}`;
     abSafe('open', verifyUrl);
     abSafe('wait', '--load', 'networkidle');
 
