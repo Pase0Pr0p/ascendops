@@ -217,18 +217,24 @@ async function pollAndStage() {
     }
   } catch { /* best-effort */ }
 
-  // Expire stale staged rows (>7 days) — prevents zombie DB rows when local state evicts
+  // Expire stale staged rows — prevents zombie DB rows when local state evicts.
+  // Uses 8 days (vs local 7-day eviction on staged_at) because DB received_at
+  // predates staged_at; the extra day prevents DB expiry racing ahead of local eviction.
   try {
     const stale = await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'failed'
        WHERE event_type = 'wo_intake'
          AND lifecycle_status = 'staged'
-         AND received_at < NOW() - INTERVAL '7 days'
+         AND received_at < NOW() - INTERVAL '8 days'
        RETURNING id::text, payload->>'tenant_name' as tenant_name`,
     );
-    for (const row of stale.rows) {
-      sendTelegram(CHAT_ALBIE, `WO intake event ${row.id} (${row.tenant_name ?? 'unknown'}) was staged >7 days without approval. Marked failed. Manual WO needed if still relevant.`);
-      logEvent('action', 'wo_intake_expired', 'error', { event_id: row.id, agent: 'claudia' });
+    if (stale.rows.length > 0) {
+      const names = stale.rows.map(r => `${r.id} (${r.tenant_name ?? 'unknown'})`).slice(0, 5).join(', ');
+      const suffix = stale.rows.length > 5 ? ` +${stale.rows.length - 5} more` : '';
+      sendTelegram(CHAT_ALBIE, `${stale.rows.length} stale WO intake(s) expired (staged >8 days without approval): ${names}${suffix}. Marked failed.`);
+      for (const row of stale.rows) {
+        logEvent('action', 'wo_intake_expired', 'error', { event_id: row.id, agent: 'claudia' });
+      }
     }
   } catch { /* best-effort */ }
 
