@@ -214,6 +214,11 @@ export async function sweepDeadLetters(pool: pg.Pool): Promise<number> {
             event_id: row.id, channel: 'both', agent: 'claudia',
           });
           recovered++;
+        } else if (telegramOk !== priorTelegram || maxOk !== priorMax) {
+          await client.query(
+            `UPDATE voice_events SET payload = payload || $2::jsonb WHERE id = $1`,
+            [row.id, JSON.stringify({ _emergency_meta: { ...rawMeta, telegram_confirmed: telegramOk, max_confirmed: maxOk } })],
+          );
         }
       }
       await client.query('COMMIT');

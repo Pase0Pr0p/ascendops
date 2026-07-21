@@ -383,7 +383,7 @@ describe('dead-letter sweep', () => {
     expect(findQuery(queries, 'dead_letter_delivered')).toBeTruthy();
   });
 
-  it('dead-letter + one channel fails → stays as dead_letter (both required)', async () => {
+  it('dead-letter + one channel fails → persists partial state, stays as dead_letter', async () => {
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes('send-message')) throw new Error('agent down');
       return Buffer.from('ok');
@@ -394,9 +394,65 @@ describe('dead-letter sweep', () => {
     const count = await sweepDeadLetters(pool);
     expect(count).toBe(0);
     expect(findQuery(queries, 'dead_letter_delivered')).toBeFalsy();
+
+    const persistQ = queries.find(q => q.text.includes('payload || $2::jsonb'));
+    expect(persistQ).toBeTruthy();
+    const persistedMeta = JSON.parse(persistQ!.params![1] as string);
+    expect(persistedMeta._emergency_meta.telegram_confirmed).toBe(true);
+    expect(persistedMeta._emergency_meta.max_confirmed).toBe(false);
   });
 
-  it('dead-letter + both channels fail → stays as dead_letter', async () => {
+  it('two-sweep regression: Telegram fires once, Max fires once, delivered on second sweep', async () => {
+    // SWEEP 1: Telegram ok, Max fail → persists telegram_confirmed=true
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('send-message')) throw new Error('agent down');
+      return Buffer.from('ok');
+    });
+    const deadLetterPayload = makeEmergencyPayload();
+    const { pool: pool1, queries: q1 } = createSweepMockPool([{ id: 'dead-two-sweep', payload: deadLetterPayload }]);
+
+    const count1 = await sweepDeadLetters(pool1);
+    expect(count1).toBe(0);
+
+    const tgCalls1 = mockExecFileSync.mock.calls.filter(
+      (c: unknown[]) => (c[1] as string[]).includes('send-telegram'),
+    );
+    expect(tgCalls1.length).toBe(1);
+
+    const persistQ = q1.find(q => q.text.includes('payload || $2::jsonb'));
+    expect(persistQ).toBeTruthy();
+    const persistedMeta = JSON.parse(persistQ!.params![1] as string);
+    expect(persistedMeta._emergency_meta.telegram_confirmed).toBe(true);
+
+    // SWEEP 2: row now has telegram_confirmed=true in payload; Max succeeds
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+    const payloadWithConfirmedTelegram = {
+      ...deadLetterPayload,
+      _emergency_meta: { telegram_confirmed: true, max_confirmed: false },
+    };
+    const { pool: pool2, queries: q2 } = createSweepMockPool([
+      { id: 'dead-two-sweep', payload: payloadWithConfirmedTelegram },
+    ]);
+
+    const count2 = await sweepDeadLetters(pool2);
+    expect(count2).toBe(1);
+    expect(findQuery(q2, 'dead_letter_delivered')).toBeTruthy();
+
+    // Telegram must NOT have been called (already confirmed from sweep 1)
+    const tgCalls2 = mockExecFileSync.mock.calls.filter(
+      (c: unknown[]) => (c[1] as string[]).includes('send-telegram'),
+    );
+    expect(tgCalls2.length).toBe(0);
+
+    // Max must have been called
+    const maxCalls2 = mockExecFileSync.mock.calls.filter(
+      (c: unknown[]) => (c[1] as string[]).includes('send-message'),
+    );
+    expect(maxCalls2.length).toBe(1);
+  });
+
+  it('dead-letter + both channels fail → stays as dead_letter, no state change', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('still failing'); });
     const deadLetterPayload = makeEmergencyPayload();
     const { pool, queries } = createSweepMockPool([{ id: 'dead-2', payload: deadLetterPayload }]);
@@ -404,6 +460,7 @@ describe('dead-letter sweep', () => {
     const count = await sweepDeadLetters(pool);
     expect(count).toBe(0);
     expect(findQuery(queries, 'dead_letter_delivered')).toBeFalsy();
+    expect(queries.find(q => q.text.includes('payload || $2::jsonb'))).toBeFalsy();
   });
 });
 
