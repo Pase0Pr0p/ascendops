@@ -1,208 +1,36 @@
 /**
- * Tests for post-call-processor.ts
+ * Tests for post-call WO intake processor
  *
+ * Imports production functions from lib/post-call-intake.ts (no reimplementation).
  * Covers Cody's fail-closed contract:
  *   - Resolver failures, unknown/inactive/scope-blocked callers → manual_review
+ *   - Missing AppFolio IDs → manual_review (NOT routine Max queue)
  *   - Multi-issue, low-confidence extraction → manual_review
  *   - Emergency → alert path (NOT Max routine queue)
- *   - Idempotency → duplicates skipped
- *   - Normal happy path → Max queue
+ *   - Idempotency → source dedup + repeat-window dedup
+ *   - Route decision → single testable function
+ *   - Normal happy path → routine Max queue
  */
 
 import { describe, it, expect } from 'vitest';
-
-// Import pure functions by re-implementing the same logic from post-call-processor.ts
-// We test the processor's decision logic without needing a live DB.
-// The processor script is designed as a CLI entry point, so we replicate its
-// pure extraction/classification/guard functions here and test them directly.
-
-// ─── replicated pure functions ─────────────────────────────────────────────────
-// These MUST stay in sync with post-call-processor.ts. If the production code
-// changes, these tests break — which is the point.
-
-const EMERGENCY_KEYWORDS = [
-  'flood', 'flooding', 'gas leak', 'gas smell', 'no heat', 'no hot water',
-  'fire', 'smoke', 'sparking', 'electrical fire', 'carbon monoxide', 'co detector',
-  'sewage', 'raw sewage', 'burst pipe', 'water pouring', 'ceiling collapse',
-  'locked out', 'lockout', 'break-in', 'broken window',
-];
-
-const BLOCKED_SCOPES = new Set(['amanda', 'paused']);
-
-interface DataCollectionField {
-  value: unknown;
-  rationale: string;
-  data_collection_id: string;
-}
-
-interface ResolvedCaller {
-  matched: boolean;
-  ambiguous?: boolean;
-  display_name?: string;
-  contact_id?: string;
-  unit_label?: string;
-  property_label?: string;
-  routing_scope?: string;
-  resolved_type?: string;
-  has_active_occupancy?: boolean;
-}
-
-function extractField(
-  dcResults: Record<string, DataCollectionField>,
-  fieldId: string,
-): { value: unknown; rationale: string } | null {
-  const field = dcResults[fieldId];
-  if (!field || field.value === null || field.value === undefined || field.value === '') return null;
-  return { value: field.value, rationale: field.rationale };
-}
-
-function detectEmergency(
-  isEmergencyField: boolean | null,
-  issueDescription: string,
-  transcript: unknown[],
-): { is_emergency: boolean; detail: string | null } {
-  if (isEmergencyField === true) {
-    return { is_emergency: true, detail: 'data_collection is_emergency=true' };
-  }
-  const descLower = issueDescription.toLowerCase();
-  for (const kw of EMERGENCY_KEYWORDS) {
-    if (descLower.includes(kw)) {
-      return { is_emergency: true, detail: `keyword match: "${kw}" in issue description` };
-    }
-  }
-  const transcriptText = transcript
-    .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null && (t as Record<string, unknown>)['role'] === 'user')
-    .map(t => String((t as Record<string, unknown>)['message'] ?? ''))
-    .join(' ')
-    .toLowerCase();
-  for (const kw of EMERGENCY_KEYWORDS) {
-    if (transcriptText.includes(kw)) {
-      return { is_emergency: true, detail: `keyword match: "${kw}" in caller transcript` };
-    }
-  }
-  return { is_emergency: false, detail: null };
-}
-
-type IntakeClassification = 'one_issue' | 'multiple_issues' | 'insufficient_info' | 'not_maintenance';
-
-function classifyIntake(
-  issueDescription: string | null,
-  transcriptSummary: string,
-): IntakeClassification {
-  if (!issueDescription || issueDescription.trim().length < 5) return 'insufficient_info';
-  const multiSignals = [
-    /\band\b.*\b(also|another|second|too)\b/i,
-    /\b(two|three|multiple|several)\b.*\b(issue|problem|thing|request)/i,
-  ];
-  const sumLower = (transcriptSummary + ' ' + issueDescription).toLowerCase();
-  for (const re of multiSignals) {
-    if (re.test(sumLower)) return 'multiple_issues';
-  }
-  const nonMaintenanceSignals = [
-    /\b(rent|payment|balance|lease|move.?out|move.?in|application)\b/i,
-  ];
-  for (const re of nonMaintenanceSignals) {
-    if (re.test(issueDescription) && !/\b(break|broken|leak|jam|stuck|repair|fix|replace)\b/i.test(issueDescription)) {
-      return 'not_maintenance';
-    }
-  }
-  return 'one_issue';
-}
-
-function applyGuards(
-  resolved: ResolvedCaller | null,
-  resolverError: string | null,
-): { pass: boolean; reason: string | null } {
-  if (resolverError) return { pass: false, reason: `resolver_failure: ${resolverError}` };
-  if (!resolved) return { pass: false, reason: 'unknown_caller' };
-  if (!resolved.matched) return { pass: false, reason: 'unknown_caller' };
-  if (resolved.ambiguous) return { pass: false, reason: 'multi_match' };
-  const scope = resolved.routing_scope ?? 'fleet';
-  if (BLOCKED_SCOPES.has(scope)) return { pass: false, reason: `scope_blocked: ${scope}` };
-  if (resolved.resolved_type === 'tenant' && !resolved.has_active_occupancy) {
-    return { pass: false, reason: 'inactive_tenant' };
-  }
-  return { pass: true, reason: null };
-}
-
-function computeConfidence(
-  dcResults: Record<string, DataCollectionField>,
-  resolved: ResolvedCaller | null,
-  classification: IntakeClassification,
-): { confidence: number; lowFields: string[] } {
-  const lowFields: string[] = [];
-  let score = 1.0;
-  if (!extractField(dcResults, 'maintenance_issue_description')) { score -= 0.4; lowFields.push('issue_description'); }
-  if (!resolved?.matched) { score -= 0.2; lowFields.push('caller_identity'); }
-  if (!extractField(dcResults, 'unit_number')) { score -= 0.1; lowFields.push('unit_number'); }
-  if (!extractField(dcResults, 'permission_to_enter') && !extractField(dcResults, 'pte')) { score -= 0.05; lowFields.push('permission_to_enter'); }
-  if (classification === 'multiple_issues') { score -= 0.15; lowFields.push('multiple_issues'); }
-  if (classification === 'insufficient_info') { score -= 0.3; lowFields.push('insufficient_info'); }
-  return { confidence: Math.max(0, Math.round(score * 100) / 100), lowFields };
-}
-
-function mapPriority(severity: string | null, isEmergency: boolean): string {
-  if (isEmergency) return 'critical';
-  if (!severity) return 'normal';
-  const s = severity.toLowerCase().trim();
-  if (s === 'urgent' || s === 'high' || s === 'critical') return 'high';
-  if (s === 'low') return 'low';
-  return 'normal';
-}
-
-function mapPte(pte: unknown): string {
-  if (pte === true || pte === 'true' || pte === 'yes' || pte === 'Yes') return 'yes';
-  if (pte === false || pte === 'false' || pte === 'no' || pte === 'No') return 'no';
-  return 'not-asked';
-}
-
-function guessCategory(description: string): string {
-  const d = description.toLowerCase();
-  const map: [RegExp, string][] = [
-    [/garbage disposal|disposal/i, 'Garbage Disposal'],
-    [/dishwasher/i, 'Dishwasher'],
-    [/refrigerator|fridge/i, 'Refrigerator'],
-    [/oven|stove|range|burner/i, 'Oven/Stove'],
-    [/washer|dryer|laundry/i, 'Washer/Dryer'],
-    [/toilet|commode/i, 'Toilet'],
-    [/faucet|sink/i, 'Faucet/Sink'],
-    [/shower|bathtub|tub/i, 'Shower/Bathtub'],
-    [/drain|clog|pipe/i, 'Drain/Pipe Clog'],
-    [/water heater|hot water/i, 'Water Heater'],
-    [/leak|leaking|water damage/i, 'Leak'],
-    [/heat|heater|furnace|hvac|air condition|ac\b|a\/c/i, 'HVAC'],
-    [/thermostat/i, 'Thermostat'],
-    [/outlet|switch|light|electrical|breaker/i, 'Electrical'],
-    [/door|lock|deadbolt|key/i, 'Door/Lock'],
-    [/window|blind|shade|screen/i, 'Window/Blind'],
-    [/garage/i, 'Garage Door'],
-    [/roof|gutter/i, 'Roof/Gutter'],
-    [/pest|roach|ant|mouse|rat|bed bug/i, 'Pest Control'],
-    [/mold|mildew/i, 'Mold'],
-    [/paint|wall|ceiling|floor|carpet|tile/i, 'General Repair'],
-    [/smoke detector|fire alarm|co alarm/i, 'Safety Device'],
-  ];
-  for (const [re, category] of map) {
-    if (re.test(d)) return category;
-  }
-  return 'General Maintenance';
-}
-
-function computeIdempotencyKey(
-  callId: string,
-  callerPhone: string,
-  unitAddress: string,
-  issueSummary: string,
-): string {
-  const { createHash } = require('crypto');
-  const normalized = [
-    callId,
-    callerPhone.replace(/\D/g, ''),
-    unitAddress.toLowerCase().trim(),
-    issueSummary.toLowerCase().trim().split(/\s+/).slice(0, 5).join(' '),
-  ].join('|');
-  return createHash('sha256').update(normalized).digest('hex').substring(0, 16);
-}
+import {
+  type DataCollectionField,
+  type ResolvedCaller,
+  type IntakeClassification,
+  extractField,
+  detectEmergency,
+  classifyIntake,
+  applyGuards,
+  checkAppFolioIds,
+  computeConfidence,
+  computeRouteDecision,
+  computeSourceIdempotencyKey,
+  computeRepeatWindowKey,
+  mapPriority,
+  mapPte,
+  guessCategory,
+  CONFIDENCE_THRESHOLD,
+} from '../lib/post-call-intake';
 
 // ─── helper factories ──────────────────────────────────────────────────────────
 
@@ -229,6 +57,10 @@ const MATCHED_RESOLVED: ResolvedCaller = {
   routing_scope: 'fleet',
   resolved_type: 'tenant',
   has_active_occupancy: true,
+  occupancy_id: 'occ-1',
+  appfolio_unit_id: 1001,
+  appfolio_property_id: 2001,
+  appfolio_occupancy_id: 3001,
 };
 
 // ─── tests ─────────────────────────────────────────────────────────────────────
@@ -286,6 +118,56 @@ describe('applyGuards (fail-closed resolver)', () => {
     const resolved = { ...MATCHED_RESOLVED, routing_scope: undefined };
     const g = applyGuards(resolved, null);
     expect(g.pass).toBe(true);
+  });
+});
+
+describe('checkAppFolioIds', () => {
+  it('all three IDs present → ready', () => {
+    const r = checkAppFolioIds(MATCHED_RESOLVED);
+    expect(r.ready).toBe(true);
+    expect(r.reason).toBeNull();
+  });
+
+  it('missing unit_id → not ready', () => {
+    const r = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_unit_id: null });
+    expect(r.ready).toBe(false);
+    expect(r.reason).toContain('unit_id');
+  });
+
+  it('missing property_id → not ready', () => {
+    const r = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_property_id: null });
+    expect(r.ready).toBe(false);
+    expect(r.reason).toContain('property_id');
+  });
+
+  it('missing occupancy_id → not ready', () => {
+    const r = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_occupancy_id: null });
+    expect(r.ready).toBe(false);
+    expect(r.reason).toContain('occupancy_id');
+  });
+
+  it('all three missing → lists all', () => {
+    const r = checkAppFolioIds({
+      ...MATCHED_RESOLVED,
+      appfolio_unit_id: null,
+      appfolio_property_id: null,
+      appfolio_occupancy_id: null,
+    });
+    expect(r.ready).toBe(false);
+    expect(r.reason).toContain('unit_id');
+    expect(r.reason).toContain('property_id');
+    expect(r.reason).toContain('occupancy_id');
+  });
+
+  it('unresolved caller → not ready', () => {
+    const r = checkAppFolioIds({ matched: false });
+    expect(r.ready).toBe(false);
+    expect(r.reason).toContain('unresolved');
+  });
+
+  it('null resolved → not ready', () => {
+    const r = checkAppFolioIds(null);
+    expect(r.ready).toBe(false);
   });
 });
 
@@ -408,12 +290,125 @@ describe('computeConfidence', () => {
     expect(confidence).toBe(0.95);
   });
 
-  it('confidence below 0.7 → should trigger manual review', () => {
+  it('confidence below threshold → should trigger manual review', () => {
     const emptyDc: Record<string, DataCollectionField> = {
       caller_name: makeDcField('Someone'),
     };
     const { confidence } = computeConfidence(emptyDc, { matched: false }, 'one_issue');
-    expect(confidence).toBeLessThan(0.7);
+    expect(confidence).toBeLessThan(CONFIDENCE_THRESHOLD);
+  });
+});
+
+describe('computeRouteDecision', () => {
+  const baseOpts = {
+    safetyFlags: { is_emergency: false },
+    guardsPassed: true,
+    guardReason: null,
+    classification: 'one_issue' as IntakeClassification,
+    confidence: 1.0,
+    lowFields: [] as string[],
+    appfolioReady: true,
+    appfolioIdReason: null,
+  };
+
+  it('all clear → routine', () => {
+    const { route, manualReviewReason } = computeRouteDecision(baseOpts);
+    expect(route).toBe('routine');
+    expect(manualReviewReason).toBeNull();
+  });
+
+  it('emergency → emergency (overrides everything)', () => {
+    const { route } = computeRouteDecision({
+      ...baseOpts,
+      safetyFlags: { is_emergency: true },
+      guardsPassed: false,
+      guardReason: 'unknown_caller',
+    });
+    expect(route).toBe('emergency');
+  });
+
+  it('guards failed → manual_review', () => {
+    const { route, manualReviewReason } = computeRouteDecision({
+      ...baseOpts,
+      guardsPassed: false,
+      guardReason: 'unknown_caller',
+    });
+    expect(route).toBe('manual_review');
+    expect(manualReviewReason).toContain('guard_failed');
+  });
+
+  it('multiple_issues → manual_review', () => {
+    const { route, manualReviewReason } = computeRouteDecision({
+      ...baseOpts,
+      classification: 'multiple_issues',
+    });
+    expect(route).toBe('manual_review');
+    expect(manualReviewReason).toContain('multiple_issues');
+  });
+
+  it('insufficient_info → manual_review', () => {
+    const { route } = computeRouteDecision({
+      ...baseOpts,
+      classification: 'insufficient_info',
+    });
+    expect(route).toBe('manual_review');
+  });
+
+  it('not_maintenance → manual_review', () => {
+    const { route } = computeRouteDecision({
+      ...baseOpts,
+      classification: 'not_maintenance',
+    });
+    expect(route).toBe('manual_review');
+  });
+
+  it('low confidence → manual_review', () => {
+    const { route, manualReviewReason } = computeRouteDecision({
+      ...baseOpts,
+      confidence: 0.5,
+      lowFields: ['issue_description'],
+    });
+    expect(route).toBe('manual_review');
+    expect(manualReviewReason).toContain('low_confidence');
+  });
+
+  it('missing AppFolio IDs → manual_review (NOT routine)', () => {
+    const { route, manualReviewReason } = computeRouteDecision({
+      ...baseOpts,
+      appfolioReady: false,
+      appfolioIdReason: 'missing_appfolio_ids: unit_id',
+    });
+    expect(route).toBe('manual_review');
+    expect(manualReviewReason).toContain('missing_appfolio_ids');
+  });
+
+  it('matched+active+high-confidence but missing IDs → manual_review', () => {
+    const { route } = computeRouteDecision({
+      ...baseOpts,
+      guardsPassed: true,
+      confidence: 1.0,
+      appfolioReady: false,
+      appfolioIdReason: 'missing_appfolio_ids: unit_id, property_id',
+    });
+    expect(route).toBe('manual_review');
+  });
+
+  it('multiple reasons accumulate', () => {
+    const { route, manualReviewReason } = computeRouteDecision({
+      ...baseOpts,
+      guardsPassed: false,
+      guardReason: 'unknown_caller',
+      classification: 'multiple_issues',
+      confidence: 0.3,
+      lowFields: ['issue_description', 'caller_identity'],
+      appfolioReady: false,
+      appfolioIdReason: 'unresolved_caller',
+    });
+    expect(route).toBe('manual_review');
+    expect(manualReviewReason).toContain('guard_failed');
+    expect(manualReviewReason).toContain('multiple_issues');
+    expect(manualReviewReason).toContain('low_confidence');
+    expect(manualReviewReason).toContain('missing_appfolio_ids');
   });
 });
 
@@ -486,33 +481,53 @@ describe('guessCategory', () => {
   });
 });
 
-describe('idempotency key', () => {
-  it('same inputs → same key', () => {
-    const k1 = computeIdempotencyKey('conv-1', '+14155551234', '#2, Redwood', 'Faucet leaking');
-    const k2 = computeIdempotencyKey('conv-1', '+14155551234', '#2, Redwood', 'Faucet leaking');
+describe('source idempotency key', () => {
+  it('same conversation_id → same key', () => {
+    const k1 = computeSourceIdempotencyKey('conv-abc');
+    const k2 = computeSourceIdempotencyKey('conv-abc');
     expect(k1).toBe(k2);
   });
 
-  it('different call_id → different key', () => {
-    const k1 = computeIdempotencyKey('conv-1', '+14155551234', '#2, Redwood', 'Faucet leaking');
-    const k2 = computeIdempotencyKey('conv-2', '+14155551234', '#2, Redwood', 'Faucet leaking');
+  it('different conversation_id → different key', () => {
+    const k1 = computeSourceIdempotencyKey('conv-1');
+    const k2 = computeSourceIdempotencyKey('conv-2');
     expect(k1).not.toBe(k2);
   });
 
+  it('key is 16 chars hex', () => {
+    const k = computeSourceIdempotencyKey('conv-1');
+    expect(k).toHaveLength(16);
+    expect(k).toMatch(/^[a-f0-9]{16}$/);
+  });
+});
+
+describe('repeat-window key', () => {
+  it('same caller+unit+issue → same key', () => {
+    const k1 = computeRepeatWindowKey('+14155551234', '#2, Redwood', 'Faucet leaking');
+    const k2 = computeRepeatWindowKey('+14155551234', '#2, Redwood', 'Faucet leaking');
+    expect(k1).toBe(k2);
+  });
+
   it('different phone → different key', () => {
-    const k1 = computeIdempotencyKey('conv-1', '+14155551234', '#2, Redwood', 'Faucet leaking');
-    const k2 = computeIdempotencyKey('conv-1', '+14155559999', '#2, Redwood', 'Faucet leaking');
+    const k1 = computeRepeatWindowKey('+14155551234', '#2', 'faucet');
+    const k2 = computeRepeatWindowKey('+14155559999', '#2', 'faucet');
+    expect(k1).not.toBe(k2);
+  });
+
+  it('different issue → different key', () => {
+    const k1 = computeRepeatWindowKey('+14155551234', '#2', 'faucet leak');
+    const k2 = computeRepeatWindowKey('+14155551234', '#2', 'broken window');
     expect(k1).not.toBe(k2);
   });
 
   it('phone normalization strips non-digits', () => {
-    const k1 = computeIdempotencyKey('conv-1', '+14155551234', '#2', 'test');
-    const k2 = computeIdempotencyKey('conv-1', '14155551234', '#2', 'test');
+    const k1 = computeRepeatWindowKey('+14155551234', '#2', 'test');
+    const k2 = computeRepeatWindowKey('14155551234', '#2', 'test');
     expect(k1).toBe(k2);
   });
 
   it('key is 16 chars hex', () => {
-    const k = computeIdempotencyKey('conv-1', '+14155551234', '#2', 'test');
+    const k = computeRepeatWindowKey('+14155551234', '#2', 'test');
     expect(k).toHaveLength(16);
     expect(k).toMatch(/^[a-f0-9]{16}$/);
   });
@@ -548,37 +563,94 @@ describe('extractField', () => {
 });
 
 describe('fail-closed integration scenarios', () => {
-  it('resolver failure + emergency → both manual_review reason AND emergency flag', () => {
+  it('resolver failure + emergency → emergency route (emergency overrides guard failure)', () => {
     const guards = applyGuards(null, 'connection timeout');
     const emergency = detectEmergency(true, 'gas leak', []);
-    expect(guards.pass).toBe(false);
-    expect(emergency.is_emergency).toBe(true);
+    const { route } = computeRouteDecision({
+      safetyFlags: emergency,
+      guardsPassed: guards.pass,
+      guardReason: guards.reason,
+      classification: 'one_issue',
+      confidence: 1.0,
+      lowFields: [],
+      appfolioReady: false,
+      appfolioIdReason: 'unresolved_caller',
+    });
+    expect(route).toBe('emergency');
   });
 
-  it('scope-blocked + valid extraction → manual_review (guards override extraction)', () => {
+  it('scope-blocked + valid extraction + full IDs → manual_review', () => {
     const guards = applyGuards({ ...MATCHED_RESOLVED, routing_scope: 'amanda' }, null);
-    const { confidence } = computeConfidence(FULL_DC, MATCHED_RESOLVED, 'one_issue');
-    expect(guards.pass).toBe(false);
-    expect(confidence).toBe(1.0);
+    const { route } = computeRouteDecision({
+      safetyFlags: { is_emergency: false },
+      guardsPassed: guards.pass,
+      guardReason: guards.reason,
+      classification: 'one_issue',
+      confidence: 1.0,
+      lowFields: [],
+      appfolioReady: true,
+      appfolioIdReason: null,
+    });
+    expect(route).toBe('manual_review');
   });
 
-  it('matched caller + insufficient info → manual_review (low confidence)', () => {
+  it('matched caller + insufficient info → manual_review', () => {
     const guards = applyGuards(MATCHED_RESOLVED, null);
     const classification = classifyIntake(null, '');
-    const { confidence } = computeConfidence({}, MATCHED_RESOLVED, classification);
-    expect(guards.pass).toBe(true);
-    expect(classification).toBe('insufficient_info');
-    expect(confidence).toBeLessThan(0.7);
+    const { confidence, lowFields } = computeConfidence({}, MATCHED_RESOLVED, classification);
+    const { route } = computeRouteDecision({
+      safetyFlags: { is_emergency: false },
+      guardsPassed: guards.pass,
+      guardReason: guards.reason,
+      classification,
+      confidence,
+      lowFields,
+      appfolioReady: true,
+      appfolioIdReason: null,
+    });
+    expect(route).toBe('manual_review');
   });
 
-  it('full happy path: matched caller, one_issue, high confidence → all gates pass', () => {
+  it('matched + active + high confidence + missing AppFolio IDs → manual_review (Cody blocker-1)', () => {
+    const guards = applyGuards(MATCHED_RESOLVED, null);
+    const afIds = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_unit_id: null });
+    const { route, manualReviewReason } = computeRouteDecision({
+      safetyFlags: { is_emergency: false },
+      guardsPassed: guards.pass,
+      guardReason: guards.reason,
+      classification: 'one_issue',
+      confidence: 1.0,
+      lowFields: [],
+      appfolioReady: afIds.ready,
+      appfolioIdReason: afIds.reason,
+    });
+    expect(guards.pass).toBe(true);
+    expect(route).toBe('manual_review');
+    expect(manualReviewReason).toContain('missing_appfolio_ids');
+  });
+
+  it('full happy path: all gates pass → routine', () => {
     const guards = applyGuards(MATCHED_RESOLVED, null);
     const classification = classifyIntake('Kitchen faucet leaking', '');
     const emergency = detectEmergency(false, 'Kitchen faucet leaking', []);
-    const { confidence } = computeConfidence(FULL_DC, MATCHED_RESOLVED, classification);
+    const { confidence, lowFields } = computeConfidence(FULL_DC, MATCHED_RESOLVED, classification);
+    const afIds = checkAppFolioIds(MATCHED_RESOLVED);
+    const { route, manualReviewReason } = computeRouteDecision({
+      safetyFlags: emergency,
+      guardsPassed: guards.pass,
+      guardReason: guards.reason,
+      classification,
+      confidence,
+      lowFields,
+      appfolioReady: afIds.ready,
+      appfolioIdReason: afIds.reason,
+    });
     expect(guards.pass).toBe(true);
     expect(classification).toBe('one_issue');
     expect(emergency.is_emergency).toBe(false);
-    expect(confidence).toBeGreaterThanOrEqual(0.7);
+    expect(confidence).toBeGreaterThanOrEqual(CONFIDENCE_THRESHOLD);
+    expect(afIds.ready).toBe(true);
+    expect(route).toBe('routine');
+    expect(manualReviewReason).toBeNull();
   });
 });
