@@ -47,6 +47,7 @@ interface StagedEntry {
   location_detail: string;
   contact_id: string | null;
   call_id: string | null;
+  creating_at?: string;
 }
 
 function readState(): IntakeState {
@@ -196,18 +197,23 @@ async function pollAndStage() {
     );
   } catch { /* best-effort — main path is more important */ }
 
-  // Detect rows stuck in 'creating' for >10 minutes (crash between claim and create)
+  // Detect rows stuck in 'creating' — check state file creating_at, not DB received_at
   try {
-    const stuck = await pool.query(
+    const creating = await pool.query(
       `SELECT id::text, payload->>'tenant_name' as tenant_name
        FROM voice_events
        WHERE event_type = 'wo_intake'
-         AND lifecycle_status = 'creating'
-         AND received_at < NOW() - INTERVAL '10 minutes'`,
+         AND lifecycle_status = 'creating'`,
     );
-    for (const row of stuck.rows) {
-      sendTelegram(CHAT_ALBIE, `WO intake event ${row.id} (${row.tenant_name ?? 'unknown'}) stuck in 'creating' status for >10 min. Likely crash during create. Manual check needed.`);
-      logEvent('action', 'wo_intake_stuck_creating', 'error', { event_id: row.id, agent: 'claudia' });
+    const now = Date.now();
+    for (const row of creating.rows) {
+      const entry = state.staged[row.id];
+      const creatingAt = entry?.creating_at;
+      const age = creatingAt ? now - new Date(creatingAt).getTime() : Infinity;
+      if (age > 10 * 60 * 1000) {
+        sendTelegram(CHAT_ALBIE, `WO intake event ${row.id} (${row.tenant_name ?? 'unknown'}) stuck in 'creating' status for >10 min. Likely crash during create. Manual check needed.`);
+        logEvent('action', 'wo_intake_stuck_creating', 'error', { event_id: row.id, agent: 'claudia' });
+      }
     }
   } catch { /* best-effort */ }
 
@@ -406,6 +412,10 @@ async function executeApproval(eventId: string) {
     await pool.end().catch(() => {});
     process.exit(1);
   }
+
+  // Record creating start time for stuck-creating detection
+  entry.creating_at = new Date().toISOString();
+  writeState(state);
 
   // Execute live create with the stored approval hash
   const pteFlag = entry.permission_to_enter === true ? 'true' : entry.permission_to_enter === false ? 'false' : 'not_applicable';
