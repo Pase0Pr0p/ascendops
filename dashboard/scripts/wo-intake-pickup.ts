@@ -532,38 +532,51 @@ async function executeApproval(eventId: string) {
 
   const woId = String(createResult['wo_id'] ?? '');
   const srId = String(createResult['sr_id'] ?? '');
+  const woUrl = srId ? `https://paseoproperties.appfolio.com/maintenance/service_requests/${srId}` : '';
 
   // Persist WO/SR ID to the event IMMEDIATELY, before any verification check.
   // This is the idempotency anchor: once a WO ID is persisted, no re-create can happen.
-  await pool.query(
+  // If this write fails, STOP — no normal success, no Max handoff. Manual reconciliation only.
+  const anchorResult = await pool.query(
     `UPDATE voice_events
      SET payload = payload || jsonb_build_object('created_wo_id', $2::text, 'created_sr_id', $3::text)
-     WHERE id = $1`,
+     WHERE id = $1 RETURNING id`,
     [eventId, woId, srId],
-  ).catch(() => {
-    sendTelegram(CHAT_ALBIE, `WO was CREATED (WO#${woId || srId}) but failed to persist WO ID to event ${eventId}. Manual DB update needed.`);
-  });
+  ).catch(() => null);
+
+  if (!anchorResult?.rows[0]) {
+    await pool.query(
+      `UPDATE voice_events SET lifecycle_status = 'created_unverified' WHERE id = $1`,
+      [eventId],
+    ).catch(() => {});
+    await pool.end().catch(() => {});
+    logEvent('action', 'wo_anchor_persist_failed', 'error', { event_id: eventId, wo_id: woId, sr_id: srId, agent: 'claudia' });
+    sendTelegram(CHAT_ALBIE, `WO CREATED (WO#${woId || srId}) for ${entry.tenant_name} but FAILED to persist WO ID to event ${eventId}. No Max handoff. Manual reconciliation needed: UPDATE voice_events SET payload = payload || '{"created_wo_id":"${woId}","created_sr_id":"${srId}"}' WHERE id='${eventId}'`);
+    console.error(JSON.stringify({ error: 'anchor_persist_failed', event_id: eventId, wo_id: woId, sr_id: srId }));
+    process.exit(1);
+  }
 
   // Determine final lifecycle state based on verification
   const verified = createResult['verified'] === true;
   const finalStatus = verified ? 'created' : 'created_unverified';
 
-  const markResult = await pool.query(
-    `UPDATE voice_events SET lifecycle_status = $2 WHERE id = $1 RETURNING id`,
+  await pool.query(
+    `UPDATE voice_events SET lifecycle_status = $2 WHERE id = $1`,
     [eventId, finalStatus],
-  ).catch(() => null);
-  await pool.end().catch(() => {});
-
-  if (!markResult?.rows[0]) {
-    logEvent('action', 'wo_created_mark_failed', 'error', { event_id: eventId, agent: 'claudia' });
-    sendTelegram(CHAT_ALBIE, `WO was CREATED for ${entry.tenant_name} but status update to '${finalStatus}' failed in DB. WO ID persisted (no double-create risk). Manual DB update needed: UPDATE voice_events SET lifecycle_status='${finalStatus}' WHERE id='${eventId}'`);
-  }
+  ).catch(() => {});
 
   if (!verified) {
+    // Unverified: alert Albie, clean up local state, but do NOT hand off to Max or log normal success.
+    await pool.end().catch(() => {});
     logEvent('action', 'wo_created_unverified', 'warning', { event_id: eventId, wo_id: woId, sr_id: srId, agent: 'claudia' });
-    sendTelegram(CHAT_ALBIE, `WO#${woId || srId} CREATED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label} but post-create verification did not pass. Please verify WO details in AppFolio.`);
+    sendTelegram(CHAT_ALBIE, `WO#${woId || srId} CREATED for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label} but post-create verification did not pass. Please verify WO details in AppFolio. No Max handoff until verified.${woUrl ? '\n' + woUrl : ''}`);
+    delete state.staged[eventId];
+    writeState(state);
+    console.log(JSON.stringify({ status: 'created_unverified', event_id: eventId, wo_id: woId, sr_id: srId, tenant: entry.tenant_name }));
+    return;
   }
-  const woUrl = srId ? `https://paseoproperties.appfolio.com/maintenance/service_requests/${srId}` : '';
+
+  await pool.end().catch(() => {});
 
   logEvent('action', 'wo_created', 'info', {
     event_id: eventId,
@@ -576,7 +589,7 @@ async function executeApproval(eventId: string) {
   // Notify Albie
   sendTelegram(CHAT_ALBIE, `WO created for ${entry.tenant_name} at ${entry.unit_label}, ${entry.property_label}. WO#${woId || srId}${woUrl ? '\n' + woUrl : ''}`);
 
-  // Hand off to Max
+  // Hand off to Max — only on verified=true
   const locationRef = formatLocationRef(entry as unknown as Record<string, unknown>);
   const maxHandoff = JSON.stringify({
     type: 'wo_voice_intake',
@@ -621,7 +634,7 @@ async function executeApproval(eventId: string) {
     wo_id: woId,
     sr_id: srId,
     tenant: entry.tenant_name,
-    handed_to_max: true,
+    handed_to_max: maxSent,
   }));
 }
 
