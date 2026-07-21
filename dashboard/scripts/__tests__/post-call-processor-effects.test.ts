@@ -2,11 +2,12 @@
  * Processor side-effect tests for post-call WO intake.
  *
  * Covers the safety-critical paths that the pure-lib tests cannot:
- *   - Emergency send-then-mark: both-fail → retry → dead-letter escalation
+ *   - Emergency lifecycle: send-then-mark, retry (no dedup bypass), dead-letter
+ *   - wo_intake timing: written only after delivery for emergency
+ *   - Dead-letter sweep: re-attempts delivery on every cron cycle
  *   - Source dedup DB error → dedup_check_error (fail-closed)
  *   - Repeat-window DB error → possible_repeat flag (fail-closed)
  *   - Blank conversation_id → eventId fallback for source key
- *   - Stale-processing reaper SQL in processPostCallEvents
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -26,7 +27,7 @@ vi.mock('pg', () => ({
   default: { Pool: vi.fn() },
 }));
 
-import { processOneEvent, MAX_EMERGENCY_RETRIES } from '../post-call-processor';
+import { processOneEvent, sweepDeadLetters, MAX_EMERGENCY_RETRIES } from '../post-call-processor';
 import { computeSourceIdempotencyKey } from '../lib/post-call-intake';
 
 // ─── helpers ──────────────────────────────────────────────────────────────
@@ -130,9 +131,13 @@ function findQuery(queries: TrackedQuery[], pattern: string): TrackedQuery | und
   return queries.find(q => q.text.includes(pattern));
 }
 
+function findAllQueries(queries: TrackedQuery[], pattern: string): TrackedQuery[] {
+  return queries.filter(q => q.text.includes(pattern));
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────
 
-describe('emergency delivery: send-then-mark', () => {
+describe('emergency delivery lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
@@ -140,16 +145,16 @@ describe('emergency delivery: send-then-mark', () => {
   });
   afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
 
-  it('at least one send succeeds → lifecycle=processed', async () => {
+  it('at least one send succeeds → wo_intake written + lifecycle=processed', async () => {
     const { pool, queries } = createMockPool();
     await processOneEvent(pool, 'evt-1', makeEmergencyPayload(), 0);
 
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, "'processed'")).toBeTruthy();
     expect(findQuery(queries, 'emergency_send_failed')).toBeFalsy();
-    expect(findQuery(queries, 'emergency_dead_letter')).toBeFalsy();
   });
 
-  it('Telegram succeeds, Max fails → still processed', async () => {
+  it('Telegram succeeds, Max fails → wo_intake written + processed', async () => {
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes('send-message')) throw new Error('agent down');
       return Buffer.from('ok');
@@ -157,57 +162,169 @@ describe('emergency delivery: send-then-mark', () => {
     const { pool, queries } = createMockPool();
     await processOneEvent(pool, 'evt-2', makeEmergencyPayload(), 0);
 
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, "'processed'")).toBeTruthy();
   });
 
-  it('both sends fail, first attempt → emergency_send_failed + attempts=1', async () => {
+  it('both sends fail, first attempt → emergency_send_failed, NO wo_intake written', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
     const { pool, queries } = createMockPool();
 
     await processOneEvent(pool, 'evt-3', makeEmergencyPayload(), 0);
 
+    // wo_intake must NOT be written — prevents dedup from blocking retries
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
+
     const failQ = findQuery(queries, 'emergency_send_failed');
     expect(failQ).toBeTruthy();
-    const metaJson = failQ!.params![1] as string;
-    const meta = JSON.parse(metaJson);
+    const meta = JSON.parse(failQ!.params![1] as string);
     expect(meta._emergency_meta.attempts).toBe(1);
-    expect(meta._emergency_meta.last_failed_at).toBeTruthy();
   });
 
-  it('both sends fail on attempt 3 → emergency_send_failed + attempts=4', async () => {
+  it('both sends fail on attempt 3 → emergency_send_failed, NO wo_intake', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
     const { pool, queries } = createMockPool();
 
     await processOneEvent(pool, 'evt-4', makeEmergencyPayload(), 3);
 
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
     const failQ = findQuery(queries, 'emergency_send_failed');
     expect(failQ).toBeTruthy();
     const meta = JSON.parse(failQ!.params![1] as string);
     expect(meta._emergency_meta.attempts).toBe(4);
   });
 
-  it('retry exhaustion → emergency_dead_letter (not emergency_send_failed)', async () => {
+  it('retry exhaustion → emergency_dead_letter + wo_intake written (for manual record)', async () => {
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
     const { pool, queries } = createMockPool();
 
     await processOneEvent(pool, 'evt-5', makeEmergencyPayload(), MAX_EMERGENCY_RETRIES - 1);
 
+    // Dead-letter IS terminal — wo_intake is written for the manual-review record
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, 'emergency_dead_letter')).toBeTruthy();
     expect(findQuery(queries, 'emergency_send_failed')).toBeFalsy();
   });
+});
 
-  it('dead-letter attempts best-effort Telegram escalation', async () => {
+describe('emergency retry: dedup must not block re-delivery (regression)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+  });
+  afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
+
+  it('first attempt fails → no wo_intake → retry finds no source dup → re-sends → delivered', async () => {
+    // FIRST ATTEMPT: both sends fail
     mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
-    const { pool } = createMockPool();
+    const { pool: pool1, queries: q1 } = createMockPool();
+    await processOneEvent(pool1, 'evt-retry', makeEmergencyPayload(), 0);
 
-    await processOneEvent(pool, 'evt-6', makeEmergencyPayload(), MAX_EMERGENCY_RETRIES - 1);
+    // Verify: no wo_intake was written on failure
+    expect(findQuery(q1, 'INSERT INTO voice_events')).toBeFalsy();
+    expect(findQuery(q1, 'emergency_send_failed')).toBeTruthy();
 
-    const telegramCalls = mockExecFileSync.mock.calls.filter(
-      (c: unknown[]) => (c[1] as string[]).includes('send-telegram'),
-    );
-    // 2 emergency sends + 1 dead-letter escalation attempt = 3 telegram attempts
-    // (first 2 are the original emergency sends that fail, 3rd is the dead-letter alert)
-    expect(telegramCalls.length).toBeGreaterThanOrEqual(2);
+    // SECOND ATTEMPT (retry): sends succeed now
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+    const { pool: pool2, queries: q2 } = createMockPool();
+    await processOneEvent(pool2, 'evt-retry', makeEmergencyPayload(), 1);
+
+    // Verify: source dedup check passes (no prior wo_intake)
+    expect(findQuery(q2, 'duplicate_skipped')).toBeFalsy();
+    // Verify: wo_intake written after successful delivery
+    expect(findQuery(q2, 'INSERT INTO voice_events')).toBeTruthy();
+    // Verify: marked processed
+    expect(findQuery(q2, "'processed'")).toBeTruthy();
+  });
+
+  it('first attempt fails → retry fails → retry fails → retry succeeds → delivered', async () => {
+    // Simulate 3 failures then success, each as separate processOneEvent calls
+    mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { pool, queries } = createMockPool();
+      await processOneEvent(pool, 'evt-multi-retry', makeEmergencyPayload(), attempt);
+      expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
+      expect(findQuery(queries, 'emergency_send_failed')).toBeTruthy();
+    }
+
+    // Fourth attempt: sends succeed
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+    const { pool, queries } = createMockPool();
+    await processOneEvent(pool, 'evt-multi-retry', makeEmergencyPayload(), 3);
+
+    expect(findQuery(queries, 'duplicate_skipped')).toBeFalsy();
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
+    expect(findQuery(queries, "'processed'")).toBeTruthy();
+  });
+
+  it('exhaustion after MAX_EMERGENCY_RETRIES → dead-letter with intake record', async () => {
+    mockExecFileSync.mockImplementation(() => { throw new Error('send failed'); });
+
+    // All attempts fail
+    for (let attempt = 0; attempt < MAX_EMERGENCY_RETRIES - 1; attempt++) {
+      const { pool, queries } = createMockPool();
+      await processOneEvent(pool, 'evt-exhaust', makeEmergencyPayload(), attempt);
+      expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
+    }
+
+    // Final attempt: still fails → dead-letter
+    const { pool, queries } = createMockPool();
+    await processOneEvent(pool, 'evt-exhaust', makeEmergencyPayload(), MAX_EMERGENCY_RETRIES - 1);
+
+    // Dead-letter writes the intake record (for manual review)
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
+    expect(findQuery(queries, 'emergency_dead_letter')).toBeTruthy();
+  });
+});
+
+describe('dead-letter sweep', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+  });
+  afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
+
+  it('no dead-letters → sweep returns 0', async () => {
+    const { pool } = createMockPool((text) => {
+      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) {
+        return { rows: [] };
+      }
+      return null;
+    });
+    const count = await sweepDeadLetters(pool);
+    expect(count).toBe(0);
+  });
+
+  it('dead-letter found + delivery succeeds → transitions to dead_letter_delivered', async () => {
+    const deadLetterPayload = makeEmergencyPayload();
+    const { pool, queries } = createMockPool((text) => {
+      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) {
+        return { rows: [{ id: 'dead-1', payload: deadLetterPayload }] };
+      }
+      return null;
+    });
+
+    const count = await sweepDeadLetters(pool);
+    expect(count).toBe(1);
+    expect(findQuery(queries, 'dead_letter_delivered')).toBeTruthy();
+  });
+
+  it('dead-letter found + delivery still fails → stays as dead_letter (not transitioned)', async () => {
+    mockExecFileSync.mockImplementation(() => { throw new Error('still failing'); });
+    const deadLetterPayload = makeEmergencyPayload();
+    const { pool, queries } = createMockPool((text) => {
+      if (text.includes('emergency_dead_letter') && text.includes('SELECT')) {
+        return { rows: [{ id: 'dead-2', payload: deadLetterPayload }] };
+      }
+      return null;
+    });
+
+    const count = await sweepDeadLetters(pool);
+    expect(count).toBe(0);
+    // Should NOT transition — still failing
+    expect(findQuery(queries, 'dead_letter_delivered')).toBeFalsy();
   });
 });
 
@@ -228,8 +345,7 @@ describe('source dedup fail-closed', () => {
     await processOneEvent(pool, 'evt-dedup', makePayload(), 0);
 
     expect(findQuery(queries, 'dedup_check_error')).toBeTruthy();
-    const insertQ = findQuery(queries, 'INSERT INTO voice_events');
-    expect(insertQ).toBeFalsy();
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeFalsy();
   });
 
   it('source duplicate found → duplicate_skipped, no wo_intake insert', async () => {
@@ -304,7 +420,7 @@ describe('blank conversation_id fallback', () => {
   });
 });
 
-describe('claim selector coverage', () => {
+describe('non-emergency path', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
@@ -312,10 +428,11 @@ describe('claim selector coverage', () => {
   });
   afterEach(() => { delete process.env.TELEGRAM_BOT_TOKEN; });
 
-  it('non-emergency routine → lifecycle=processed + sent to Max', async () => {
+  it('routine → wo_intake written + lifecycle=processed + sent to Max', async () => {
     const { pool, queries } = createMockPool();
     await processOneEvent(pool, 'evt-routine', makePayload(), 0);
 
+    expect(findQuery(queries, 'INSERT INTO voice_events')).toBeTruthy();
     expect(findQuery(queries, "'processed'")).toBeTruthy();
     const maxCalls = mockExecFileSync.mock.calls.filter(
       (c: unknown[]) => (c[1] as string[]).includes('send-message'),

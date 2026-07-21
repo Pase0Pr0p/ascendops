@@ -148,10 +148,65 @@ async function lookupAppFolioIds(
 const STALE_PROCESSING_MINUTES = 10;
 const MAX_EMERGENCY_RETRIES = 5;
 
+// ─── dead-letter sweep ────────────────────────────────────────────────────
+
+export async function sweepDeadLetters(pool: pg.Pool): Promise<number> {
+  let recovered = 0;
+  try {
+    const deadLetters = await pool.query(
+      `SELECT id, payload FROM voice_events
+       WHERE event_type = 'elevenlabs_post_call'
+         AND lifecycle_status = 'emergency_dead_letter'
+       LIMIT 10`,
+    );
+    if (deadLetters.rows.length === 0) return 0;
+
+    console.error(JSON.stringify({
+      alert: 'dead_letter_sweep',
+      count: deadLetters.rows.length,
+      ids: deadLetters.rows.map((r: Record<string, unknown>) => r.id),
+    }));
+
+    for (const row of deadLetters.rows) {
+      const rawPayload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) as Record<string, unknown>;
+      const eventData = (rawPayload['data'] ?? rawPayload) as Record<string, unknown>;
+      const dcResults = extractDataCollection(eventData);
+      const issueField = extractField(dcResults, 'maintenance_issue_description');
+      const callerNameField = extractField(dcResults, 'caller_name');
+      const convId = extractConversationId(eventData);
+      const summary = `Emergency dead-letter retry — ${callerNameField ? String(callerNameField.value) : 'unknown caller'}: ${issueField ? String(issueField.value) : 'unknown issue'} (call ${convId || row.id})`;
+
+      const telegramSent = sendTelegram(CHAT_ALBIE, `DEAD LETTER RETRY:\n${summary}\nvoice_events id: ${row.id}\nManual intervention required.`);
+      const maxSent = sendAgentMessage('maintenance-coordinator', JSON.stringify({
+        type: 'emergency_dead_letter_retry',
+        event_id: row.id,
+        summary,
+      }));
+
+      if (telegramSent || maxSent) {
+        await pool.query(
+          `UPDATE voice_events SET lifecycle_status = 'dead_letter_delivered' WHERE id = $1`,
+          [row.id],
+        );
+        logEvent('action', 'dead_letter_recovered', 'critical', {
+          event_id: row.id, channel: telegramSent ? 'telegram' : 'max', agent: 'claudia',
+        });
+        recovered++;
+      }
+    }
+  } catch { /* sweep is best-effort; main processing continues */ }
+  return recovered;
+}
+
 async function processPostCallEvents(): Promise<void> {
   const pool = makePool();
 
   try {
+    // Dead-letter sweep: re-attempt delivery for any emergency_dead_letter rows.
+    // Runs every cron cycle — if channels recover, the emergency gets delivered.
+    // If channels stay down, the console.error log is captured in daemon logs.
+    await sweepDeadLetters(pool);
+
     // Stale-processing reaper: reset rows stuck in 'processing' for >10 min
     // Uses received_at as proxy (no updated_at column); processing takes seconds
     await pool.query(`
@@ -404,7 +459,7 @@ export async function processOneEvent(
   const effectiveRoute = repeatCheck.isRepeat && route === 'routine' ? 'manual_review' as const : route;
   const effectiveReviewReason = intake.manual_review_reason;
 
-  // Write wo_intake event (source_idempotency_key for unique index enforcement)
+  // wo_intake payload (written only after delivery for emergency, immediately for non-emergency)
   const intakePayload = {
     ...intake,
     source_post_call_event_id: eventId,
@@ -414,14 +469,16 @@ export async function processOneEvent(
     classification,
   };
 
-  await pool.query(
+  const writeWoIntake = async () => pool.query(
     `INSERT INTO voice_events (event_type, source_event_id, payload)
      VALUES ('wo_intake', $1, $2)`,
     [effectiveSourceId, JSON.stringify(intakePayload)],
   );
 
-  // F1 FIX: SEND-THEN-MARK for emergency — do NOT mark processed until
-  // at least one emergency notification channel confirms delivery
+  // ── EMERGENCY PATH ──────────────────────────────────────────────────────
+  // wo_intake is written ONLY after at least one delivery channel confirms,
+  // or on dead-letter (for the manual-review record). This prevents the
+  // source dedup from blocking retries of failed emergency deliveries.
   if (effectiveRoute === 'emergency') {
     const alertMsg = `EMERGENCY INTAKE from voice call:\n${tenantName} at ${unitAddress}\nIssue: ${issueDescription}\nSafety: ${safetyFlags.detail}\nCall ID: ${conversationId}\nAction needed immediately.`;
     const telegramSent = sendTelegram(CHAT_ALBIE, alertMsg);
@@ -434,6 +491,8 @@ export async function processOneEvent(
       const newAttempts = emergencyAttempts + 1;
 
       if (newAttempts >= MAX_EMERGENCY_RETRIES) {
+        // Terminal: write the intake record for manual review, then dead-letter
+        await writeWoIntake();
         await pool.query(
           `UPDATE voice_events SET lifecycle_status = 'emergency_dead_letter' WHERE id = $1`,
           [eventId],
@@ -450,6 +509,7 @@ export async function processOneEvent(
         return;
       }
 
+      // Retryable: do NOT write wo_intake — next run re-processes from scratch
       await pool.query(
         `UPDATE voice_events
          SET lifecycle_status = 'emergency_send_failed',
@@ -466,7 +526,8 @@ export async function processOneEvent(
       return;
     }
 
-    // At least one channel confirmed — mark processed
+    // At least one channel confirmed — write intake record, then mark processed
+    await writeWoIntake();
     await pool.query(
       `UPDATE voice_events SET lifecycle_status = 'processed' WHERE id = $1`,
       [eventId],
@@ -490,7 +551,9 @@ export async function processOneEvent(
     return;
   }
 
-  // Non-emergency: mark processed, then send (best-effort delivery acceptable)
+  // ── NON-EMERGENCY PATH ──────────────────────────────────────────────────
+  // Write intake immediately (delivery is best-effort, not guaranteed)
+  await writeWoIntake();
   await pool.query(
     `UPDATE voice_events SET lifecycle_status = 'processed' WHERE id = $1`,
     [eventId],
