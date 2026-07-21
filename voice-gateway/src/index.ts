@@ -10,7 +10,8 @@
  *   POST /voice/conversation-insights    — Telnyx post-call AI summary (Ed25519)
  *   POST /webhook/telnyx/transcript      — Telnyx real-time transcript (Ed25519)
  *   POST /webhook/telnyx/sms             — Telnyx SMS delivery events (Ed25519)
- *   POST /voice/tools/lookup_record      — stub 501 (deferred to joint design)
+ *   POST /voice/tools/lookup_record      — ElevenLabs mid-call tool (caller lookup, WO status, etc.)
+ *   POST /voice/tools/open_work_order   — ElevenLabs mid-call tool (non-emergency WO intake)
  *   POST /voice/outbound                 — stub 501 (approval gate required first)
  *
  * Deferred (joint design session with Albie): contact-resolution, comms_log
@@ -597,6 +598,161 @@ async function handleReportEmergency(
   }));
 }
 
+const VALID_SEVERITIES = new Set(['normal', 'urgent']);
+
+// /voice/tools/open_work_order — Alex opens a non-emergency maintenance request mid-call.
+// Resolves caller → looks up AppFolio numeric IDs → writes wo_intake event for async pickup.
+// Returns immediately with a hedged confirmation (no WO is created synchronously).
+async function handleOpenWorkOrder(
+  req: http.IncomingMessage,
+  rawBody: Buffer,
+  res: http.ServerResponse,
+): Promise<void> {
+  const toolSecret = process.env.ELEVENLABS_TOOL_SECRET;
+  if (!toolSecret || !checkBearerToken(req.headers['authorization'] as string | undefined, toolSecret)) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+    return;
+  }
+
+  let body: Record<string, unknown> = {};
+  try { body = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>; }
+  catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
+    return;
+  }
+
+  const callerNumber = (body['caller_number'] as string | undefined) ?? '';
+  const issueDescription = (body['issue_description'] as string | undefined) ?? '';
+  const locationDetail = (body['location_detail'] as string | undefined) ?? '';
+  const severity = (body['severity'] as string | undefined) ?? 'normal';
+  const permissionToEnter = body['permission_to_enter'] as boolean | undefined;
+  const callId = (body['call_id'] as string | undefined) ?? null;
+
+  if (!issueDescription) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ result: "I need a description of the issue before I can submit a request. Could you tell me what's going on?" }));
+    return;
+  }
+
+  if (severity && !VALID_SEVERITIES.has(severity)) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ result: "I need to know if this is a normal or urgent maintenance request. Which would you say it is?" }));
+    return;
+  }
+
+  // Resolve caller from cache
+  let resolved: Record<string, unknown> | null = null;
+  let resolverFailed = false;
+  if (callerNumber) {
+    const cacheHit = await pool.query(
+      `SELECT resolved FROM caller_sessions WHERE phone_e164 = $1 AND expires_at > now() LIMIT 1`,
+      [callerNumber],
+    ).catch(() => { resolverFailed = true; return null; });
+
+    if (cacheHit?.rows[0]) {
+      resolved = cacheHit.rows[0].resolved as Record<string, unknown>;
+      resolverFailed = false;
+    } else if (!resolverFailed) {
+      const resolveRow = await pool.query(
+        `SELECT voice_resolve_caller($1) AS r`,
+        [callerNumber],
+      ).catch(() => { resolverFailed = true; return null; });
+      resolved = resolveRow?.rows[0]?.r as Record<string, unknown> | null;
+    }
+  }
+
+  if (resolverFailed || !resolved?.['matched']) {
+    // Can't identify the caller — still capture the intake for manual follow-up
+    const unidentifiedPayload = {
+      caller_number: callerNumber,
+      issue_description: issueDescription,
+      location_detail: locationDetail,
+      severity,
+      permission_to_enter: permissionToEnter ?? null,
+      call_id: callId,
+      identified: false,
+    };
+    try {
+      await captureEvent('wo_intake', callId, unidentifiedPayload);
+    } catch (e: unknown) {
+      console.error(`[voice-gateway] wo_intake insert error (unidentified): ${String(e)}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ result: "I'm having trouble submitting that right now. Let me take down your information and have someone call you back to get this set up." }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ result: "I've noted your maintenance request. Since I wasn't able to pull up your account, our team will follow up with you to confirm the details and get a work order set up." }));
+    return;
+  }
+
+  const unitId = resolved['unit_id'] as string | null;
+  const propertyId = resolved['property_id'] as string | null;
+  const displayName = (resolved['display_name'] as string | null) ?? '';
+  const unitLabel = resolved['unit_label'] as string | null;
+  const propertyLabel = (resolved['property_label'] as string | null) ?? (resolved['property_name'] as string | null);
+
+  // Look up AppFolio numeric IDs for the async WO-creation step
+  let appfolioUnitId: number | null = null;
+  let appfolioPropertyId: number | null = null;
+  let appfolioOccupancyId: number | null = null;
+
+  if (unitId) {
+    const idRow = await pool.query(
+      `SELECT u.appfolio_unit_id, u.appfolio_property_id, o.appfolio_occupancy_id
+       FROM units u
+       LEFT JOIN occupancies o ON o.unit_id = u.id AND o.status = 'current'
+       WHERE u.id = $1
+       LIMIT 1`,
+      [unitId],
+    ).catch((e: unknown) => {
+      console.warn(`[voice-gateway] AppFolio ID lookup failed: ${String(e)}`);
+      return null;
+    });
+    if (idRow?.rows[0]) {
+      appfolioUnitId = idRow.rows[0].appfolio_unit_id ?? null;
+      appfolioPropertyId = idRow.rows[0].appfolio_property_id ?? null;
+      appfolioOccupancyId = idRow.rows[0].appfolio_occupancy_id ?? null;
+    }
+  }
+
+  const intakePayload = {
+    caller_number: callerNumber,
+    issue_description: issueDescription,
+    location_detail: locationDetail,
+    severity,
+    permission_to_enter: permissionToEnter ?? null,
+    call_id: callId,
+    identified: true,
+    tenant_name: displayName,
+    unit_id: unitId,
+    unit_label: unitLabel,
+    property_id: propertyId,
+    property_label: propertyLabel,
+    appfolio_unit_id: appfolioUnitId,
+    appfolio_property_id: appfolioPropertyId,
+    appfolio_occupancy_id: appfolioOccupancyId,
+  };
+
+  try {
+    await captureEvent('wo_intake', callId, intakePayload);
+  } catch (e: unknown) {
+    console.error(`[voice-gateway] wo_intake insert error: ${String(e)}`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ result: "I'm having trouble submitting that right now. Let me take down your information and have someone call you back to get this set up." }));
+    return;
+  }
+
+  const locationStr = [unitLabel, propertyLabel].filter(Boolean).join(', ');
+  console.log(`[voice-gateway] wo_intake logged | tenant="${displayName}" unit="${locationStr}" severity=${severity} call_id=${callId ?? 'none'}`);
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    result: `I've submitted your maintenance request for ${issueDescription.toLowerCase().substring(0, 80)}. Our maintenance team will review it and follow up with you. If the issue becomes urgent, please don't hesitate to call us back.`,
+  }));
+}
+
 type BodyParser = (rawBody: Buffer) => { payload: unknown; sourceEventId: string | null };
 
 function makeTelnyxHandler(eventType: string, parseBody: BodyParser) {
@@ -740,6 +896,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url === '/voice/tools/report_emergency') {
       await handleReportEmergency(req, rawBody, res);
+      return;
+    }
+
+    if (url === '/voice/tools/open_work_order') {
+      await handleOpenWorkOrder(req, rawBody, res);
       return;
     }
 
