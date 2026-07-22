@@ -1002,9 +1002,15 @@ async function createWorkOrder(
   const formFields: Record<string, string> = {
     'authenticity_token': csrfToken,
     'maintenance_service_request[property_id]': propertyIdToken,
-    'maintenance_service_request[unit_id]': params.unitId ?? '',
-    'maintenance_service_request[occupancy_id]': params.occupancyId ?? '',
     'maintenance_service_request[description]': params.description,
+  };
+  if (params.unitId) {
+    formFields['maintenance_service_request[unit_id]'] = params.unitId;
+  }
+  if (params.occupancyId) {
+    formFields['maintenance_service_request[occupancy_id]'] = params.occupancyId;
+  }
+  Object.assign(formFields, {
     'maintenance_service_request[maintenance_work_order][maintenance_work_order_category][work_order_category]': params.category ?? '',
     'maintenance_service_request[maintenance_work_order][issue_descriptor_id]': params.issueDescriptorId ?? '',
     'maintenance_service_request[priority]': params.priority ?? 'Normal',
@@ -1013,7 +1019,7 @@ async function createWorkOrder(
     'maintenance_service_request[maintenance_work_order][send_vendor_wo_link]': '0',
     'maintenance_service_request[maintenance_work_order][send_vendor_text]': '0',
     'maintenance_service_request[maintenance_work_order][require_vendor_accept_wo]': '0',
-  };
+  });
   if (params.permissionToEnter) {
     formFields['maintenance_service_request[permission_to_enter]'] = params.permissionToEnter;
   }
