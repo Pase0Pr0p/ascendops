@@ -36,6 +36,8 @@ import { readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync
 import { config as dotenvConfig } from 'dotenv';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { buildCreateWoFormFields, computeCreateWoApprovalHash, computePropertyIdToken } from './lib/create-wo-fields';
+import type { CreateWoParams } from './lib/create-wo-fields';
 import {
   normalizeVendorName, vendorNameTokens, verifyVendorNameMatch,
   computeEmailApprovalHash, computeMessageApprovalHash,
@@ -868,18 +870,7 @@ async function updateVendorInstructions(
 
 // ─── create-work-order ──────────────────────────────────────────────────────
 
-interface CreateWorkOrderParams {
-  propertyId: string;
-  unitId?: string;
-  occupancyId?: string;
-  description: string;
-  category?: string;
-  issueDescriptorId?: string;
-  priority?: 'Urgent' | 'Normal' | 'Low';
-  permissionToEnter?: 'true' | 'false' | 'not_applicable';
-  specialInstructions?: string;
-  requestType?: 'internal' | 'tenant_requested' | 'unit_turn';
-}
+type CreateWorkOrderParams = CreateWoParams;
 
 const CREATE_WO_NONCE_DIR = resolve(process.cwd(), '.create-wo-nonces');
 
@@ -895,30 +886,6 @@ function reserveNonce(hash: string): 'reserved' | 'already_used' | 'error' {
     if (code === 'EEXIST') return 'already_used';
     return 'error';
   }
-}
-
-function computeCreateWoApprovalHash(params: CreateWorkOrderParams): string {
-  const propertyIdToken = params.occupancyId
-    ? `t_${params.occupancyId}`
-    : `p_${params.propertyId}`;
-  const payload = JSON.stringify({
-    propertyId: params.propertyId,
-    propertyIdToken,
-    unitId: params.unitId ?? '',
-    occupancyId: params.occupancyId ?? '',
-    description: params.description,
-    category: params.category ?? '',
-    issueDescriptorId: params.issueDescriptorId ?? '',
-    priority: params.priority ?? 'Normal',
-    permissionToEnter: params.permissionToEnter ?? '',
-    specialInstructions: params.specialInstructions ?? '',
-    requestType: params.requestType ?? 'internal',
-    party: '',
-    sendVendorWoLink: '0',
-    sendVendorText: '0',
-    requireVendorAcceptWo: '0',
-  });
-  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
 async function createWorkOrder(
@@ -993,33 +960,9 @@ async function createWorkOrder(
     return { error: 'no_csrf_token', message: 'Could not extract CSRF token from page meta tag' };
   }
 
-  // Build POST body with real Rails field names
-  // property_id is polymorphic: t_{occupancyId} for tenant-path, p_{propertyId} for property-path
-  const propertyIdToken = params.occupancyId
-    ? `t_${params.occupancyId}`
-    : `p_${params.propertyId}`;
+  const propertyIdToken = computePropertyIdToken(params);
   const postUrl = `${APPFOLIO_URL}/maintenance/service_requests`;
-  const formFields: Record<string, string> = {
-    'authenticity_token': csrfToken,
-    'maintenance_service_request[property_id]': propertyIdToken,
-    'maintenance_service_request[unit_id]': params.unitId ?? '',
-    'maintenance_service_request[occupancy_id]': params.occupancyId ?? '',
-    'maintenance_service_request[description]': params.description,
-    'maintenance_service_request[maintenance_work_order][maintenance_work_order_category][work_order_category]': params.category ?? '',
-    'maintenance_service_request[maintenance_work_order][issue_descriptor_id]': params.issueDescriptorId ?? '',
-    'maintenance_service_request[priority]': params.priority ?? 'Normal',
-    'maintenance_service_request[request_type]': params.requestType ?? 'internal',
-    'maintenance_service_request[maintenance_work_order][party]': '',
-    'maintenance_service_request[maintenance_work_order][send_vendor_wo_link]': '0',
-    'maintenance_service_request[maintenance_work_order][send_vendor_text]': '0',
-    'maintenance_service_request[maintenance_work_order][require_vendor_accept_wo]': '0',
-  };
-  if (params.permissionToEnter) {
-    formFields['maintenance_service_request[permission_to_enter]'] = params.permissionToEnter;
-  }
-  if (params.specialInstructions) {
-    formFields['maintenance_service_request[special_instructions]'] = params.specialInstructions;
-  }
+  const formFields = buildCreateWoFormFields(params, csrfToken);
 
   const postBody = Object.entries(formFields)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
