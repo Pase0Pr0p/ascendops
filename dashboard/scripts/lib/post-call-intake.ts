@@ -12,10 +12,13 @@ import { createHash } from 'crypto';
 export const CONFIDENCE_THRESHOLD = 0.7;
 
 export const EMERGENCY_KEYWORDS = [
-  'flood', 'flooding', 'gas leak', 'gas smell', 'no heat', 'no hot water',
-  'fire', 'smoke', 'sparking', 'electrical fire', 'carbon monoxide', 'co detector',
+  'flood', 'flooding', 'water everywhere',
+  'gas leak', 'gas smell', 'smell gas', 'smell of gas', 'smells like gas',
+  'no heat', 'no hot water',
+  'fire', 'smoke', 'sparking', 'electrical fire',
+  'carbon monoxide', 'co detector', 'co alarm',
   'sewage', 'raw sewage', 'burst pipe', 'water pouring', 'ceiling collapse',
-  'locked out', 'lockout', 'break-in', 'broken window',
+  'locked out', 'lockout', 'break-in', 'broken window', 'broke in',
 ];
 
 export const BLOCKED_SCOPES = new Set(['amanda', 'paused']);
