@@ -394,15 +394,15 @@ async function handleLookupRecord(
     }
 
     const aging = await pool.query(
-      `SELECT open_total, has_open_charges, gate_open, as_of FROM voice_balance_aging($1::uuid, 14)`,
+      `SELECT voice_balance_aging($1::uuid, 14) AS result`,
       [occupancyId],
     ).catch(() => null);
 
-    if (!aging?.rows[0]) {
+    if (!aging?.rows[0]?.result) {
       return sendResult("I wasn't able to retrieve your balance right now. Let me connect you with our accounting team.");
     }
 
-    const { open_total, has_open_charges, gate_open, as_of } = aging.rows[0] as {
+    const { open_total, has_open_charges, gate_open, as_of } = aging.rows[0].result as {
       open_total: number; has_open_charges: boolean; gate_open: boolean; as_of: string;
     };
 
@@ -510,8 +510,7 @@ async function handleLookupRecord(
         reason, callback: callbackNumber, ts: new Date().toISOString(),
       })],
     ).catch(() => {});
-    const cbPart = callbackNumber ? ` Is ${callbackNumber} the best number to reach you?` : '';
-    return sendResult(`I'm connecting you with our team now.${cbPart} Someone will be in touch with you shortly.`);
+    return sendResult("I'm connecting you with our team now. Someone will be in touch with you shortly.");
   }
 
   return sendResult("How can I help you today?");
