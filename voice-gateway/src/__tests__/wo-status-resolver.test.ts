@@ -189,6 +189,16 @@ describe('balance JSONB extraction and disclosure gates', () => {
     expect(res.result).not.toMatch(/\$[\d,]+/);
   });
 
+  it('malformed JSONB result {} → fails closed to accounting, no disclosure', async () => {
+    mockQuery.mockImplementation(balanceMock({}));
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'balance' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('accounting team');
+    expect(res.result).not.toMatch(/\$[\d,]+/);
+    expect(res.result).not.toContain('no outstanding balance');
+  });
+
   it('gate_open=false → routes to accounting, does NOT disclose amount', async () => {
     mockQuery.mockImplementation(balanceMock({
       ...BALANCE_RESULT,

@@ -398,11 +398,20 @@ async function handleLookupRecord(
       [occupancyId],
     ).catch(() => null);
 
-    if (!aging?.rows[0]?.result) {
+    const agingResult = aging?.rows[0]?.result as
+      { open_total?: unknown; has_open_charges?: unknown; gate_open?: unknown; as_of?: unknown } | null | undefined;
+
+    if (
+      !agingResult
+      || typeof agingResult.has_open_charges !== 'boolean'
+      || typeof agingResult.gate_open !== 'boolean'
+      || typeof agingResult.open_total !== 'number'
+      || !isFinite(agingResult.open_total)
+    ) {
       return sendResult("I wasn't able to retrieve your balance right now. Let me connect you with our accounting team.");
     }
 
-    const { open_total, has_open_charges, gate_open, as_of } = aging.rows[0].result as {
+    const { open_total, has_open_charges, gate_open, as_of } = agingResult as {
       open_total: number; has_open_charges: boolean; gate_open: boolean; as_of: string;
     };
 
