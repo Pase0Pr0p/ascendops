@@ -128,10 +128,10 @@ describe('checkAppFolioIds', () => {
     expect(r.reason).toBeNull();
   });
 
-  it('missing unit_id → not ready', () => {
+  it('missing unit_id → still ready (property-only WO)', () => {
     const r = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_unit_id: null });
-    expect(r.ready).toBe(false);
-    expect(r.reason).toContain('unit_id');
+    expect(r.ready).toBe(true);
+    expect(r.reason).toBeNull();
   });
 
   it('missing property_id → not ready', () => {
@@ -140,13 +140,23 @@ describe('checkAppFolioIds', () => {
     expect(r.reason).toContain('property_id');
   });
 
-  it('missing occupancy_id → not ready', () => {
+  it('missing occupancy_id → still ready (no-tenant WO)', () => {
     const r = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_occupancy_id: null });
-    expect(r.ready).toBe(false);
-    expect(r.reason).toContain('occupancy_id');
+    expect(r.ready).toBe(true);
+    expect(r.reason).toBeNull();
   });
 
-  it('all three missing → lists all', () => {
+  it('property_id only → ready (common-area WO)', () => {
+    const r = checkAppFolioIds({
+      ...MATCHED_RESOLVED,
+      appfolio_unit_id: null,
+      appfolio_occupancy_id: null,
+    });
+    expect(r.ready).toBe(true);
+    expect(r.reason).toBeNull();
+  });
+
+  it('all three missing → only property_id required', () => {
     const r = checkAppFolioIds({
       ...MATCHED_RESOLVED,
       appfolio_unit_id: null,
@@ -154,9 +164,7 @@ describe('checkAppFolioIds', () => {
       appfolio_occupancy_id: null,
     });
     expect(r.ready).toBe(false);
-    expect(r.reason).toContain('unit_id');
     expect(r.reason).toContain('property_id');
-    expect(r.reason).toContain('occupancy_id');
   });
 
   it('unresolved caller → not ready', () => {
@@ -648,9 +656,9 @@ describe('fail-closed integration scenarios', () => {
     expect(route).toBe('manual_review');
   });
 
-  it('matched + active + high confidence + missing AppFolio IDs → manual_review (Cody blocker-1)', () => {
+  it('matched + active + high confidence + missing AppFolio property_id → manual_review (Cody blocker-1)', () => {
     const guards = applyGuards(MATCHED_RESOLVED, null);
-    const afIds = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_unit_id: null });
+    const afIds = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_property_id: null });
     const { route, manualReviewReason } = computeRouteDecision({
       safetyFlags: { is_emergency: false },
       guardsPassed: guards.pass,

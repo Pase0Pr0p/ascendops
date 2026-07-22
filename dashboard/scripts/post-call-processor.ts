@@ -123,26 +123,46 @@ async function lookupAppFolioIds(
   pool: pg.Pool,
   resolved: ResolvedCaller,
 ): Promise<ResolvedCaller> {
-  if (!resolved.matched || !resolved.occupancy_id) return resolved;
+  if (!resolved.matched) return resolved;
+
+  if (resolved.occupancy_id) {
+    try {
+      const row = await pool.query(
+        `SELECT u.appfolio_unit_id, p.appfolio_property_id, o.appfolio_occupancy_id
+         FROM occupancies o
+         JOIN units u ON u.id = o.unit_id
+         JOIN properties p ON p.id = u.property_id
+         WHERE o.id = $1
+         LIMIT 1`,
+        [resolved.occupancy_id],
+      );
+      if (row.rows[0]) {
+        return {
+          ...resolved,
+          appfolio_unit_id: row.rows[0].appfolio_unit_id ?? null,
+          appfolio_property_id: row.rows[0].appfolio_property_id ?? null,
+          appfolio_occupancy_id: row.rows[0].appfolio_occupancy_id ?? null,
+        };
+      }
+    } catch { /* IDs stay null — checkAppFolioIds will flag */ }
+    return resolved;
+  }
+
+  // No occupancy — property-only lookup (common-area / vacant-unit WOs)
+  const propName = resolved.property_name ?? resolved.property_label;
+  if (!propName || resolved.appfolio_property_id) return resolved;
   try {
     const row = await pool.query(
-      `SELECT u.appfolio_unit_id, p.appfolio_property_id, o.appfolio_occupancy_id
-       FROM occupancies o
-       JOIN units u ON u.id = o.unit_id
-       JOIN properties p ON p.id = u.property_id
-       WHERE o.id = $1
+      `SELECT p.appfolio_property_id
+       FROM properties p
+       WHERE p.name = $1
        LIMIT 1`,
-      [resolved.occupancy_id],
+      [propName],
     );
-    if (row.rows[0]) {
-      return {
-        ...resolved,
-        appfolio_unit_id: row.rows[0].appfolio_unit_id ?? null,
-        appfolio_property_id: row.rows[0].appfolio_property_id ?? null,
-        appfolio_occupancy_id: row.rows[0].appfolio_occupancy_id ?? null,
-      };
+    if (row.rows[0]?.appfolio_property_id) {
+      return { ...resolved, appfolio_property_id: row.rows[0].appfolio_property_id };
     }
-  } catch { /* IDs stay null — checkAppFolioIds will flag */ }
+  } catch { /* property ID stays null — checkAppFolioIds will flag */ }
   return resolved;
 }
 

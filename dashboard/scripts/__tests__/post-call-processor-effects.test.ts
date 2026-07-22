@@ -840,3 +840,82 @@ describe('cron-liveness: run summary and state file', () => {
     expect(written.events_processed).toBe(2);
   });
 });
+
+describe('no-occupancy / property-only lookup', () => {
+  const NO_OCC_CALLER = {
+    ...RESOLVED_CALLER,
+    resolved_type: 'contact',
+    has_active_occupancy: true,
+    occupancy_id: undefined as string | undefined,
+    appfolio_unit_id: null as number | null,
+    appfolio_occupancy_id: null as number | null,
+    property_name: 'Test Property',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.TELEGRAM_CHAT_ID = '123';
+    mockExecFileSync.mockReturnValue(Buffer.from('ok'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.TELEGRAM_BOT_TOKEN;
+  });
+
+  it('does property-name lookup when no occupancy_id and no resolver propertyId', async () => {
+    const noIdsCaller = { ...NO_OCC_CALLER, appfolio_property_id: null as number | null };
+    const { pool, queries } = createMockPool((text) => {
+      if (text.includes('voice_resolve_caller')) return { rows: [{ r: noIdsCaller }] };
+      if (text.includes('FROM properties p') && text.includes('p.name')) {
+        return { rows: [{ appfolio_property_id: 2001 }] };
+      }
+      return null;
+    });
+
+    await processOneEvent(pool, 'evt-no-occ', makePayload());
+
+    expect(findQuery(queries, 'FROM properties p')).toBeTruthy();
+    expect(findQuery(queries, 'occupancies')).toBeFalsy();
+    const insertQ = findQuery(queries, 'INSERT INTO voice_events');
+    expect(insertQ).toBeTruthy();
+    const insertedPayload = JSON.parse(insertQ!.params![1] as string);
+    expect(insertedPayload.appfolio_property_id).toBe(2001);
+    expect(insertedPayload.appfolio_occupancy_id).toBeNull();
+    expect(insertedPayload.appfolio_ready).toBe(true);
+  });
+
+  it('property-only caller with resolver-provided propertyId → routine intake, no extra lookup', async () => {
+    const callerWithPropId = { ...NO_OCC_CALLER, appfolio_property_id: 2001 };
+    const { pool, queries } = createMockPool((text) => {
+      if (text.includes('voice_resolve_caller')) return { rows: [{ r: callerWithPropId }] };
+      return null;
+    });
+
+    await processOneEvent(pool, 'evt-prop-only', makePayload());
+
+    expect(findQuery(queries, 'FROM properties p')).toBeFalsy();
+    expect(findQuery(queries, 'occupancies')).toBeFalsy();
+    const insertQ = findQuery(queries, 'INSERT INTO voice_events');
+    expect(insertQ).toBeTruthy();
+    const insertedPayload = JSON.parse(insertQ!.params![1] as string);
+    expect(insertedPayload.appfolio_property_id).toBe(2001);
+    expect(insertedPayload.appfolio_ready).toBe(true);
+  });
+
+  it('property-only caller without property_name or propertyId → manual_review', async () => {
+    const noPropName = { ...NO_OCC_CALLER, property_name: undefined, property_label: undefined, appfolio_property_id: null };
+    const { pool, queries } = createMockPool((text) => {
+      if (text.includes('voice_resolve_caller')) return { rows: [{ r: noPropName }] };
+      return null;
+    });
+
+    await processOneEvent(pool, 'evt-no-prop', makePayload());
+
+    const insertQ = findQuery(queries, 'INSERT INTO voice_events');
+    expect(insertQ).toBeTruthy();
+    const insertedPayload = JSON.parse(insertQ!.params![1] as string);
+    expect(insertedPayload.appfolio_ready).toBe(false);
+  });
+});

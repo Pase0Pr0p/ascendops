@@ -288,12 +288,12 @@ async function pollAndStage() {
     const dryRunArgs = [
       'scripts/appfolio-browser-read.ts', 'create-work-order',
       '--property-id', appfolioPropertyId,
-      '--unit-id', appfolioUnitId,
-      '--occupancy-id', appfolioOccupancyId,
+      ...(appfolioUnitId ? ['--unit-id', appfolioUnitId] : []),
+      ...(appfolioOccupancyId ? ['--occupancy-id', appfolioOccupancyId] : []),
       '--description', description,
       '--priority', priority,
       '--permission-to-enter', pteFlag,
-      '--request-type', 'tenant_requested',
+      '--request-type', appfolioOccupancyId ? 'tenant_requested' : 'internal',
     ];
 
     let dryRunResult: Record<string, unknown> = {};
@@ -471,12 +471,12 @@ async function executeApproval(eventId: string) {
   const liveArgs = [
     'scripts/appfolio-browser-read.ts', 'create-work-order',
     '--property-id', entry.appfolio_property_id,
-    '--unit-id', entry.appfolio_unit_id,
-    '--occupancy-id', entry.appfolio_occupancy_id,
+    ...(entry.appfolio_unit_id ? ['--unit-id', entry.appfolio_unit_id] : []),
+    ...(entry.appfolio_occupancy_id ? ['--occupancy-id', entry.appfolio_occupancy_id] : []),
     '--description', description,
     '--priority', priority,
     '--permission-to-enter', pteFlag,
-    '--request-type', 'tenant_requested',
+    '--request-type', entry.appfolio_occupancy_id ? 'tenant_requested' : 'internal',
     '--execute',
     '--approval-hash', entry.approval_hash,
   ];

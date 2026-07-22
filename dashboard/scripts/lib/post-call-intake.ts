@@ -208,15 +208,9 @@ export function checkAppFolioIds(
   resolved: ResolvedCaller | null,
 ): { ready: boolean; reason: string | null } {
   if (!resolved?.matched) return { ready: false, reason: 'unresolved_caller' };
-  const unitId = resolved.appfolio_unit_id;
   const propertyId = resolved.appfolio_property_id;
-  const occupancyId = resolved.appfolio_occupancy_id;
-  if (!unitId || !propertyId || !occupancyId) {
-    const missing: string[] = [];
-    if (!unitId) missing.push('unit_id');
-    if (!propertyId) missing.push('property_id');
-    if (!occupancyId) missing.push('occupancy_id');
-    return { ready: false, reason: `missing_appfolio_ids: ${missing.join(', ')}` };
+  if (!propertyId) {
+    return { ready: false, reason: 'missing_appfolio_ids: property_id' };
   }
   return { ready: true, reason: null };
 }
