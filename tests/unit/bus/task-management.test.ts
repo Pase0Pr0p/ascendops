@@ -255,5 +255,45 @@ describe('Advanced Task Management', () => {
       const ids = humanTasks.map(t => t.id).sort();
       expect(ids).toEqual(['task_020_020', 'task_021_021']);
     });
+
+    it('finds project=human-tasks tasks even when assigned to an agent', () => {
+      createBackdatedTask(paths, {
+        id: 'task_030_030',
+        title: '[HUMAN] Wells Fargo statement',
+        status: 'pending',
+        assigned_to: 'chief',
+        project: 'human-tasks',
+        created_at: hoursAgo(48),
+        updated_at: hoursAgo(48),
+      });
+      createBackdatedTask(paths, {
+        id: 'task_031_031',
+        title: 'Regular chief task',
+        status: 'pending',
+        assigned_to: 'chief',
+        created_at: hoursAgo(48),
+        updated_at: hoursAgo(48),
+      });
+
+      const humanTasks = checkHumanTasks(paths);
+      expect(humanTasks.some(t => t.id === 'task_030_030')).toBe(true);
+      expect(humanTasks.some(t => t.id === 'task_031_031')).toBe(false);
+    });
+
+    it('excludes archived project=human-tasks tasks', () => {
+      createBackdatedTask(paths, {
+        id: 'task_032_032',
+        title: '[HUMAN] Archived task',
+        status: 'pending',
+        assigned_to: 'chief',
+        project: 'human-tasks',
+        archived: true,
+        created_at: hoursAgo(48),
+        updated_at: hoursAgo(48),
+      });
+
+      const humanTasks = checkHumanTasks(paths);
+      expect(humanTasks.some(t => t.id === 'task_032_032')).toBe(false);
+    });
   });
 });
