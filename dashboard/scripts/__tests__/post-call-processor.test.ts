@@ -128,8 +128,8 @@ describe('checkAppFolioIds', () => {
     expect(r.reason).toBeNull();
   });
 
-  it('missing unit_id → still ready (property-only WO)', () => {
-    const r = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_unit_id: null });
+  it('missing unit_id + occupancy_id → still ready (property-only WO)', () => {
+    const r = checkAppFolioIds({ ...MATCHED_RESOLVED, appfolio_unit_id: null, appfolio_occupancy_id: null });
     expect(r.ready).toBe(true);
     expect(r.reason).toBeNull();
   });
@@ -165,6 +165,16 @@ describe('checkAppFolioIds', () => {
     });
     expect(r.ready).toBe(false);
     expect(r.reason).toContain('property_id');
+  });
+
+  it('occupancy_id without unit_id → not ready (invalid shape)', () => {
+    const r = checkAppFolioIds({
+      ...MATCHED_RESOLVED,
+      appfolio_unit_id: null,
+      appfolio_occupancy_id: 3001,
+    });
+    expect(r.ready).toBe(false);
+    expect(r.reason).toContain('occupancy_id present without unit_id');
   });
 
   it('unresolved caller → not ready', () => {

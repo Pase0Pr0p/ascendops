@@ -212,6 +212,9 @@ export function checkAppFolioIds(
   if (!propertyId) {
     return { ready: false, reason: 'missing_appfolio_ids: property_id' };
   }
+  if (resolved.appfolio_occupancy_id && !resolved.appfolio_unit_id) {
+    return { ready: false, reason: 'invalid_ids: occupancy_id present without unit_id' };
+  }
   return { ready: true, reason: null };
 }
 

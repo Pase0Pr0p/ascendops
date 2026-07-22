@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { config as dotenvConfig } from 'dotenv';
 import { resolve } from 'node:path';
 import pg from 'pg';
+import { buildPickupArgs, buildPickupLiveArgs, mapPteFlag, mapPickupPriority, buildPickupDescription } from './lib/pickup-args';
 
 dotenvConfig({ path: resolve(process.cwd(), '../orgs/paseo-pm/secrets.env'), override: false });
 dotenvConfig({ path: resolve(process.cwd(), '.env.local'), override: false });
@@ -281,20 +282,16 @@ async function pollAndStage() {
     const appfolioOccupancyId = String(p['appfolio_occupancy_id'] ?? '');
 
     // Dry-run createWorkOrder to get the approval hash
-    const pteFlag = String(permissionToEnter).toLowerCase() === 'true' ? 'true' : String(permissionToEnter).toLowerCase() === 'false' ? 'false' : 'not_applicable';
-    const priority = severity === 'urgent' ? 'Urgent' : 'Normal';
-    const description = `Voice intake from ${tenantName}: ${issueDescription}${locationDetail ? ' (' + locationDetail + ')' : ''}`;
-
-    const dryRunArgs = [
-      'scripts/appfolio-browser-read.ts', 'create-work-order',
-      '--property-id', appfolioPropertyId,
-      ...(appfolioUnitId ? ['--unit-id', appfolioUnitId] : []),
-      ...(appfolioOccupancyId ? ['--occupancy-id', appfolioOccupancyId] : []),
-      '--description', description,
-      '--priority', priority,
-      '--permission-to-enter', pteFlag,
-      '--request-type', appfolioOccupancyId ? 'tenant_requested' : 'internal',
-    ];
+    const dryRunArgs = buildPickupArgs({
+      appfolioPropertyId,
+      appfolioUnitId,
+      appfolioOccupancyId,
+      tenantName,
+      issueDescription,
+      locationDetail,
+      severity,
+      permissionToEnter,
+    });
 
     let dryRunResult: Record<string, unknown> = {};
     try {
@@ -464,22 +461,16 @@ async function executeApproval(eventId: string) {
   writeState(state);
 
   // Execute live create with the stored approval hash
-  const pteFlag = String(entry.permission_to_enter).toLowerCase() === 'true' ? 'true' : String(entry.permission_to_enter).toLowerCase() === 'false' ? 'false' : 'not_applicable';
-  const priority = entry.severity === 'urgent' ? 'Urgent' : 'Normal';
-  const description = `Voice intake from ${entry.tenant_name}: ${entry.issue_description}${entry.location_detail ? ' (' + entry.location_detail + ')' : ''}`;
-
-  const liveArgs = [
-    'scripts/appfolio-browser-read.ts', 'create-work-order',
-    '--property-id', entry.appfolio_property_id,
-    ...(entry.appfolio_unit_id ? ['--unit-id', entry.appfolio_unit_id] : []),
-    ...(entry.appfolio_occupancy_id ? ['--occupancy-id', entry.appfolio_occupancy_id] : []),
-    '--description', description,
-    '--priority', priority,
-    '--permission-to-enter', pteFlag,
-    '--request-type', entry.appfolio_occupancy_id ? 'tenant_requested' : 'internal',
-    '--execute',
-    '--approval-hash', entry.approval_hash,
-  ];
+  const liveArgs = buildPickupLiveArgs({
+    appfolioPropertyId: entry.appfolio_property_id,
+    appfolioUnitId: entry.appfolio_unit_id,
+    appfolioOccupancyId: entry.appfolio_occupancy_id,
+    tenantName: entry.tenant_name,
+    issueDescription: entry.issue_description,
+    locationDetail: entry.location_detail,
+    severity: entry.severity,
+    permissionToEnter: entry.permission_to_enter,
+  }, entry.approval_hash);
 
   let createResult: Record<string, unknown> = {};
   try {
