@@ -253,6 +253,26 @@ describe('Task Management', () => {
       const pending = listTasks(paths, { status: 'pending' });
       expect(pending.length).toBe(1);
     });
+
+    it('filters by project', () => {
+      createTask(paths, 'paul', 'acme', 'Human task', { project: 'human-tasks' });
+      createTask(paths, 'paul', 'acme', 'Regular task');
+      createTask(paths, 'paul', 'acme', 'Another human', { project: 'human-tasks' });
+
+      const humanTasks = listTasks(paths, { project: 'human-tasks' });
+      expect(humanTasks.length).toBe(2);
+      expect(humanTasks.every(t => t.project === 'human-tasks')).toBe(true);
+    });
+
+    it('combines project with status filter', () => {
+      const id1 = createTask(paths, 'paul', 'acme', 'Done human', { project: 'human-tasks' });
+      createTask(paths, 'paul', 'acme', 'Pending human', { project: 'human-tasks' });
+      updateTask(paths, id1, 'completed');
+
+      const pendingHuman = listTasks(paths, { project: 'human-tasks', status: 'pending' });
+      expect(pendingHuman.length).toBe(1);
+      expect(pendingHuman[0].title).toBe('Pending human');
+    });
   });
 });
 
