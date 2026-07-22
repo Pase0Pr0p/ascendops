@@ -1,147 +1,105 @@
 import { describe, it, expect } from 'vitest';
-import { createHash } from 'crypto';
+import {
+  buildCreateWoFormFields,
+  computeCreateWoApprovalHash,
+  computePropertyIdToken,
+} from '../lib/create-wo-fields';
 
-function computeCreateWoApprovalHash(params: {
-  propertyId: string;
-  unitId?: string;
-  occupancyId?: string;
-  description: string;
-  category?: string;
-  issueDescriptorId?: string;
-  priority?: string;
-  permissionToEnter?: string;
-  specialInstructions?: string;
-  requestType?: string;
-}): string {
-  const propertyIdToken = params.occupancyId
-    ? `t_${params.occupancyId}`
-    : `p_${params.propertyId}`;
-  const payload = JSON.stringify({
-    propertyId: params.propertyId,
-    propertyIdToken,
-    unitId: params.unitId ?? '',
-    occupancyId: params.occupancyId ?? '',
-    description: params.description,
-    category: params.category ?? '',
-    issueDescriptorId: params.issueDescriptorId ?? '',
-    priority: params.priority ?? 'Normal',
-    permissionToEnter: params.permissionToEnter ?? '',
-    specialInstructions: params.specialInstructions ?? '',
-    requestType: params.requestType ?? 'internal',
-    party: '',
-    sendVendorWoLink: '0',
-    sendVendorText: '0',
-    requireVendorAcceptWo: '0',
-  });
-  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
-}
-
-function buildFormFields(params: {
-  propertyId: string;
-  unitId?: string;
-  occupancyId?: string;
-  description: string;
-  category?: string;
-  priority?: string;
-  requestType?: string;
-  permissionToEnter?: string;
-}): Record<string, string> {
-  const propertyIdToken = params.occupancyId
-    ? `t_${params.occupancyId}`
-    : `p_${params.propertyId}`;
-
-  const formFields: Record<string, string> = {
-    'maintenance_service_request[property_id]': propertyIdToken,
-    'maintenance_service_request[description]': params.description,
-  };
-  if (params.unitId) {
-    formFields['maintenance_service_request[unit_id]'] = params.unitId;
-  }
-  if (params.occupancyId) {
-    formFields['maintenance_service_request[occupancy_id]'] = params.occupancyId;
-  }
-  Object.assign(formFields, {
-    'maintenance_service_request[maintenance_work_order][maintenance_work_order_category][work_order_category]': params.category ?? '',
-    'maintenance_service_request[priority]': params.priority ?? 'Normal',
-    'maintenance_service_request[request_type]': params.requestType ?? 'internal',
-    'maintenance_service_request[maintenance_work_order][party]': '',
-    'maintenance_service_request[maintenance_work_order][send_vendor_wo_link]': '0',
-    'maintenance_service_request[maintenance_work_order][send_vendor_text]': '0',
-    'maintenance_service_request[maintenance_work_order][require_vendor_accept_wo]': '0',
-  });
-  if (params.permissionToEnter) {
-    formFields['maintenance_service_request[permission_to_enter]'] = params.permissionToEnter;
-  }
-  return formFields;
-}
-
-describe('no-tenant WO form fields', () => {
+describe('production form fields: no-tenant WO', () => {
   it('tenant-path includes unit_id and occupancy_id', () => {
-    const fields = buildFormFields({
+    const fields = buildCreateWoFormFields({
       propertyId: '86',
       unitId: '202',
       occupancyId: '2625',
       description: 'Kitchen faucet leaking',
       requestType: 'tenant_requested',
-    });
+    }, 'csrf_test');
     expect(fields['maintenance_service_request[property_id]']).toBe('t_2625');
     expect(fields['maintenance_service_request[unit_id]']).toBe('202');
     expect(fields['maintenance_service_request[occupancy_id]']).toBe('2625');
   });
 
   it('property-path omits occupancy_id field entirely', () => {
-    const fields = buildFormFields({
+    const fields = buildCreateWoFormFields({
       propertyId: '24',
       unitId: '51',
       description: 'Basement knob-and-tube electrical',
       requestType: 'internal',
-    });
+    }, 'csrf_test');
     expect(fields['maintenance_service_request[property_id]']).toBe('p_24');
     expect(fields['maintenance_service_request[unit_id]']).toBe('51');
     expect(fields).not.toHaveProperty('maintenance_service_request[occupancy_id]');
   });
 
   it('common-area (no unit, no occupancy) omits both fields', () => {
-    const fields = buildFormFields({
+    const fields = buildCreateWoFormFields({
       propertyId: '24',
       description: 'Common area exterior light broken',
       requestType: 'internal',
-    });
+    }, 'csrf_test');
     expect(fields['maintenance_service_request[property_id]']).toBe('p_24');
     expect(fields).not.toHaveProperty('maintenance_service_request[unit_id]');
     expect(fields).not.toHaveProperty('maintenance_service_request[occupancy_id]');
   });
 
-  it('property-path uses p_ prefix token', () => {
-    const fields = buildFormFields({
+  it('empty-string unitId is treated as absent (omitted)', () => {
+    const fields = buildCreateWoFormFields({
       propertyId: '24',
+      unitId: '',
+      occupancyId: '',
       description: 'Test',
-    });
-    expect(fields['maintenance_service_request[property_id]']).toBe('p_24');
+    }, 'csrf_test');
+    expect(fields).not.toHaveProperty('maintenance_service_request[unit_id]');
+    expect(fields).not.toHaveProperty('maintenance_service_request[occupancy_id]');
   });
 
-  it('tenant-path uses t_ prefix token', () => {
-    const fields = buildFormFields({
-      propertyId: '86',
-      occupancyId: '2625',
+  it('includes authenticity_token from csrfToken argument', () => {
+    const fields = buildCreateWoFormFields({
+      propertyId: '24',
       description: 'Test',
-    });
-    expect(fields['maintenance_service_request[property_id]']).toBe('t_2625');
+    }, 'my_csrf_token');
+    expect(fields['authenticity_token']).toBe('my_csrf_token');
+  });
+
+  it('includes permissionToEnter when provided', () => {
+    const fields = buildCreateWoFormFields({
+      propertyId: '24',
+      description: 'Test',
+      permissionToEnter: 'true',
+    }, 'csrf_test');
+    expect(fields['maintenance_service_request[permission_to_enter]']).toBe('true');
+  });
+
+  it('omits permissionToEnter when not provided', () => {
+    const fields = buildCreateWoFormFields({
+      propertyId: '24',
+      description: 'Test',
+    }, 'csrf_test');
+    expect(fields).not.toHaveProperty('maintenance_service_request[permission_to_enter]');
+  });
+
+  it('includes specialInstructions when provided', () => {
+    const fields = buildCreateWoFormFields({
+      propertyId: '24',
+      description: 'Test',
+      specialInstructions: 'Ring doorbell',
+    }, 'csrf_test');
+    expect(fields['maintenance_service_request[special_instructions]']).toBe('Ring doorbell');
   });
 
   it('request_type defaults to internal', () => {
-    const fields = buildFormFields({
+    const fields = buildCreateWoFormFields({
       propertyId: '24',
       description: 'Test',
-    });
+    }, 'csrf_test');
     expect(fields['maintenance_service_request[request_type]']).toBe('internal');
   });
 
   it('vendor party/wo-link/text flags stay off (inert-pin)', () => {
-    const fields = buildFormFields({
+    const fields = buildCreateWoFormFields({
       propertyId: '24',
       description: 'Test',
-    });
+    }, 'csrf_test');
     expect(fields['maintenance_service_request[maintenance_work_order][party]']).toBe('');
     expect(fields['maintenance_service_request[maintenance_work_order][send_vendor_wo_link]']).toBe('0');
     expect(fields['maintenance_service_request[maintenance_work_order][send_vendor_text]']).toBe('0');
@@ -149,7 +107,17 @@ describe('no-tenant WO form fields', () => {
   });
 });
 
-describe('approval hash for no-tenant WOs', () => {
+describe('production computePropertyIdToken', () => {
+  it('uses p_ prefix for property-path', () => {
+    expect(computePropertyIdToken({ propertyId: '24' })).toBe('p_24');
+  });
+
+  it('uses t_ prefix for tenant-path', () => {
+    expect(computePropertyIdToken({ propertyId: '86', occupancyId: '2625' })).toBe('t_2625');
+  });
+});
+
+describe('production computeCreateWoApprovalHash', () => {
   it('no-tenant hash uses p_ prefix', () => {
     const h = computeCreateWoApprovalHash({
       propertyId: '24',
@@ -160,7 +128,7 @@ describe('approval hash for no-tenant WOs', () => {
   });
 
   it('same no-tenant params produce stable hash', () => {
-    const params = { propertyId: '24', description: 'Test', requestType: 'internal' };
+    const params = { propertyId: '24', description: 'Test', requestType: 'internal' as const };
     expect(computeCreateWoApprovalHash(params)).toBe(computeCreateWoApprovalHash(params));
   });
 
@@ -189,5 +157,21 @@ describe('approval hash for no-tenant WOs', () => {
       description: 'Basement electrical',
     });
     expect(withUnit).not.toBe(noUnit);
+  });
+
+  it('different description changes hash', () => {
+    const base = { propertyId: '24', description: 'A' };
+    const alt = { propertyId: '24', description: 'B' };
+    expect(computeCreateWoApprovalHash(base)).not.toBe(computeCreateWoApprovalHash(alt));
+  });
+
+  it('different requestType changes hash', () => {
+    const internal = computeCreateWoApprovalHash({
+      propertyId: '24', description: 'Test', requestType: 'internal',
+    });
+    const tenant = computeCreateWoApprovalHash({
+      propertyId: '24', description: 'Test', requestType: 'tenant_requested',
+    });
+    expect(internal).not.toBe(tenant);
   });
 });
