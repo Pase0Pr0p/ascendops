@@ -91,6 +91,35 @@ describe('occupancy KPIs', () => {
     expect(occupancy.month_to_month).toBe(expected);
   });
 
+  it('vacant leases are NOT counted as occupied', async () => {
+    const { occupancy } = await computePmKpis(connector);
+    const vacantCount = FIXTURE_LEASES.filter(l => l.status === 'vacant').length;
+    expect(vacantCount).toBeGreaterThan(0);
+    expect(occupancy.vacant).toBeGreaterThanOrEqual(vacantCount);
+    const occupiedStatuses = new Set(['active', 'month_to_month', 'notice_given']);
+    expect(occupancy.occupied).toBe(
+      FIXTURE_LEASES.filter(l => occupiedStatuses.has(l.status)).length
+    );
+  });
+
+  it('notice_given leases count as occupied (AppFolio on-notice = occupied)', async () => {
+    const { occupancy } = await computePmKpis(connector);
+    const notice = FIXTURE_LEASES.filter(l => l.status === 'notice_given').length;
+    expect(notice).toBeGreaterThan(0);
+    const active = FIXTURE_LEASES.filter(l => l.status === 'active').length;
+    const mtm = FIXTURE_LEASES.filter(l => l.status === 'month_to_month').length;
+    expect(occupancy.occupied).toBe(active + mtm + notice);
+  });
+
+  it('occupancy rate excludes vacant units', async () => {
+    const { occupancy } = await computePmKpis(connector);
+    const active = FIXTURE_LEASES.filter(l => l.status === 'active').length;
+    const mtm = FIXTURE_LEASES.filter(l => l.status === 'month_to_month').length;
+    const notice = FIXTURE_LEASES.filter(l => l.status === 'notice_given').length;
+    const expectedRate = Math.round(((active + mtm + notice) / FIXTURE_LEASES.length) * 100);
+    expect(occupancy.occupancy_rate_pct).toBe(expectedRate);
+  });
+
   it('counts leases expiring within 60 days of asOf', async () => {
     // lease-002 ends 2026-06-30; asOf 2026-06-28 → 2 days → within 60 days
     const { occupancy } = await computePmKpis(connector, { asOf: '2026-06-28' });

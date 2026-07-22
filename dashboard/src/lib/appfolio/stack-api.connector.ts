@@ -239,13 +239,15 @@ export function mapPriority(p: string | undefined): WorkOrder['priority'] {
 
 /**
  * Rent roll status strings from live API → our LeaseStatus enum.
- * Confirmed values: "Current", "Vacating", "Notice", "Past", "Future", "Vacant"
+ * Live values (2026-07-22 probe): "Current", "Evict", "Notice-Unrented",
+ * "Vacant-Rented", "Vacant-Unrented". Prefix match handles separator variants.
  */
 export function mapLeaseStatus(afStatus: string | undefined): LeaseStatus {
   const s = (afStatus ?? '').toLowerCase().trim();
   if (s === 'current') return 'active';
-  if (s === 'vacating') return 'month_to_month';
-  if (s === 'notice') return 'notice_given';
+  if (s.startsWith('vacant')) return 'vacant';
+  if (s.startsWith('notice') || s === 'vacating') return 'notice_given';
+  if (s.startsWith('evict')) return 'active';
   if (s === 'past' || s === 'expired') return 'expired';
   if (s === 'future' || s === 'pending') return 'pending';
   return 'active';

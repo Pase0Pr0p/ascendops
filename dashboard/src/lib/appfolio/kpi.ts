@@ -138,6 +138,7 @@ function aggregateOccupancy(leases: Lease[], asOf: string): OccupancyKpi {
       case 'active': active++; break;
       case 'notice_given': noticeGiven++; break;
       case 'month_to_month': monthToMonth++; break;
+      case 'vacant':
       case 'expired':
       case 'pending': vacant++; break;
     }
@@ -147,7 +148,7 @@ function aggregateOccupancy(leases: Lease[], asOf: string): OccupancyKpi {
   }
 
   const total = leases.length;
-  const occupied = active + monthToMonth;
+  const occupied = active + monthToMonth + noticeGiven;
   return {
     total_units: total,
     occupied,

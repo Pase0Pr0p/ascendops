@@ -116,6 +116,15 @@ export const FIXTURE_LEASES: Lease[] = [
     securityDeposit: 195000,
     moveInDate: '2023-03-01',
   },
+  {
+    id: 'lease-004',
+    propertyId: 'prop-mission-101',
+    unit: '2A',
+    status: 'vacant',
+    tenantIds: [],
+    startDate: '',
+    monthlyRent: 0,
+  },
 ];
 
 export const FIXTURE_RENT_ROLL: RentRollEntry[] = [

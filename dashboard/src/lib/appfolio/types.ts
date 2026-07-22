@@ -2,7 +2,7 @@
 // The entire app codes against this interface; implementation (mock or live) is injected by the factory.
 
 export type WorkOrderStatus = 'open' | 'in_progress' | 'completed' | 'cancelled';
-export type LeaseStatus = 'active' | 'expired' | 'month_to_month' | 'notice_given' | 'pending';
+export type LeaseStatus = 'active' | 'expired' | 'month_to_month' | 'notice_given' | 'pending' | 'vacant';
 export type BillStatus = 'draft' | 'pending_approval' | 'approved' | 'paid' | 'voided';
 
 export interface WorkOrder {

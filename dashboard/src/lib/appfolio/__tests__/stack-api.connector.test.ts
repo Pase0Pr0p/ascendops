@@ -132,7 +132,9 @@ describe('mapPriority', () => {
 });
 
 // ---------------------------------------------------------------------------
-// mapLeaseStatus — live API values confirmed: "Current", "Vacating", "Notice", "Past", "Future"
+// mapLeaseStatus — live API values (2026-07-22 probe):
+//   Current (462), Evict (3), Notice-Unrented (6),
+//   Vacant-Rented (1), Vacant-Unrented (25)
 // ---------------------------------------------------------------------------
 
 describe('mapLeaseStatus', () => {
@@ -140,12 +142,32 @@ describe('mapLeaseStatus', () => {
     expect(mapLeaseStatus('Current')).toBe('active');
   });
 
-  it('maps "Vacating" to month_to_month', () => {
-    expect(mapLeaseStatus('Vacating')).toBe('month_to_month');
+  it('maps "Vacant-Unrented" to vacant', () => {
+    expect(mapLeaseStatus('Vacant-Unrented')).toBe('vacant');
   });
 
-  it('maps "Notice" to notice_given', () => {
+  it('maps "Vacant-Rented" to vacant', () => {
+    expect(mapLeaseStatus('Vacant-Rented')).toBe('vacant');
+  });
+
+  it('maps bare "Vacant" to vacant (prefix match)', () => {
+    expect(mapLeaseStatus('Vacant')).toBe('vacant');
+  });
+
+  it('maps "Notice-Unrented" to notice_given', () => {
+    expect(mapLeaseStatus('Notice-Unrented')).toBe('notice_given');
+  });
+
+  it('maps bare "Notice" to notice_given (prefix match)', () => {
     expect(mapLeaseStatus('Notice')).toBe('notice_given');
+  });
+
+  it('maps "Vacating" to notice_given', () => {
+    expect(mapLeaseStatus('Vacating')).toBe('notice_given');
+  });
+
+  it('maps "Evict" to active (tenant still occupying)', () => {
+    expect(mapLeaseStatus('Evict')).toBe('active');
   });
 
   it('maps "Past" to expired', () => {
@@ -166,7 +188,8 @@ describe('mapLeaseStatus', () => {
 
   it('is case-insensitive', () => {
     expect(mapLeaseStatus('current')).toBe('active');
-    expect(mapLeaseStatus('PAST')).toBe('expired');
+    expect(mapLeaseStatus('VACANT-UNRENTED')).toBe('vacant');
+    expect(mapLeaseStatus('notice-unrented')).toBe('notice_given');
   });
 });
 
