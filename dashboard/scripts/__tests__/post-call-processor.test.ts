@@ -208,6 +208,43 @@ describe('detectEmergency', () => {
     const r = detectEmergency(false, 'Someone threw a rock and broken window', []);
     expect(r.is_emergency).toBe(true);
   });
+
+  describe('new keyword phrases (gas-smell variants + audit)', () => {
+    const NEW_PHRASES = [
+      ['smell gas', 'I think I smell gas in my apartment'],
+      ['smell of gas', 'There is a smell of gas coming from the kitchen'],
+      ['smells like gas', 'It smells like gas near the stove'],
+      ['co alarm', 'My co alarm is going off'],
+      ['broke in', 'Someone broke in last night'],
+      ['water everywhere', 'There is water everywhere in the bathroom'],
+    ];
+
+    it.each(NEW_PHRASES)('keyword "%s" in description → emergency', (kw, desc) => {
+      const r = detectEmergency(false, desc, []);
+      expect(r.is_emergency).toBe(true);
+      expect(r.detail).toContain(kw);
+    });
+
+    it.each(NEW_PHRASES)('keyword "%s" in transcript fallback → emergency', (kw, msg) => {
+      const r = detectEmergency(false, 'general issue', [{ role: 'user', message: msg }]);
+      expect(r.is_emergency).toBe(true);
+      expect(r.detail).toContain(kw);
+    });
+  });
+
+  describe('bare power loss → NOT emergency (breaker-reset-first rule)', () => {
+    it('"power out" in description → not emergency', () => {
+      const r = detectEmergency(false, 'The power out in my unit since this morning', []);
+      expect(r.is_emergency).toBe(false);
+    });
+
+    it('"no power" in transcript → not emergency', () => {
+      const r = detectEmergency(false, 'electrical issue', [
+        { role: 'user', message: 'I have no power in the bedroom' },
+      ]);
+      expect(r.is_emergency).toBe(false);
+    });
+  });
 });
 
 describe('classifyIntake', () => {
