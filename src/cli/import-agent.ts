@@ -8,11 +8,20 @@ import { IPCClient } from '../daemon/ipc-server.js';
 import { resolvePaths } from '../utils/paths.js';
 import { atomicWriteSync } from '../utils/atomic.js';
 
+const SUPPORTED_RUNTIMES = ['claude-code', 'hermes', 'codex-app-server'] as const;
+
+function validateRuntime(raw: string | undefined): string {
+  if (!raw) return 'claude-code';
+  if ((SUPPORTED_RUNTIMES as readonly string[]).includes(raw)) return raw;
+  return 'claude-code';
+}
+
 interface ExportManifest {
   version: string;
   agent_name: string;
   exported_at: string;
   model?: string;
+  runtime?: string;
   crons?: unknown[];
   memory_files?: string[];
   task_count?: number;
@@ -118,6 +127,7 @@ export const importAgentCommand = new Command('import-agent')
       working_directory: '',
       timezone: importedConfig?.timezone || 'America/New_York',
       model: importedConfig?.model || manifest?.model || 'claude-sonnet-4-6',
+      runtime: validateRuntime(importedConfig?.runtime || manifest?.runtime),
       crons: importedConfig?.crons || manifest?.crons || [],
       ecosystem: { local_version_control: { enabled: true } },
       day_mode_start: '08:00',
