@@ -43,18 +43,19 @@ const MATCHED_RESOLVED = {
   has_active_occupancy: true, ambiguous: false,
 };
 
-describe('work_order_status resolver-failure matrix', () => {
-  beforeAll(async () => {
-    process.env.PORT = String(TEST_PORT);
-    process.env.ELEVENLABS_TOOL_SECRET = TOOL_SECRET;
-    process.env.VOICE_GATEWAY_DSN = 'postgresql://test:test@localhost:5432/test';
-    await import('../../src/index');
-    await new Promise(r => setTimeout(r, 200));
-  });
+beforeAll(async () => {
+  process.env.PORT = String(TEST_PORT);
+  process.env.ELEVENLABS_TOOL_SECRET = TOOL_SECRET;
+  process.env.VOICE_GATEWAY_DSN = 'postgresql://test:test@localhost:5432/test';
+  await import('../../src/index');
+  await new Promise(r => setTimeout(r, 200));
+});
 
-  afterAll(() => {
-    mockQuery.mockReset();
-  });
+afterAll(() => {
+  mockQuery.mockReset();
+});
+
+describe('work_order_status resolver-failure matrix', () => {
 
   it('cache fail + resolve fail → take-a-message (not generic unmatched)', async () => {
     mockQuery.mockRejectedValue(new Error('DB down'));
@@ -137,5 +138,97 @@ describe('work_order_status resolver-failure matrix', () => {
     expect(res.result).toContain('Broken window');
     expect(res.result).toContain('being reviewed');
     expect(res.result).not.toContain('take a message');
+  });
+});
+
+describe('balance JSONB extraction and disclosure gates', () => {
+  const BALANCE_RESULT = {
+    open_total: 1250.00,
+    has_open_charges: true,
+    gate_open: true,
+    as_of: '2026-07-10T00:00:00.000Z',
+  };
+
+  function balanceMock(agingResult: unknown) {
+    return async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
+      if (sql.includes('voice_balance_aging')) return { rows: [{ result: agingResult }] };
+      return { rows: [] };
+    };
+  }
+
+  it('verified caller with JSONB result → reads aged balance with hedge', async () => {
+    mockQuery.mockImplementation(balanceMock(BALANCE_RESULT));
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'balance' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('$1,250.00');
+    expect(res.result).toMatch(/July \d+/);
+    expect(res.result).toContain('may not yet be reflected');
+  });
+
+  it('null JSONB result → fallback to accounting, no amount disclosed', async () => {
+    mockQuery.mockImplementation(balanceMock(null));
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'balance' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('accounting team');
+    expect(res.result).not.toMatch(/\$[\d,]+/);
+  });
+
+  it('DB error → fallback to accounting, no amount disclosed', async () => {
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
+      if (sql.includes('voice_balance_aging')) throw new Error('DB down');
+      return { rows: [] };
+    });
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'balance' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('accounting team');
+    expect(res.result).not.toMatch(/\$[\d,]+/);
+  });
+
+  it('gate_open=false → routes to accounting, does NOT disclose amount', async () => {
+    mockQuery.mockImplementation(balanceMock({
+      ...BALANCE_RESULT,
+      gate_open: false,
+    }));
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'balance' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('recent charge');
+    expect(res.result).toContain('accounting team');
+    expect(res.result).not.toMatch(/\$[\d,]+/);
+  });
+
+  it('no open charges → reports no outstanding balance', async () => {
+    mockQuery.mockImplementation(balanceMock({
+      ...BALANCE_RESULT,
+      has_open_charges: false,
+      open_total: 0,
+    }));
+
+    const res = await postLookup({ caller_number: '+14155551234', query: 'balance' });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('no outstanding balance');
+    expect(res.result).not.toMatch(/\$[\d,]+\.\d{2}/);
+  });
+
+  it('request_handoff → no callback number in response', async () => {
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('caller_sessions')) return { rows: [{ resolved: MATCHED_RESOLVED }] };
+      if (sql.includes('voice_events')) return { rows: [] };
+      return { rows: [] };
+    });
+
+    const res = await postLookup({
+      caller_number: '+14155551234', query: 'request_handoff',
+      reason: 'billing', callback: '+14155559999',
+    });
+    expect(res.status).toBe(200);
+    expect(res.result).toContain('connecting you');
+    expect(res.result).not.toContain('+1415');
+    expect(res.result).not.toContain('best number');
   });
 });
