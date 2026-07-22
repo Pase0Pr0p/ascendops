@@ -246,6 +246,7 @@ export function mapLeaseStatus(afStatus: string | undefined): LeaseStatus {
   if (s === 'current') return 'active';
   if (s === 'vacating') return 'month_to_month';
   if (s === 'notice') return 'notice_given';
+  if (s === 'vacant') return 'vacant';
   if (s === 'past' || s === 'expired') return 'expired';
   if (s === 'future' || s === 'pending') return 'pending';
   return 'active';

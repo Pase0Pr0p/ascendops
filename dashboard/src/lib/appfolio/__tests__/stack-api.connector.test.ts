@@ -132,7 +132,7 @@ describe('mapPriority', () => {
 });
 
 // ---------------------------------------------------------------------------
-// mapLeaseStatus — live API values confirmed: "Current", "Vacating", "Notice", "Past", "Future"
+// mapLeaseStatus — live API values confirmed: "Current", "Vacating", "Notice", "Past", "Future", "Vacant"
 // ---------------------------------------------------------------------------
 
 describe('mapLeaseStatus', () => {
@@ -158,6 +158,10 @@ describe('mapLeaseStatus', () => {
 
   it('maps "Future" to pending', () => {
     expect(mapLeaseStatus('Future')).toBe('pending');
+  });
+
+  it('maps "Vacant" to vacant', () => {
+    expect(mapLeaseStatus('Vacant')).toBe('vacant');
   });
 
   it('maps undefined to active (safe default)', () => {
