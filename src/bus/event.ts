@@ -30,6 +30,9 @@ export function logEvent(
   severity: EventSeverity,
   metadata?: Record<string, unknown> | string,
 ): void {
+  if (!org) {
+    throw new Error('logEvent: org is required. Without it, events write to the non-org-nested path and become invisible to org-scoped readers (metrics, forge, dashboard).');
+  }
   validateEventCategory(category);
   validateEventSeverity(severity);
 

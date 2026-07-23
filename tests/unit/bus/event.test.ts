@@ -56,6 +56,12 @@ describe('Bus events', () => {
     });
   });
 
+  it('throws when org is empty (events must be org-nested)', () => {
+    expect(() =>
+      logEvent(paths, 'spark', '', 'action', 'test_event', 'info'),
+    ).toThrow('logEvent: org is required');
+  });
+
   describe('heartbeat refresh side-effect', () => {
     it('bumps last_heartbeat on an existing heartbeat.json without overwriting other fields', async () => {
       const oldHeartbeat: Heartbeat = {
