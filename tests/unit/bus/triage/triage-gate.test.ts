@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { triageGate } from '../../../../src/bus/triage/triage-gate';
+import * as barrel from '../../../../src/bus/triage/index';
 
 describe('triage-gate composed production entry', () => {
   describe('schedule content → classifier → permanent deny (end-to-end)', () => {
@@ -90,6 +91,22 @@ describe('triage-gate composed production entry', () => {
       expect(result.decision).toBe('ALLOW');
       expect(result.reclassified).toBe(false);
       expect(result.finalActionType).toBe('INTERNAL_NOTE_REVIEWED');
+    });
+  });
+
+  describe('checkCapability is NOT exported from barrel (bypass prevention)', () => {
+    it('barrel does not export checkCapability — production must use triageGate', () => {
+      expect('checkCapability' in barrel).toBe(false);
+    });
+
+    it('barrel exports triageGate as the production entry point', () => {
+      expect('triageGate' in barrel).toBe(true);
+      expect(typeof barrel.triageGate).toBe('function');
+    });
+
+    it('barrel exports getPermanentDenies and getPhaseAllows for introspection only', () => {
+      expect('getPermanentDenies' in barrel).toBe(true);
+      expect('getPhaseAllows' in barrel).toBe(true);
     });
   });
 });

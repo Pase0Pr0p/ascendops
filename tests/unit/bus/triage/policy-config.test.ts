@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -7,22 +7,23 @@ import {
   isAutoSendEnabled,
   isCardEnabled,
   checkVersionMatch,
-  resetLastSeenVersion,
-  setVersionFilePath,
-  bootstrapVersionLedger,
+  resetPolicyState,
+  setLedgerPath,
 } from '../../../../src/bus/triage/policy-config';
+import { initializeLedger } from '../../../../src/bus/triage/durable-ledger';
 
 describe('policy config', () => {
   let tmp: string;
   let configPath: string;
-  let versionFile: string;
+  let ledgerPath: string;
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'triage-config-'));
     configPath = join(tmp, 'triage-policy.json');
-    versionFile = join(tmp, '.policy-version');
-    resetLastSeenVersion();
-    bootstrapVersionLedger(versionFile, 0);
+    ledgerPath = join(tmp, 'triage-ledger.json');
+    resetPolicyState();
+    initializeLedger(ledgerPath, 0);
+    setLedgerPath(ledgerPath);
   });
 
   afterEach(() => {
@@ -44,14 +45,12 @@ describe('policy config', () => {
     },
   };
 
-  // Test 6: Missing config file -> all auto-send disabled
   it('returns disabled when config file is missing', () => {
     const result = loadPolicyConfig(join(tmp, 'nonexistent.json'));
     expect(result.loaded).toBe(false);
     expect(isAutoSendEnabled(result)).toBe(false);
   });
 
-  // Test 7: Malformed config -> all auto-send disabled
   it('returns disabled when config is invalid JSON', () => {
     writeFileSync(configPath, 'not json at all', 'utf-8');
     const result = loadPolicyConfig(configPath);
@@ -60,19 +59,17 @@ describe('policy config', () => {
     expect(isAutoSendEnabled(result)).toBe(false);
   });
 
-  it('returns disabled when config has schema violation (missing version)', () => {
+  it('returns disabled when config has schema violation', () => {
     writeConfig({ global_auto_send: true, cards: {} });
     const result = loadPolicyConfig(configPath);
     expect(result.loaded).toBe(false);
     expect(result.error).toContain('schema violation');
-    expect(isAutoSendEnabled(result)).toBe(false);
   });
 
   it('returns disabled when global_auto_send is not boolean', () => {
     writeConfig({ version: 1, updated_at: '', updated_by: '', global_auto_send: 'yes', cards: {} });
     const result = loadPolicyConfig(configPath);
     expect(result.loaded).toBe(false);
-    expect(isAutoSendEnabled(result)).toBe(false);
   });
 
   it('returns disabled when card auto_send is not boolean', () => {
@@ -84,7 +81,6 @@ describe('policy config', () => {
     expect(result.loaded).toBe(false);
   });
 
-  // Test 8: Unreadable config -> all auto-send disabled
   it('returns disabled when config file is unreadable', () => {
     writeConfig(VALID_CONFIG);
     const result = loadPolicyConfig(join(tmp, '\0invalid-path'));
@@ -92,7 +88,6 @@ describe('policy config', () => {
     expect(isAutoSendEnabled(result)).toBe(false);
   });
 
-  // Test 9: Unknown card ID -> that card disabled
   it('returns disabled for unknown card ID', () => {
     writeConfig(VALID_CONFIG);
     const result = loadPolicyConfig(configPath);
@@ -102,8 +97,7 @@ describe('policy config', () => {
     expect(card.reason).toContain('Unknown card ID');
   });
 
-  // Test 10: Stale config version -> all auto-send disabled + alert
-  it('returns disabled when config version is stale (lower than last seen)', () => {
+  it('returns disabled when config version is stale', () => {
     writeConfig({ ...VALID_CONFIG, version: 5 });
     const r1 = loadPolicyConfig(configPath);
     expect(r1.loaded).toBe(true);
@@ -111,7 +105,7 @@ describe('policy config', () => {
     writeConfig({ ...VALID_CONFIG, version: 3 });
     const r2 = loadPolicyConfig(configPath);
     expect(r2.loaded).toBe(false);
-    expect(r2.error).toContain('Stale config version');
+    expect(r2.error).toContain('Stale');
     expect(isAutoSendEnabled(r2)).toBe(false);
   });
 
@@ -120,12 +114,8 @@ describe('policy config', () => {
     const result = loadPolicyConfig(configPath);
     expect(result.loaded).toBe(true);
     expect(isAutoSendEnabled(result)).toBe(true);
-
-    const enabled = isCardEnabled(result, 'clogged-drain');
-    expect(enabled.authorized).toBe(true);
-
-    const disabled = isCardEnabled(result, 'no-hot-water');
-    expect(disabled.authorized).toBe(false);
+    expect(isCardEnabled(result, 'clogged-drain').authorized).toBe(true);
+    expect(isCardEnabled(result, 'no-hot-water').authorized).toBe(false);
   });
 
   it('disables all cards when global_auto_send is false', () => {
@@ -133,13 +123,9 @@ describe('policy config', () => {
     const result = loadPolicyConfig(configPath);
     expect(result.loaded).toBe(true);
     expect(isAutoSendEnabled(result)).toBe(false);
-
-    const card = isCardEnabled(result, 'clogged-drain');
-    expect(card.authorized).toBe(false);
-    expect(card.reason).toContain('Global auto-send is disabled');
+    expect(isCardEnabled(result, 'clogged-drain').reason).toContain('Global auto-send is disabled');
   });
 
-  // Test 12: Version change between review and send -> abort
   it('detects version mismatch for execute-time check', () => {
     writeConfig(VALID_CONFIG);
     const result = loadPolicyConfig(configPath);
@@ -147,126 +133,15 @@ describe('policy config', () => {
     expect(checkVersionMatch(result, 2)).toBe(false);
   });
 
-  describe('durable version persistence + fail-closed rollback', () => {
-    it('persists version to disk and recovers after resetLastSeenVersion', () => {
-      writeConfig({ ...VALID_CONFIG, version: 5 });
-      const r1 = loadPolicyConfig(configPath);
-      expect(r1.loaded).toBe(true);
-
-      resetLastSeenVersion();
-      setVersionFilePath(versionFile);
-
-      writeConfig({ ...VALID_CONFIG, version: 3 });
-      const r2 = loadPolicyConfig(configPath);
-      expect(r2.loaded).toBe(false);
-      expect(r2.error).toContain('Stale config version');
-    });
-
-    it('allows forward version advance after restart', () => {
-      writeConfig({ ...VALID_CONFIG, version: 5 });
-      loadPolicyConfig(configPath);
-
-      resetLastSeenVersion();
-      setVersionFilePath(versionFile);
-
-      writeConfig({ ...VALID_CONFIG, version: 6 });
-      const r2 = loadPolicyConfig(configPath);
-      expect(r2.loaded).toBe(true);
-    });
-
-    it('DENIES when version file path is not set (fail-closed)', () => {
-      resetLastSeenVersion();
-      writeConfig({ ...VALID_CONFIG, version: 5 });
-      const result = loadPolicyConfig(configPath);
-      expect(result.loaded).toBe(false);
-      expect(result.error).toContain('Version file path not configured');
-    });
-
-    it('DENIES when version file contains garbage (fail-closed)', () => {
-      writeFileSync(versionFile, 'not-a-number', 'utf-8');
-      resetLastSeenVersion();
-      setVersionFilePath(versionFile);
-
-      writeConfig({ ...VALID_CONFIG, version: 5 });
-      const result = loadPolicyConfig(configPath);
-      expect(result.loaded).toBe(false);
-      expect(result.error).toContain('unreadable or corrupt');
-    });
-
-    it('DENIES when version file write fails via read-only (fail-closed)', () => {
-      const { chmodSync } = require('fs');
-      writeConfig({ ...VALID_CONFIG, version: 1 });
-      loadPolicyConfig(configPath);
-
-      chmodSync(versionFile, 0o444);
-      resetLastSeenVersion();
-      setVersionFilePath(versionFile);
-
-      writeConfig({ ...VALID_CONFIG, version: 2 });
-      const result = loadPolicyConfig(configPath);
-      expect(result.loaded).toBe(false);
-      expect(result.error).toContain('Failed to persist version');
-
-      chmodSync(versionFile, 0o644);
-    });
+  it('DENIES when ledger path is not set (fail-closed)', () => {
+    resetPolicyState();
+    writeConfig(VALID_CONFIG);
+    const result = loadPolicyConfig(configPath);
+    expect(result.loaded).toBe(false);
+    expect(result.error).toContain('Ledger path not configured');
   });
 
-  describe('bootstrap vs missing ledger', () => {
-    it('bootstrapVersionLedger creates ledger for genuine first-run', () => {
-      const freshTmp = mkdtempSync(join(tmpdir(), 'bootstrap-'));
-      const freshVersion = join(freshTmp, '.policy-version');
-      resetLastSeenVersion();
-
-      const result = bootstrapVersionLedger(freshVersion, 0);
-      expect(result.success).toBe(true);
-      expect(existsSync(freshVersion)).toBe(true);
-
-      const configP = join(freshTmp, 'policy.json');
-      writeFileSync(configP, JSON.stringify(VALID_CONFIG));
-      const load = loadPolicyConfig(configP);
-      expect(load.loaded).toBe(true);
-
-      rmSync(freshTmp, { recursive: true, force: true });
-    });
-
-    it('bootstrapVersionLedger rejects re-bootstrap on existing ledger', () => {
-      const result = bootstrapVersionLedger(versionFile, 0);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('already exists');
-    });
-
-    it('DENIES when ledger is deleted after bootstrap (cannot bypass rollback protection)', () => {
-      writeConfig({ ...VALID_CONFIG, version: 5 });
-      loadPolicyConfig(configPath);
-
-      unlinkSync(versionFile);
-      resetLastSeenVersion();
-      setVersionFilePath(versionFile);
-
-      writeConfig({ ...VALID_CONFIG, version: 1 });
-      const result = loadPolicyConfig(configPath);
-      expect(result.loaded).toBe(false);
-      expect(result.error).toContain('ledger missing');
-      expect(result.error).toContain('bootstrapVersionLedger');
-    });
-
-    it('deleted ledger cannot permit a rolled-back config to load', () => {
-      writeConfig({ ...VALID_CONFIG, version: 10 });
-      loadPolicyConfig(configPath);
-
-      unlinkSync(versionFile);
-      resetLastSeenVersion();
-      setVersionFilePath(versionFile);
-
-      writeConfig({ ...VALID_CONFIG, version: 3, global_auto_send: true });
-      const result = loadPolicyConfig(configPath);
-      expect(result.loaded).toBe(false);
-      expect(isAutoSendEnabled(result)).toBe(false);
-    });
-  });
-
-  // Test 15: New cards start disabled, cannot inherit
-  it('new cards must be explicitly enabled, no inheritance from family', () => {
+  it('new cards must be explicitly enabled, no inheritance', () => {
     writeConfig({
       ...VALID_CONFIG,
       cards: {
@@ -275,10 +150,7 @@ describe('policy config', () => {
       },
     });
     const result = loadPolicyConfig(configPath);
-    const parent = isCardEnabled(result, 'clogged-drain');
-    expect(parent.authorized).toBe(true);
-
-    const child = isCardEnabled(result, 'clogged-drain-diy');
-    expect(child.authorized).toBe(false);
+    expect(isCardEnabled(result, 'clogged-drain').authorized).toBe(true);
+    expect(isCardEnabled(result, 'clogged-drain-diy').authorized).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { existsSync, readFileSync } from 'fs';
 import type { PolicyConfig, CardConfig } from './types.js';
+import { loadLedger, advanceVersion } from './durable-ledger.js';
 
 export interface PolicyLoadResult {
   loaded: boolean;
@@ -12,19 +12,6 @@ export interface CardAuthResult {
   authorized: boolean;
   reason: string;
 }
-
-export interface BootstrapResult {
-  success: boolean;
-  error?: string;
-}
-
-const DEFAULT_DISABLED_CONFIG: PolicyConfig = {
-  version: 0,
-  updated_at: '',
-  updated_by: '',
-  global_auto_send: false,
-  cards: {},
-};
 
 function isValidPolicyConfig(obj: unknown): obj is PolicyConfig {
   if (!obj || typeof obj !== 'object') return false;
@@ -42,65 +29,24 @@ function isValidPolicyConfig(obj: unknown): obj is PolicyConfig {
   return true;
 }
 
-let lastSeenVersion = -1;
-let versionFilePath: string | null = null;
-let bootstrapped = false;
+let ledgerPath: string | null = null;
 
-export function setVersionFilePath(path: string): void {
-  versionFilePath = path;
+export function setLedgerPath(path: string): void {
+  ledgerPath = path;
 }
 
-export function resetLastSeenVersion(): void {
-  lastSeenVersion = -1;
-  versionFilePath = null;
-  bootstrapped = false;
-}
-
-export function bootstrapVersionLedger(path: string, initialVersion: number): BootstrapResult {
-  if (existsSync(path)) {
-    return { success: false, error: 'Ledger already exists — cannot re-bootstrap' };
-  }
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, String(initialVersion), 'utf-8');
-  } catch (err) {
-    return { success: false, error: `Failed to create ledger: ${err}` };
-  }
-  versionFilePath = path;
-  lastSeenVersion = initialVersion;
-  bootstrapped = true;
-  return { success: true };
-}
-
-function loadPersistedVersion(): number {
-  if (!versionFilePath) {
-    return -2;
-  }
-  try {
-    if (!existsSync(versionFilePath)) return -3;
-    const raw = readFileSync(versionFilePath, 'utf-8').trim();
-    const v = parseInt(raw, 10);
-    if (isNaN(v)) return -2;
-    return v;
-  } catch {
-    return -2;
-  }
-}
-
-function persistVersion(version: number): boolean {
-  if (!versionFilePath) return false;
-  try {
-    mkdirSync(dirname(versionFilePath), { recursive: true });
-    writeFileSync(versionFilePath, String(version), 'utf-8');
-    return true;
-  } catch {
-    return false;
-  }
+export function resetPolicyState(): void {
+  ledgerPath = null;
 }
 
 export function loadPolicyConfig(configPath: string): PolicyLoadResult {
-  if (!versionFilePath) {
-    return { loaded: false, config: null, error: 'Version file path not configured — fail-closed' };
+  if (!ledgerPath) {
+    return { loaded: false, config: null, error: 'Ledger path not configured — fail-closed' };
+  }
+
+  const ledgerResult = loadLedger(ledgerPath);
+  if (!ledgerResult.loaded || !ledgerResult.state) {
+    return { loaded: false, config: null, error: `Ledger error: ${ledgerResult.error}` };
   }
 
   if (!existsSync(configPath)) {
@@ -125,25 +71,15 @@ export function loadPolicyConfig(configPath: string): PolicyLoadResult {
     return { loaded: false, config: null, error: 'Config file malformed: schema violation' };
   }
 
-  if (lastSeenVersion < 0) {
-    const persisted = loadPersistedVersion();
-    if (persisted === -2) {
-      return { loaded: false, config: null, error: 'Version file unreadable or corrupt — fail-closed' };
-    }
-    if (persisted === -3) {
-      return { loaded: false, config: null, error: 'Version ledger missing — use bootstrapVersionLedger() for first-run; a deleted ledger cannot bypass rollback protection' };
-    }
-    lastSeenVersion = persisted;
+  if (parsed.version < ledgerResult.state.version) {
+    return { loaded: false, config: null, error: `Stale config version: ${parsed.version} < ledger version ${ledgerResult.state.version}` };
   }
 
-  if (lastSeenVersion >= 0 && parsed.version < lastSeenVersion) {
-    return { loaded: false, config: null, error: `Stale config version: ${parsed.version} < last seen ${lastSeenVersion}` };
+  const advResult = advanceVersion(ledgerPath, parsed.version);
+  if (!advResult.loaded) {
+    return { loaded: false, config: null, error: `Failed to advance version: ${advResult.error}` };
   }
 
-  lastSeenVersion = parsed.version;
-  if (!persistVersion(parsed.version)) {
-    return { loaded: false, config: null, error: 'Failed to persist version — fail-closed' };
-  }
   return { loaded: true, config: parsed };
 }
 

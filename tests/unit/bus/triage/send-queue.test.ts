@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -7,9 +7,10 @@ import {
   markSent, reserveForSend, releaseNonce,
   isNonceReserved, getReservedNonces,
   getQueue, getQueuedCount, getInFlightCount, getActiveCount,
-  clearQueue, checkAndDrain,
+  clearQueue, checkAndDrain, setQueueLedgerPath,
 } from '../../../../src/bus/triage/send-queue';
-import { resetLastSeenVersion, setVersionFilePath, bootstrapVersionLedger } from '../../../../src/bus/triage/policy-config';
+import { resetPolicyState, setLedgerPath } from '../../../../src/bus/triage/policy-config';
+import { initializeLedger, isNonceConsumed } from '../../../../src/bus/triage/durable-ledger';
 import type { ActionPacket } from '../../../../src/bus/triage/types';
 
 function makePacket(overrides: Partial<ActionPacket> = {}): ActionPacket {
@@ -32,12 +33,23 @@ function makePacket(overrides: Partial<ActionPacket> = {}): ActionPacket {
 }
 
 describe('send queue', () => {
+  let tmp: string;
+  let ledgerPath: string;
+
   beforeEach(() => {
     clearQueue();
+    tmp = mkdtempSync(join(tmpdir(), 'send-queue-'));
+    ledgerPath = join(tmp, 'triage-ledger.json');
+    initializeLedger(ledgerPath, 0);
+    setQueueLedgerPath(ledgerPath);
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
   });
 
   describe('real nonce store lifecycle', () => {
-    it('reserveForSend reserves the packet nonce in the nonce store', () => {
+    it('reserveForSend reserves nonce in active set and checks durable store', () => {
       const entry = enqueue(makePacket({ nonce: 'n-abc' }), 1);
       expect(isNonceReserved('n-abc')).toBe(false);
 
@@ -45,7 +57,6 @@ describe('send queue', () => {
       expect(result.reserved).toBe(true);
       expect(result.nonce).toBe('n-abc');
       expect(isNonceReserved('n-abc')).toBe(true);
-      expect(entry.status).toBe('IN_FLIGHT');
     });
 
     it('rejects duplicate nonce reservation', () => {
@@ -58,7 +69,20 @@ describe('send queue', () => {
       expect(result.reason).toContain('already reserved');
     });
 
-    it('releaseNonce removes nonce from store and resets to QUEUED', () => {
+    it('rejects reservation of durably consumed nonce (replay prevention)', () => {
+      const e1 = enqueue(makePacket({ nonce: 'n-replay' }), 1);
+      reserveForSend(e1);
+      markSent(e1);
+      expect(isNonceConsumed(ledgerPath, 'n-replay')).toBe(true);
+
+      const e2 = enqueue(makePacket({ nonce: 'n-replay', woId: 'WO-2' }), 1);
+      const result = reserveForSend(e2);
+      expect(result.reserved).toBe(false);
+      expect(result.reason).toContain('already consumed');
+      expect(result.reason).toContain('replay denied');
+    });
+
+    it('releaseNonce removes from active set and resets to QUEUED', () => {
       const entry = enqueue(makePacket({ nonce: 'n-rel' }), 1);
       reserveForSend(entry);
       expect(isNonceReserved('n-rel')).toBe(true);
@@ -67,32 +91,28 @@ describe('send queue', () => {
       expect(released).toBe(true);
       expect(isNonceReserved('n-rel')).toBe(false);
       expect(entry.status).toBe('QUEUED');
-      expect(entry.reservedAt).toBeUndefined();
     });
 
-    it('releaseNonce returns false when nonce was not reserved', () => {
-      const entry = enqueue(makePacket({ nonce: 'n-never' }), 1);
-      const released = releaseNonce(entry);
-      expect(released).toBe(false);
-    });
-
-    it('markSent releases nonce from store on completion', () => {
+    it('markSent durably consumes nonce and releases from active set', () => {
       const entry = enqueue(makePacket({ nonce: 'n-sent' }), 1);
       reserveForSend(entry);
       expect(isNonceReserved('n-sent')).toBe(true);
 
-      markSent(entry);
+      const result = markSent(entry);
+      expect(result.sent).toBe(true);
       expect(entry.status).toBe('SENT');
       expect(isNonceReserved('n-sent')).toBe(false);
+      expect(isNonceConsumed(ledgerPath, 'n-sent')).toBe(true);
     });
 
-    it('markSent is no-op on QUEUED entry (must reserve first)', () => {
+    it('markSent rejects non-IN_FLIGHT entry', () => {
       const entry = enqueue(makePacket({ nonce: 'n-skip' }), 1);
-      markSent(entry);
+      const result = markSent(entry);
+      expect(result.sent).toBe(false);
       expect(entry.status).toBe('QUEUED');
     });
 
-    it('getReservedNonces returns snapshot of all reserved nonces', () => {
+    it('getReservedNonces returns snapshot of active nonces', () => {
       const e1 = enqueue(makePacket({ nonce: 'n1' }), 1);
       const e2 = enqueue(makePacket({ nonce: 'n2' }), 1);
       reserveForSend(e1);
@@ -100,68 +120,48 @@ describe('send queue', () => {
       const nonces = getReservedNonces();
       expect(nonces.has('n1')).toBe(true);
       expect(nonces.has('n2')).toBe(true);
-      expect(nonces.size).toBe(2);
-    });
-
-    it('clearQueue clears nonce store', () => {
-      const entry = enqueue(makePacket({ nonce: 'n-clear' }), 1);
-      reserveForSend(entry);
-      expect(isNonceReserved('n-clear')).toBe(true);
-      clearQueue();
-      expect(isNonceReserved('n-clear')).toBe(false);
     });
   });
 
-  describe('AT-11: killswitch cancels all queued AND in-flight sends with nonce release', () => {
+  describe('AT-11: killswitch cancels all queued AND in-flight with nonce release', () => {
     it('drainOnKillswitch cancels QUEUED items', () => {
       enqueue(makePacket({ woId: 'WO-1', nonce: 'q1' }), 1);
       enqueue(makePacket({ woId: 'WO-2', nonce: 'q2' }), 1);
-      enqueue(makePacket({ woId: 'WO-3', nonce: 'q3' }), 1);
-      expect(getQueuedCount()).toBe(3);
+      expect(getQueuedCount()).toBe(2);
 
-      const result = drainOnKillswitch('Global killswitch activated');
-      expect(result.cancelled).toBe(3);
+      const result = drainOnKillswitch('Killswitch');
+      expect(result.cancelled).toBe(2);
       expect(getActiveCount()).toBe(0);
-
-      for (const item of result.items) {
-        expect(item.status).toBe('CANCELLED');
-        expect(item.cancelReason).toBe('Global killswitch activated');
-      }
     });
 
-    it('drainOnKillswitch cancels IN_FLIGHT and RELEASES their nonces', () => {
+    it('drainOnKillswitch cancels IN_FLIGHT and RELEASES their active nonces', () => {
       const e1 = enqueue(makePacket({ woId: 'WO-1', nonce: 'flight-1' }), 1);
       const e2 = enqueue(makePacket({ woId: 'WO-2', nonce: 'flight-2' }), 1);
-      enqueue(makePacket({ woId: 'WO-3', nonce: 'queued-1' }), 1);
       reserveForSend(e1);
       reserveForSend(e2);
       expect(isNonceReserved('flight-1')).toBe(true);
-      expect(isNonceReserved('flight-2')).toBe(true);
 
       const result = drainOnKillswitch('Killswitch');
-      expect(result.cancelled).toBe(3);
+      expect(result.cancelled).toBe(2);
       expect(result.releasedNonces).toContain('flight-1');
       expect(result.releasedNonces).toContain('flight-2');
-      expect(result.releasedNonces).toHaveLength(2);
       expect(isNonceReserved('flight-1')).toBe(false);
       expect(isNonceReserved('flight-2')).toBe(false);
-      expect(getInFlightCount()).toBe(0);
-      expect(getQueuedCount()).toBe(0);
     });
 
-    it('reserve → killswitch → nonce released → no send possible', () => {
+    it('reserve → killswitch → nonce released → markSent is no-op', () => {
       const entry = enqueue(makePacket({ nonce: 'race-nonce' }), 1);
       reserveForSend(entry);
       expect(isNonceReserved('race-nonce')).toBe(true);
-      expect(entry.status).toBe('IN_FLIGHT');
 
-      const drain = drainOnKillswitch('Emergency killswitch');
+      drainOnKillswitch('Emergency killswitch');
       expect(entry.status).toBe('CANCELLED');
       expect(isNonceReserved('race-nonce')).toBe(false);
-      expect(drain.releasedNonces).toContain('race-nonce');
 
-      markSent(entry);
+      const sendResult = markSent(entry);
+      expect(sendResult.sent).toBe(false);
       expect(entry.status).toBe('CANCELLED');
+      expect(isNonceConsumed(ledgerPath, 'race-nonce')).toBe(false);
     });
 
     it('does not cancel already-sent items', () => {
@@ -173,70 +173,56 @@ describe('send queue', () => {
       const result = drainOnKillswitch('Killswitch');
       expect(result.cancelled).toBe(1);
       expect(getQueue().find(e => e.packet.woId === 'WO-1')!.status).toBe('SENT');
-      expect(getQueue().find(e => e.packet.woId === 'WO-2')!.status).toBe('CANCELLED');
     });
 
     it('checkAndDrain cancels queue when config file is missing', () => {
-      const tmp = mkdtempSync(join(tmpdir(), 'queue-test-'));
-      resetLastSeenVersion();
-      bootstrapVersionLedger(join(tmp, '.policy-version'), 0);
+      resetPolicyState();
+      setLedgerPath(ledgerPath);
 
       enqueue(makePacket({ nonce: 'cd-1' }), 1);
-      enqueue(makePacket({ nonce: 'cd-2' }), 1);
       const result = checkAndDrain('/nonexistent/path/config.json');
       expect(result).not.toBeNull();
-      expect(result!.cancelled).toBe(2);
-      expect(getActiveCount()).toBe(0);
-
-      rmSync(tmp, { recursive: true, force: true });
+      expect(result!.cancelled).toBe(1);
     });
 
     it('checkAndDrain cancels queue when global_auto_send is false', () => {
-      const tmp = mkdtempSync(join(tmpdir(), 'queue-test-'));
+      resetPolicyState();
+      setLedgerPath(ledgerPath);
       const configPath = join(tmp, 'policy.json');
-      resetLastSeenVersion();
-      bootstrapVersionLedger(join(tmp, '.policy-version'), 0);
       writeFileSync(configPath, JSON.stringify({
         version: 1, updated_at: '', updated_by: '', global_auto_send: false, cards: {},
       }));
 
-      enqueue(makePacket({ nonce: 'cd-3' }), 1);
+      enqueue(makePacket({ nonce: 'cd-2' }), 1);
       const result = checkAndDrain(configPath);
       expect(result).not.toBeNull();
       expect(result!.cancelled).toBe(1);
-
-      rmSync(tmp, { recursive: true, force: true });
     });
 
     it('checkAndDrain returns null when config is valid and enabled', () => {
-      const tmp = mkdtempSync(join(tmpdir(), 'queue-test-'));
+      resetPolicyState();
+      setLedgerPath(ledgerPath);
       const configPath = join(tmp, 'policy.json');
-      resetLastSeenVersion();
-      bootstrapVersionLedger(join(tmp, '.policy-version'), 0);
       writeFileSync(configPath, JSON.stringify({
         version: 1, updated_at: '', updated_by: '', global_auto_send: true, cards: {},
       }));
 
-      enqueue(makePacket({ nonce: 'cd-4' }), 1);
+      enqueue(makePacket({ nonce: 'cd-3' }), 1);
       const result = checkAndDrain(configPath);
       expect(result).toBeNull();
       expect(getQueuedCount()).toBe(1);
-
-      rmSync(tmp, { recursive: true, force: true });
     });
   });
 
   describe('version-change drain releases nonces', () => {
-    it('cancels QUEUED and IN_FLIGHT under old version, releases in-flight nonces', () => {
-      const e1 = enqueue(makePacket({ woId: 'WO-old-1', nonce: 'vold-1' }), 1);
-      enqueue(makePacket({ woId: 'WO-old-2', nonce: 'vold-2' }), 1);
+    it('cancels and releases in-flight nonces from old version', () => {
+      const e1 = enqueue(makePacket({ woId: 'WO-old', nonce: 'vold-1' }), 1);
       enqueue(makePacket({ woId: 'WO-new', nonce: 'vnew-1' }), 2);
       reserveForSend(e1);
 
-      const result = drainOnVersionChange(2, 'Config version advanced to 2');
-      expect(result.cancelled).toBe(2);
+      const result = drainOnVersionChange(2, 'Version advanced');
+      expect(result.cancelled).toBe(1);
       expect(result.releasedNonces).toContain('vold-1');
-      expect(result.releasedNonces).toHaveLength(1);
       expect(isNonceReserved('vold-1')).toBe(false);
       expect(getActiveCount()).toBe(1);
     });

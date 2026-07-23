@@ -1,5 +1,6 @@
 import type { ActionPacket } from './types.js';
 import { loadPolicyConfig, isAutoSendEnabled } from './policy-config.js';
+import { consumeNonce as durableConsumeNonce, isNonceConsumed as durableIsConsumed } from './durable-ledger.js';
 
 export type QueuedSendStatus = 'QUEUED' | 'IN_FLIGHT' | 'CANCELLED' | 'SENT';
 
@@ -27,8 +28,18 @@ export interface ReserveResult {
   reason?: string;
 }
 
+export interface SendResult {
+  sent: boolean;
+  error?: string;
+}
+
 const queue: QueuedSend[] = [];
-const reservedNonces = new Set<string>();
+const activeNonces = new Set<string>();
+let ledgerPathForQueue: string | null = null;
+
+export function setQueueLedgerPath(path: string): void {
+  ledgerPathForQueue = path;
+}
 
 export function enqueue(packet: ActionPacket, policyVersion: number): QueuedSend {
   const entry: QueuedSend = {
@@ -46,10 +57,13 @@ export function reserveForSend(entry: QueuedSend): ReserveResult {
     return { reserved: false, reason: `Cannot reserve: status is ${entry.status}, not QUEUED` };
   }
   const nonce = entry.packet.nonce;
-  if (reservedNonces.has(nonce)) {
+  if (activeNonces.has(nonce)) {
     return { reserved: false, reason: `Nonce ${nonce} already reserved` };
   }
-  reservedNonces.add(nonce);
+  if (ledgerPathForQueue && durableIsConsumed(ledgerPathForQueue, nonce)) {
+    return { reserved: false, reason: `Nonce ${nonce} already consumed (durable) — replay denied` };
+  }
+  activeNonces.add(nonce);
   entry.status = 'IN_FLIGHT';
   entry.reservedAt = new Date().toISOString();
   return { reserved: true, nonce, entry };
@@ -57,20 +71,20 @@ export function reserveForSend(entry: QueuedSend): ReserveResult {
 
 export function releaseNonce(entry: QueuedSend): boolean {
   const nonce = entry.packet.nonce;
-  const wasReserved = reservedNonces.delete(nonce);
+  const wasActive = activeNonces.delete(nonce);
   if (entry.status === 'IN_FLIGHT') {
     entry.status = 'QUEUED';
     entry.reservedAt = undefined;
   }
-  return wasReserved;
+  return wasActive;
 }
 
 export function isNonceReserved(nonce: string): boolean {
-  return reservedNonces.has(nonce);
+  return activeNonces.has(nonce);
 }
 
 export function getReservedNonces(): Set<string> {
-  return new Set(reservedNonces);
+  return new Set(activeNonces);
 }
 
 export function drainOnKillswitch(reason: string): DrainResult {
@@ -79,7 +93,7 @@ export function drainOnKillswitch(reason: string): DrainResult {
   for (const entry of queue) {
     if (entry.status === 'IN_FLIGHT') {
       const nonce = entry.packet.nonce;
-      reservedNonces.delete(nonce);
+      activeNonces.delete(nonce);
       releasedNonces.push(nonce);
       entry.status = 'CANCELLED';
       entry.cancelledAt = new Date().toISOString();
@@ -102,7 +116,7 @@ export function drainOnVersionChange(newVersion: number, reason: string): DrainR
     if ((entry.status === 'QUEUED' || entry.status === 'IN_FLIGHT') && entry.policyVersionAtQueue !== newVersion) {
       if (entry.status === 'IN_FLIGHT') {
         const nonce = entry.packet.nonce;
-        reservedNonces.delete(nonce);
+        activeNonces.delete(nonce);
         releasedNonces.push(nonce);
       }
       entry.status = 'CANCELLED';
@@ -114,12 +128,28 @@ export function drainOnVersionChange(newVersion: number, reason: string): DrainR
   return { cancelled: cancelled.length, releasedNonces, items: cancelled };
 }
 
-export function markSent(entry: QueuedSend): void {
-  if (entry.status === 'IN_FLIGHT') {
-    reservedNonces.delete(entry.packet.nonce);
-    entry.status = 'SENT';
-    entry.sentAt = new Date().toISOString();
+export function markSent(entry: QueuedSend): SendResult {
+  if (entry.status !== 'IN_FLIGHT') {
+    return { sent: false, error: `Cannot mark sent: status is ${entry.status}, not IN_FLIGHT` };
   }
+
+  const nonce = entry.packet.nonce;
+
+  if (ledgerPathForQueue) {
+    const consumeResult = durableConsumeNonce(ledgerPathForQueue, nonce);
+    if (!consumeResult.loaded) {
+      entry.status = 'CANCELLED';
+      entry.cancelledAt = new Date().toISOString();
+      entry.cancelReason = `Nonce consumption failed: ${consumeResult.error}`;
+      activeNonces.delete(nonce);
+      return { sent: false, error: consumeResult.error ?? 'Nonce consumption failed' };
+    }
+  }
+
+  activeNonces.delete(nonce);
+  entry.status = 'SENT';
+  entry.sentAt = new Date().toISOString();
+  return { sent: true };
 }
 
 export function getQueue(): QueuedSend[] {
@@ -140,7 +170,8 @@ export function getActiveCount(): number {
 
 export function clearQueue(): void {
   queue.length = 0;
-  reservedNonces.clear();
+  activeNonces.clear();
+  ledgerPathForQueue = null;
 }
 
 export function checkAndDrain(configPath: string): DrainResult | null {
