@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -9,6 +9,7 @@ import {
   checkVersionMatch,
   resetLastSeenVersion,
   setVersionFilePath,
+  bootstrapVersionLedger,
 } from '../../../../src/bus/triage/policy-config';
 
 describe('policy config', () => {
@@ -21,7 +22,7 @@ describe('policy config', () => {
     configPath = join(tmp, 'triage-policy.json');
     versionFile = join(tmp, '.policy-version');
     resetLastSeenVersion();
-    setVersionFilePath(versionFile);
+    bootstrapVersionLedger(versionFile, 0);
   });
 
   afterEach(() => {
@@ -173,7 +174,7 @@ describe('policy config', () => {
       expect(r2.loaded).toBe(true);
     });
 
-    it('DENIES when version file path is not set (fail-closed, not accept)', () => {
+    it('DENIES when version file path is not set (fail-closed)', () => {
       resetLastSeenVersion();
       writeConfig({ ...VALID_CONFIG, version: 5 });
       const result = loadPolicyConfig(configPath);
@@ -192,12 +193,75 @@ describe('policy config', () => {
       expect(result.error).toContain('unreadable or corrupt');
     });
 
-    it('DENIES when version file write fails (fail-closed)', () => {
-      setVersionFilePath(join(tmp, '\0bad-path', '.policy-version'));
+    it('DENIES when version file write fails via read-only (fail-closed)', () => {
+      const { chmodSync } = require('fs');
       writeConfig({ ...VALID_CONFIG, version: 1 });
+      loadPolicyConfig(configPath);
+
+      chmodSync(versionFile, 0o444);
+      resetLastSeenVersion();
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 2 });
       const result = loadPolicyConfig(configPath);
       expect(result.loaded).toBe(false);
       expect(result.error).toContain('Failed to persist version');
+
+      chmodSync(versionFile, 0o644);
+    });
+  });
+
+  describe('bootstrap vs missing ledger', () => {
+    it('bootstrapVersionLedger creates ledger for genuine first-run', () => {
+      const freshTmp = mkdtempSync(join(tmpdir(), 'bootstrap-'));
+      const freshVersion = join(freshTmp, '.policy-version');
+      resetLastSeenVersion();
+
+      const result = bootstrapVersionLedger(freshVersion, 0);
+      expect(result.success).toBe(true);
+      expect(existsSync(freshVersion)).toBe(true);
+
+      const configP = join(freshTmp, 'policy.json');
+      writeFileSync(configP, JSON.stringify(VALID_CONFIG));
+      const load = loadPolicyConfig(configP);
+      expect(load.loaded).toBe(true);
+
+      rmSync(freshTmp, { recursive: true, force: true });
+    });
+
+    it('bootstrapVersionLedger rejects re-bootstrap on existing ledger', () => {
+      const result = bootstrapVersionLedger(versionFile, 0);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('already exists');
+    });
+
+    it('DENIES when ledger is deleted after bootstrap (cannot bypass rollback protection)', () => {
+      writeConfig({ ...VALID_CONFIG, version: 5 });
+      loadPolicyConfig(configPath);
+
+      unlinkSync(versionFile);
+      resetLastSeenVersion();
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 1 });
+      const result = loadPolicyConfig(configPath);
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('ledger missing');
+      expect(result.error).toContain('bootstrapVersionLedger');
+    });
+
+    it('deleted ledger cannot permit a rolled-back config to load', () => {
+      writeConfig({ ...VALID_CONFIG, version: 10 });
+      loadPolicyConfig(configPath);
+
+      unlinkSync(versionFile);
+      resetLastSeenVersion();
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 3, global_auto_send: true });
+      const result = loadPolicyConfig(configPath);
+      expect(result.loaded).toBe(false);
+      expect(isAutoSendEnabled(result)).toBe(false);
     });
   });
 

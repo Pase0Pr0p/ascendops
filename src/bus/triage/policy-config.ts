@@ -13,6 +13,11 @@ export interface CardAuthResult {
   reason: string;
 }
 
+export interface BootstrapResult {
+  success: boolean;
+  error?: string;
+}
+
 const DEFAULT_DISABLED_CONFIG: PolicyConfig = {
   version: 0,
   updated_at: '',
@@ -39,6 +44,7 @@ function isValidPolicyConfig(obj: unknown): obj is PolicyConfig {
 
 let lastSeenVersion = -1;
 let versionFilePath: string | null = null;
+let bootstrapped = false;
 
 export function setVersionFilePath(path: string): void {
   versionFilePath = path;
@@ -47,6 +53,23 @@ export function setVersionFilePath(path: string): void {
 export function resetLastSeenVersion(): void {
   lastSeenVersion = -1;
   versionFilePath = null;
+  bootstrapped = false;
+}
+
+export function bootstrapVersionLedger(path: string, initialVersion: number): BootstrapResult {
+  if (existsSync(path)) {
+    return { success: false, error: 'Ledger already exists — cannot re-bootstrap' };
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, String(initialVersion), 'utf-8');
+  } catch (err) {
+    return { success: false, error: `Failed to create ledger: ${err}` };
+  }
+  versionFilePath = path;
+  lastSeenVersion = initialVersion;
+  bootstrapped = true;
+  return { success: true };
 }
 
 function loadPersistedVersion(): number {
@@ -54,7 +77,7 @@ function loadPersistedVersion(): number {
     return -2;
   }
   try {
-    if (!existsSync(versionFilePath)) return -1;
+    if (!existsSync(versionFilePath)) return -3;
     const raw = readFileSync(versionFilePath, 'utf-8').trim();
     const v = parseInt(raw, 10);
     if (isNaN(v)) return -2;
@@ -106,6 +129,9 @@ export function loadPolicyConfig(configPath: string): PolicyLoadResult {
     const persisted = loadPersistedVersion();
     if (persisted === -2) {
       return { loaded: false, config: null, error: 'Version file unreadable or corrupt — fail-closed' };
+    }
+    if (persisted === -3) {
+      return { loaded: false, config: null, error: 'Version ledger missing — use bootstrapVersionLedger() for first-run; a deleted ledger cannot bypass rollback protection' };
     }
     lastSeenVersion = persisted;
   }
