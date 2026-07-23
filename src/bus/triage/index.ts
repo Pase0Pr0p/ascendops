@@ -3,12 +3,12 @@ export { detectMold, detectMoldInText, detectMoldInVision } from './mold-detecti
 export { loadPolicyConfig, isAutoSendEnabled, isCardEnabled, checkVersionMatch, resetPolicyState, setLedgerPath } from './policy-config.js';
 export { getPermanentDenies, getPhaseAllows } from './capability-matrix.js';
 export { transition, createTriageWO, createShadowRecord } from './state-machine.js';
-export { enqueue, drainOnKillswitch, drainOnVersionChange, markSent, reserveForSend, releaseNonce, isNonceReserved, getReservedNonces, getQueue, getQueuedCount, getInFlightCount, getActiveCount, clearQueue, checkAndDrain, setQueueLedgerPath } from './send-queue.js';
+export { enqueue, drainOnKillswitch, drainOnVersionChange, prepareSend, confirmSend, releaseOnProvenNoSend, reserveForSend, releaseNonce, isNonceReserved, getReservedNonces, getQueue, getQueuedCount, getInFlightCount, getActiveCount, clearQueue, checkAndDrain, setQueueLedgerPath } from './send-queue.js';
 export { checkFallbackRouting } from './fallback-routing.js';
 export { checkAutoSendConstraints } from './auto-send-constraints.js';
 export { classifySchedulePromise, reclassifyIfSchedule } from './schedule-classifier.js';
 export { triageGate } from './triage-gate.js';
-export { initializeLedger, loadLedger, advanceVersion, consumeNonce, isNonceConsumed, getLedgerVersion } from './durable-ledger.js';
+export { initializeLedger, loadLedger, advanceVersion, consumeNonce, unconsumeNonce, isNonceConsumed, getLedgerVersion, setInstallAnchorPath, resetAnchorPath } from './durable-ledger.js';
 export type {
   TriageState, TerminalFlag, EscalationFlag, Tier, ActionPurpose, ActionType,
   Phase, TriageWO, TerminalCheckResult, PolicyConfig, CardConfig,
@@ -16,7 +16,7 @@ export type {
   CapabilityCheckResult, CapabilityDecision,
   SufficiencyResult, FactType, Fact,
 } from './types.js';
-export type { QueuedSend, QueuedSendStatus, DrainResult, ReserveResult, SendResult } from './send-queue.js';
+export type { QueuedSend, QueuedSendStatus, DrainResult, ReserveResult, SendResult, PrepareResult } from './send-queue.js';
 export type { FallbackCheckResult } from './fallback-routing.js';
 export type { PropertyConstraints, AutoSendConstraintResult } from './auto-send-constraints.js';
 export type { ShadowRecordResult } from './state-machine.js';

@@ -4,13 +4,14 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   enqueue, drainOnKillswitch, drainOnVersionChange,
-  markSent, reserveForSend, releaseNonce,
+  prepareSend, confirmSend, releaseOnProvenNoSend,
+  reserveForSend, releaseNonce,
   isNonceReserved, getReservedNonces,
   getQueue, getQueuedCount, getInFlightCount, getActiveCount,
   clearQueue, checkAndDrain, setQueueLedgerPath,
 } from '../../../../src/bus/triage/send-queue';
 import { resetPolicyState, setLedgerPath } from '../../../../src/bus/triage/policy-config';
-import { initializeLedger, isNonceConsumed } from '../../../../src/bus/triage/durable-ledger';
+import { initializeLedger, isNonceConsumed, setInstallAnchorPath, resetAnchorPath } from '../../../../src/bus/triage/durable-ledger';
 import type { ActionPacket } from '../../../../src/bus/triage/types';
 
 function makePacket(overrides: Partial<ActionPacket> = {}): ActionPacket {
@@ -35,20 +36,127 @@ function makePacket(overrides: Partial<ActionPacket> = {}): ActionPacket {
 describe('send queue', () => {
   let tmp: string;
   let ledgerPath: string;
+  let anchorFile: string;
 
   beforeEach(() => {
     clearQueue();
     tmp = mkdtempSync(join(tmpdir(), 'send-queue-'));
     ledgerPath = join(tmp, 'triage-ledger.json');
+    anchorFile = join(tmp, 'anchor', 'triage.anchor');
+    setInstallAnchorPath(anchorFile);
     initializeLedger(ledgerPath, 0);
     setQueueLedgerPath(ledgerPath);
   });
 
   afterEach(() => {
+    resetAnchorPath();
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  describe('real nonce store lifecycle', () => {
+  describe('mandatory ledger — fail-closed without it', () => {
+    it('reserveForSend DENIES when ledger path not set', () => {
+      clearQueue();
+      setQueueLedgerPath(null as unknown as string);
+      const entry = enqueue(makePacket({ nonce: 'n-noledger' }), 1);
+      clearQueue();
+
+      const e2 = enqueue(makePacket({ nonce: 'n-noledger2' }), 1);
+      const result = reserveForSend(e2);
+      expect(result.reserved).toBe(false);
+      expect(result.reason).toContain('fail-closed');
+    });
+
+    it('prepareSend DENIES when ledger path not set', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-prep-noledger' }), 1);
+      reserveForSend(entry);
+      clearQueue();
+
+      const e2 = enqueue(makePacket({ nonce: 'n-prep-noledger2' }), 1);
+      e2.status = 'IN_FLIGHT';
+      const result = prepareSend(e2);
+      expect(result.prepared).toBe(false);
+      expect(result.error).toContain('fail-closed');
+    });
+  });
+
+  describe('pre-send consume lifecycle (reserve → prepare → confirm)', () => {
+    it('full lifecycle: reserve → prepareSend → confirmSend', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-lifecycle' }), 1);
+
+      const r1 = reserveForSend(entry);
+      expect(r1.reserved).toBe(true);
+      expect(entry.status).toBe('IN_FLIGHT');
+      expect(isNonceReserved('n-lifecycle')).toBe(true);
+
+      const r2 = prepareSend(entry);
+      expect(r2.prepared).toBe(true);
+      expect(entry.durableConsumed).toBe(true);
+      expect(isNonceConsumed(ledgerPath, 'n-lifecycle')).toBe(true);
+
+      const r3 = confirmSend(entry);
+      expect(r3.sent).toBe(true);
+      expect(entry.status).toBe('SENT');
+      expect(isNonceReserved('n-lifecycle')).toBe(false);
+    });
+
+    it('confirmSend DENIES without prior prepareSend', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-skip-prep' }), 1);
+      reserveForSend(entry);
+
+      const result = confirmSend(entry);
+      expect(result.sent).toBe(false);
+      expect(result.error).toContain('call prepareSend first');
+    });
+
+    it('confirmSend DENIES non-IN_FLIGHT entry', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-not-flight' }), 1);
+      const result = confirmSend(entry);
+      expect(result.sent).toBe(false);
+    });
+
+    it('prepareSend DENIES non-IN_FLIGHT entry', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-queued-prep' }), 1);
+      const result = prepareSend(entry);
+      expect(result.prepared).toBe(false);
+    });
+  });
+
+  describe('releaseOnProvenNoSend — unconsume on proven no-send', () => {
+    it('unconsumes nonce and returns to QUEUED', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-abort' }), 1);
+      reserveForSend(entry);
+      prepareSend(entry);
+      expect(isNonceConsumed(ledgerPath, 'n-abort')).toBe(true);
+
+      const result = releaseOnProvenNoSend(entry);
+      expect(result.sent).toBe(false);
+      expect(entry.status).toBe('QUEUED');
+      expect(isNonceConsumed(ledgerPath, 'n-abort')).toBe(false);
+      expect(isNonceReserved('n-abort')).toBe(false);
+    });
+
+    it('releases without durable unconsume when prepareSend was not called', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-noprep-abort' }), 1);
+      reserveForSend(entry);
+
+      const result = releaseOnProvenNoSend(entry);
+      expect(result.sent).toBe(false);
+      expect(entry.status).toBe('QUEUED');
+      expect(isNonceConsumed(ledgerPath, 'n-noprep-abort')).toBe(false);
+    });
+
+    it('re-reserve after releaseOnProvenNoSend succeeds', () => {
+      const entry = enqueue(makePacket({ nonce: 'n-re-reserve' }), 1);
+      reserveForSend(entry);
+      prepareSend(entry);
+      releaseOnProvenNoSend(entry);
+
+      const r2 = reserveForSend(entry);
+      expect(r2.reserved).toBe(true);
+    });
+  });
+
+  describe('nonce reservation and replay prevention', () => {
     it('reserveForSend reserves nonce in active set and checks durable store', () => {
       const entry = enqueue(makePacket({ nonce: 'n-abc' }), 1);
       expect(isNonceReserved('n-abc')).toBe(false);
@@ -72,7 +180,8 @@ describe('send queue', () => {
     it('rejects reservation of durably consumed nonce (replay prevention)', () => {
       const e1 = enqueue(makePacket({ nonce: 'n-replay' }), 1);
       reserveForSend(e1);
-      markSent(e1);
+      prepareSend(e1);
+      confirmSend(e1);
       expect(isNonceConsumed(ledgerPath, 'n-replay')).toBe(true);
 
       const e2 = enqueue(makePacket({ nonce: 'n-replay', woId: 'WO-2' }), 1);
@@ -90,25 +199,6 @@ describe('send queue', () => {
       const released = releaseNonce(entry);
       expect(released).toBe(true);
       expect(isNonceReserved('n-rel')).toBe(false);
-      expect(entry.status).toBe('QUEUED');
-    });
-
-    it('markSent durably consumes nonce and releases from active set', () => {
-      const entry = enqueue(makePacket({ nonce: 'n-sent' }), 1);
-      reserveForSend(entry);
-      expect(isNonceReserved('n-sent')).toBe(true);
-
-      const result = markSent(entry);
-      expect(result.sent).toBe(true);
-      expect(entry.status).toBe('SENT');
-      expect(isNonceReserved('n-sent')).toBe(false);
-      expect(isNonceConsumed(ledgerPath, 'n-sent')).toBe(true);
-    });
-
-    it('markSent rejects non-IN_FLIGHT entry', () => {
-      const entry = enqueue(makePacket({ nonce: 'n-skip' }), 1);
-      const result = markSent(entry);
-      expect(result.sent).toBe(false);
       expect(entry.status).toBe('QUEUED');
     });
 
@@ -149,7 +239,7 @@ describe('send queue', () => {
       expect(isNonceReserved('flight-2')).toBe(false);
     });
 
-    it('reserve → killswitch → nonce released → markSent is no-op', () => {
+    it('reserve → killswitch → nonce released → confirmSend is no-op', () => {
       const entry = enqueue(makePacket({ nonce: 'race-nonce' }), 1);
       reserveForSend(entry);
       expect(isNonceReserved('race-nonce')).toBe(true);
@@ -158,16 +248,27 @@ describe('send queue', () => {
       expect(entry.status).toBe('CANCELLED');
       expect(isNonceReserved('race-nonce')).toBe(false);
 
-      const sendResult = markSent(entry);
+      const sendResult = confirmSend(entry);
       expect(sendResult.sent).toBe(false);
       expect(entry.status).toBe('CANCELLED');
-      expect(isNonceConsumed(ledgerPath, 'race-nonce')).toBe(false);
+    });
+
+    it('killswitch after prepareSend keeps nonce consumed (safe — blocks replay)', () => {
+      const entry = enqueue(makePacket({ nonce: 'race-prepared' }), 1);
+      reserveForSend(entry);
+      prepareSend(entry);
+      expect(isNonceConsumed(ledgerPath, 'race-prepared')).toBe(true);
+
+      drainOnKillswitch('Emergency');
+      expect(entry.status).toBe('CANCELLED');
+      expect(isNonceConsumed(ledgerPath, 'race-prepared')).toBe(true);
     });
 
     it('does not cancel already-sent items', () => {
       const sent = enqueue(makePacket({ woId: 'WO-1', nonce: 'sent-1' }), 1);
       reserveForSend(sent);
-      markSent(sent);
+      prepareSend(sent);
+      confirmSend(sent);
       enqueue(makePacket({ woId: 'WO-2', nonce: 'pending-1' }), 1);
 
       const result = drainOnKillswitch('Killswitch');

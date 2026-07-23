@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, unlinkSync, openSync, closeSync, constants, statSync } from 'fs';
+import { writeFileSync } from 'fs';
 import { dirname } from 'path';
+import { atomicWriteSync } from '../../utils/atomic.js';
 
 export interface LedgerState {
   install_id: string;
@@ -20,6 +22,16 @@ export interface LedgerInitResult {
   error?: string;
 }
 
+let anchorPath: string | null = null;
+
+export function setInstallAnchorPath(path: string): void {
+  anchorPath = path;
+}
+
+export function resetAnchorPath(): void {
+  anchorPath = null;
+}
+
 function generateInstallId(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let id = 'tl-';
@@ -31,6 +43,10 @@ function generateInstallId(): string {
 
 function markerPath(ledgerPath: string): string {
   return ledgerPath + '.installed';
+}
+
+function lockFilePath(ledgerPath: string): string {
+  return ledgerPath + '.lock';
 }
 
 function isValidLedger(obj: unknown): obj is LedgerState {
@@ -46,33 +62,66 @@ function isValidLedger(obj: unknown): obj is LedgerState {
   return true;
 }
 
-function writeLedger(path: string, state: LedgerState): boolean {
+const STALE_LOCK_MS = 60_000;
+
+function acquireLock(ledgerPath: string): boolean {
+  const lp = lockFilePath(ledgerPath);
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(state, null, 2), 'utf-8');
+    mkdirSync(dirname(lp), { recursive: true });
+    const fd = openSync(lp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+    writeFileSync(fd, String(process.pid), 'utf-8');
+    closeSync(fd);
     return true;
   } catch {
+    try {
+      const stat = statSync(lp);
+      const ageMs = Date.now() - stat.mtimeMs;
+      if (ageMs > STALE_LOCK_MS) {
+        unlinkSync(lp);
+        const fd = openSync(lp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+        writeFileSync(fd, String(process.pid), 'utf-8');
+        closeSync(fd);
+        return true;
+      }
+    } catch {
+      // stale-lock recovery failed — fail-closed
+    }
     return false;
   }
 }
 
-function writeMarker(path: string, installId: string): boolean {
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, installId, 'utf-8');
-    return true;
-  } catch {
-    return false;
+function releaseLock(ledgerPath: string): void {
+  const lp = lockFilePath(ledgerPath);
+  try { unlinkSync(lp); } catch { /* already removed */ }
+}
+
+function withLock<T>(ledgerPath: string, fn: () => T): T | { locked: false; error: string } {
+  if (!acquireLock(ledgerPath)) {
+    return { locked: false, error: 'Failed to acquire ledger lock — concurrent access denied' };
   }
+  try {
+    return fn();
+  } finally {
+    releaseLock(ledgerPath);
+  }
+}
+
+function isLockError(v: unknown): v is { locked: false; error: string } {
+  return v !== null && typeof v === 'object' && 'locked' in v && (v as Record<string, unknown>).locked === false;
 }
 
 export function initializeLedger(ledgerPath: string, initialVersion: number): LedgerInitResult {
+  if (!anchorPath) {
+    return { success: false, error: 'Install anchor path not configured — call setInstallAnchorPath() first' };
+  }
+
   const marker = markerPath(ledgerPath);
+  const anchorExists = existsSync(anchorPath);
   const markerExists = existsSync(marker);
   const ledgerExists = existsSync(ledgerPath);
 
-  if (markerExists || ledgerExists) {
-    return { success: false, error: 'Ledger or install marker already exists — cannot re-initialize' };
+  if (anchorExists || markerExists || ledgerExists) {
+    return { success: false, error: 'Install anchor, ledger, or marker already exists — cannot re-initialize' };
   }
 
   const installId = generateInstallId();
@@ -83,11 +132,21 @@ export function initializeLedger(ledgerPath: string, initialVersion: number): Le
     consumed_nonces: [],
   };
 
-  if (!writeMarker(marker, installId)) {
+  try {
+    atomicWriteSync(anchorPath, installId);
+  } catch {
+    return { success: false, error: 'Failed to write install anchor' };
+  }
+
+  try {
+    atomicWriteSync(marker, installId);
+  } catch {
     return { success: false, error: 'Failed to write install marker' };
   }
 
-  if (!writeLedger(ledgerPath, state)) {
+  try {
+    atomicWriteSync(ledgerPath, JSON.stringify(state, null, 2));
+  } catch {
     return { success: false, error: 'Failed to write ledger' };
   }
 
@@ -95,20 +154,36 @@ export function initializeLedger(ledgerPath: string, initialVersion: number): Le
 }
 
 export function loadLedger(ledgerPath: string): LedgerLoadResult {
+  if (!anchorPath) {
+    return { loaded: false, state: null, error: 'Install anchor path not configured — fail-closed' };
+  }
+
   const marker = markerPath(ledgerPath);
+  const anchorExists = existsSync(anchorPath);
   const markerExists = existsSync(marker);
   const ledgerExists = existsSync(ledgerPath);
 
-  if (!markerExists && !ledgerExists) {
+  if (!anchorExists && !markerExists && !ledgerExists) {
     return { loaded: false, state: null, error: 'Not initialized — use initializeLedger() for first-run setup' };
   }
 
-  if (markerExists && !ledgerExists) {
-    return { loaded: false, state: null, error: 'Ledger file missing but install marker exists — tamper detected, deny' };
+  if (!anchorExists) {
+    return { loaded: false, state: null, error: 'Install anchor missing — tamper detected, deny' };
   }
 
-  if (!markerExists && ledgerExists) {
-    return { loaded: false, state: null, error: 'Install marker missing but ledger exists — tamper detected, deny' };
+  if (!markerExists) {
+    return { loaded: false, state: null, error: 'Install marker missing but anchor exists — tamper detected, deny' };
+  }
+
+  if (!ledgerExists) {
+    return { loaded: false, state: null, error: 'Ledger file missing but anchor/marker exist — tamper detected, deny' };
+  }
+
+  let anchorContent: string;
+  try {
+    anchorContent = readFileSync(anchorPath, 'utf-8').trim();
+  } catch {
+    return { loaded: false, state: null, error: 'Install anchor unreadable — fail-closed' };
   }
 
   let markerContent: string;
@@ -116,6 +191,10 @@ export function loadLedger(ledgerPath: string): LedgerLoadResult {
     markerContent = readFileSync(marker, 'utf-8').trim();
   } catch {
     return { loaded: false, state: null, error: 'Install marker unreadable — fail-closed' };
+  }
+
+  if (anchorContent !== markerContent) {
+    return { loaded: false, state: null, error: 'Anchor and marker install_id mismatch — tamper detected, deny' };
   }
 
   let raw: string;
@@ -136,46 +215,88 @@ export function loadLedger(ledgerPath: string): LedgerLoadResult {
     return { loaded: false, state: null, error: 'Ledger file schema invalid — fail-closed' };
   }
 
-  if (parsed.install_id !== markerContent) {
-    return { loaded: false, state: null, error: 'Ledger install_id does not match marker — tamper detected, deny' };
+  if (parsed.install_id !== anchorContent) {
+    return { loaded: false, state: null, error: 'Ledger install_id does not match anchor — tamper detected, deny' };
   }
 
   return { loaded: true, state: parsed };
 }
 
 export function advanceVersion(ledgerPath: string, newVersion: number): LedgerLoadResult {
-  const loadResult = loadLedger(ledgerPath);
-  if (!loadResult.loaded || !loadResult.state) return loadResult;
+  const result = withLock(ledgerPath, () => {
+    const loadResult = loadLedger(ledgerPath);
+    if (!loadResult.loaded || !loadResult.state) return loadResult;
 
-  if (newVersion < loadResult.state.version) {
-    return { loaded: false, state: null, error: `Stale version: ${newVersion} < ledger version ${loadResult.state.version}` };
+    if (newVersion < loadResult.state.version) {
+      return { loaded: false, state: null, error: `Stale version: ${newVersion} < ledger version ${loadResult.state.version}` } as LedgerLoadResult;
+    }
+
+    const updated = { ...loadResult.state, version: newVersion };
+    try {
+      atomicWriteSync(ledgerPath, JSON.stringify(updated, null, 2));
+    } catch {
+      return { loaded: false, state: null, error: 'Failed to persist version advance — fail-closed' } as LedgerLoadResult;
+    }
+
+    return { loaded: true, state: updated } as LedgerLoadResult;
+  });
+
+  if (isLockError(result)) {
+    return { loaded: false, state: null, error: result.error };
   }
-
-  const updated = { ...loadResult.state, version: newVersion };
-  if (!writeLedger(ledgerPath, updated)) {
-    return { loaded: false, state: null, error: 'Failed to persist version advance — fail-closed' };
-  }
-
-  return { loaded: true, state: updated };
+  return result;
 }
 
 export function consumeNonce(ledgerPath: string, nonce: string): LedgerLoadResult {
-  const loadResult = loadLedger(ledgerPath);
-  if (!loadResult.loaded || !loadResult.state) return loadResult;
+  const result = withLock(ledgerPath, () => {
+    const loadResult = loadLedger(ledgerPath);
+    if (!loadResult.loaded || !loadResult.state) return loadResult;
 
-  if (loadResult.state.consumed_nonces.includes(nonce)) {
-    return { loaded: false, state: null, error: `Nonce ${nonce} already consumed — replay denied` };
+    if (loadResult.state.consumed_nonces.includes(nonce)) {
+      return { loaded: false, state: null, error: `Nonce ${nonce} already consumed — replay denied` } as LedgerLoadResult;
+    }
+
+    const updated: LedgerState = {
+      ...loadResult.state,
+      consumed_nonces: [...loadResult.state.consumed_nonces, nonce],
+    };
+    try {
+      atomicWriteSync(ledgerPath, JSON.stringify(updated, null, 2));
+    } catch {
+      return { loaded: false, state: null, error: 'Failed to persist nonce consumption — fail-closed' } as LedgerLoadResult;
+    }
+
+    return { loaded: true, state: updated } as LedgerLoadResult;
+  });
+
+  if (isLockError(result)) {
+    return { loaded: false, state: null, error: result.error };
   }
+  return result;
+}
 
-  const updated: LedgerState = {
-    ...loadResult.state,
-    consumed_nonces: [...loadResult.state.consumed_nonces, nonce],
-  };
-  if (!writeLedger(ledgerPath, updated)) {
-    return { loaded: false, state: null, error: 'Failed to persist nonce consumption — fail-closed' };
+export function unconsumeNonce(ledgerPath: string, nonce: string): LedgerLoadResult {
+  const result = withLock(ledgerPath, () => {
+    const loadResult = loadLedger(ledgerPath);
+    if (!loadResult.loaded || !loadResult.state) return loadResult;
+
+    const updated: LedgerState = {
+      ...loadResult.state,
+      consumed_nonces: loadResult.state.consumed_nonces.filter(n => n !== nonce),
+    };
+    try {
+      atomicWriteSync(ledgerPath, JSON.stringify(updated, null, 2));
+    } catch {
+      return { loaded: false, state: null, error: 'Failed to persist nonce unconsumption — fail-closed' } as LedgerLoadResult;
+    }
+
+    return { loaded: true, state: updated } as LedgerLoadResult;
+  });
+
+  if (isLockError(result)) {
+    return { loaded: false, state: null, error: result.error };
   }
-
-  return { loaded: true, state: updated };
+  return result;
 }
 
 export function isNonceConsumed(ledgerPath: string, nonce: string): boolean {

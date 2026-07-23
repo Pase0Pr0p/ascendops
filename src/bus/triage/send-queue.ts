@@ -1,6 +1,10 @@
 import type { ActionPacket } from './types.js';
 import { loadPolicyConfig, isAutoSendEnabled } from './policy-config.js';
-import { consumeNonce as durableConsumeNonce, isNonceConsumed as durableIsConsumed } from './durable-ledger.js';
+import {
+  consumeNonce as durableConsumeNonce,
+  unconsumeNonce as durableUnconsumeNonce,
+  isNonceConsumed as durableIsConsumed,
+} from './durable-ledger.js';
 
 export type QueuedSendStatus = 'QUEUED' | 'IN_FLIGHT' | 'CANCELLED' | 'SENT';
 
@@ -13,6 +17,7 @@ export interface QueuedSend {
   cancelReason?: string;
   sentAt?: string;
   policyVersionAtQueue: number;
+  durableConsumed?: boolean;
 }
 
 export interface DrainResult {
@@ -26,6 +31,11 @@ export interface ReserveResult {
   nonce?: string;
   entry?: QueuedSend;
   reason?: string;
+}
+
+export interface PrepareResult {
+  prepared: boolean;
+  error?: string;
 }
 
 export interface SendResult {
@@ -53,6 +63,9 @@ export function enqueue(packet: ActionPacket, policyVersion: number): QueuedSend
 }
 
 export function reserveForSend(entry: QueuedSend): ReserveResult {
+  if (!ledgerPathForQueue) {
+    return { reserved: false, reason: 'Queue ledger not configured — fail-closed' };
+  }
   if (entry.status !== 'QUEUED') {
     return { reserved: false, reason: `Cannot reserve: status is ${entry.status}, not QUEUED` };
   }
@@ -60,13 +73,72 @@ export function reserveForSend(entry: QueuedSend): ReserveResult {
   if (activeNonces.has(nonce)) {
     return { reserved: false, reason: `Nonce ${nonce} already reserved` };
   }
-  if (ledgerPathForQueue && durableIsConsumed(ledgerPathForQueue, nonce)) {
+  if (durableIsConsumed(ledgerPathForQueue, nonce)) {
     return { reserved: false, reason: `Nonce ${nonce} already consumed (durable) — replay denied` };
   }
   activeNonces.add(nonce);
   entry.status = 'IN_FLIGHT';
   entry.reservedAt = new Date().toISOString();
   return { reserved: true, nonce, entry };
+}
+
+export function prepareSend(entry: QueuedSend): PrepareResult {
+  if (!ledgerPathForQueue) {
+    return { prepared: false, error: 'Queue ledger not configured — fail-closed' };
+  }
+  if (entry.status !== 'IN_FLIGHT') {
+    return { prepared: false, error: `Cannot prepare: status is ${entry.status}, not IN_FLIGHT` };
+  }
+  const nonce = entry.packet.nonce;
+  const consumeResult = durableConsumeNonce(ledgerPathForQueue, nonce);
+  if (!consumeResult.loaded) {
+    entry.status = 'CANCELLED';
+    entry.cancelledAt = new Date().toISOString();
+    entry.cancelReason = `Pre-send consume failed: ${consumeResult.error}`;
+    activeNonces.delete(nonce);
+    return { prepared: false, error: consumeResult.error ?? 'Nonce consumption failed' };
+  }
+  entry.durableConsumed = true;
+  return { prepared: true };
+}
+
+export function confirmSend(entry: QueuedSend): SendResult {
+  if (entry.status !== 'IN_FLIGHT') {
+    return { sent: false, error: `Cannot confirm: status is ${entry.status}, not IN_FLIGHT` };
+  }
+  if (!entry.durableConsumed) {
+    return { sent: false, error: 'Cannot confirm: nonce not durably consumed — call prepareSend first' };
+  }
+  const nonce = entry.packet.nonce;
+  activeNonces.delete(nonce);
+  entry.status = 'SENT';
+  entry.sentAt = new Date().toISOString();
+  return { sent: true };
+}
+
+export function releaseOnProvenNoSend(entry: QueuedSend): SendResult {
+  if (!ledgerPathForQueue) {
+    return { sent: false, error: 'Queue ledger not configured — fail-closed' };
+  }
+  if (entry.status !== 'IN_FLIGHT') {
+    return { sent: false, error: `Cannot release: status is ${entry.status}, not IN_FLIGHT` };
+  }
+  const nonce = entry.packet.nonce;
+  if (entry.durableConsumed) {
+    const uncResult = durableUnconsumeNonce(ledgerPathForQueue, nonce);
+    if (!uncResult.loaded) {
+      entry.status = 'CANCELLED';
+      entry.cancelledAt = new Date().toISOString();
+      entry.cancelReason = `Unconsume failed: ${uncResult.error} — nonce stays consumed (safe)`;
+      activeNonces.delete(nonce);
+      return { sent: false, error: uncResult.error ?? 'Unconsume failed' };
+    }
+    entry.durableConsumed = false;
+  }
+  activeNonces.delete(nonce);
+  entry.status = 'QUEUED';
+  entry.reservedAt = undefined;
+  return { sent: false };
 }
 
 export function releaseNonce(entry: QueuedSend): boolean {
@@ -126,30 +198,6 @@ export function drainOnVersionChange(newVersion: number, reason: string): DrainR
     }
   }
   return { cancelled: cancelled.length, releasedNonces, items: cancelled };
-}
-
-export function markSent(entry: QueuedSend): SendResult {
-  if (entry.status !== 'IN_FLIGHT') {
-    return { sent: false, error: `Cannot mark sent: status is ${entry.status}, not IN_FLIGHT` };
-  }
-
-  const nonce = entry.packet.nonce;
-
-  if (ledgerPathForQueue) {
-    const consumeResult = durableConsumeNonce(ledgerPathForQueue, nonce);
-    if (!consumeResult.loaded) {
-      entry.status = 'CANCELLED';
-      entry.cancelledAt = new Date().toISOString();
-      entry.cancelReason = `Nonce consumption failed: ${consumeResult.error}`;
-      activeNonces.delete(nonce);
-      return { sent: false, error: consumeResult.error ?? 'Nonce consumption failed' };
-    }
-  }
-
-  activeNonces.delete(nonce);
-  entry.status = 'SENT';
-  entry.sentAt = new Date().toISOString();
-  return { sent: true };
 }
 
 export function getQueue(): QueuedSend[] {

@@ -4,56 +4,82 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   initializeLedger, loadLedger, advanceVersion,
-  consumeNonce, isNonceConsumed, getLedgerVersion,
+  consumeNonce, unconsumeNonce, isNonceConsumed, getLedgerVersion,
+  setInstallAnchorPath, resetAnchorPath,
 } from '../../../../src/bus/triage/durable-ledger';
 
 describe('durable triage ledger', () => {
   let tmp: string;
   let ledgerPath: string;
+  let anchorDir: string;
+  let anchorFile: string;
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'triage-ledger-'));
     ledgerPath = join(tmp, 'triage-ledger.json');
+    anchorDir = join(tmp, 'anchor');
+    anchorFile = join(anchorDir, 'triage.anchor');
+    setInstallAnchorPath(anchorFile);
   });
 
   afterEach(() => {
+    resetAnchorPath();
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  describe('initializeLedger — install-once semantics', () => {
-    it('creates ledger and marker on first run', () => {
+  describe('initializeLedger — install-once with anchor', () => {
+    it('creates ledger, marker, and anchor on first run', () => {
       const result = initializeLedger(ledgerPath, 0);
       expect(result.success).toBe(true);
       expect(result.install_id).toBeDefined();
       expect(existsSync(ledgerPath)).toBe(true);
       expect(existsSync(ledgerPath + '.installed')).toBe(true);
+      expect(existsSync(anchorFile)).toBe(true);
     });
 
-    it('rejects re-initialization when ledger exists', () => {
+    it('rejects re-initialization when all three exist', () => {
       initializeLedger(ledgerPath, 0);
       const result = initializeLedger(ledgerPath, 0);
       expect(result.success).toBe(false);
       expect(result.error).toContain('already exists');
     });
 
-    it('rejects re-initialization when only marker exists (ledger deleted)', () => {
+    it('rejects re-initialization when only anchor exists (ledger+marker deleted)', () => {
       initializeLedger(ledgerPath, 0);
       unlinkSync(ledgerPath);
-      const result = initializeLedger(ledgerPath, 0);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('already exists');
-    });
-
-    it('rejects re-initialization when only ledger exists (marker deleted)', () => {
-      initializeLedger(ledgerPath, 0);
       unlinkSync(ledgerPath + '.installed');
       const result = initializeLedger(ledgerPath, 0);
       expect(result.success).toBe(false);
       expect(result.error).toContain('already exists');
     });
+
+    it('rejects re-initialization when only marker exists (ledger+anchor deleted)', () => {
+      initializeLedger(ledgerPath, 0);
+      unlinkSync(ledgerPath);
+      unlinkSync(anchorFile);
+      const result = initializeLedger(ledgerPath, 0);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('already exists');
+    });
+
+    it('rejects re-initialization when only ledger exists (marker+anchor deleted)', () => {
+      initializeLedger(ledgerPath, 0);
+      unlinkSync(ledgerPath + '.installed');
+      unlinkSync(anchorFile);
+      const result = initializeLedger(ledgerPath, 0);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('already exists');
+    });
+
+    it('DENIES when anchor path not configured', () => {
+      resetAnchorPath();
+      const result = initializeLedger(ledgerPath, 0);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('anchor path not configured');
+    });
   });
 
-  describe('loadLedger — tamper detection', () => {
+  describe('loadLedger — tamper detection with anchor', () => {
     it('loads valid initialized ledger', () => {
       initializeLedger(ledgerPath, 0);
       const result = loadLedger(ledgerPath);
@@ -68,7 +94,7 @@ describe('durable triage ledger', () => {
       expect(result.error).toContain('Not initialized');
     });
 
-    it('DENIES when ledger deleted but marker exists (tamper)', () => {
+    it('DENIES when ledger deleted but anchor+marker exist (tamper)', () => {
       initializeLedger(ledgerPath, 0);
       unlinkSync(ledgerPath);
       const result = loadLedger(ledgerPath);
@@ -76,9 +102,17 @@ describe('durable triage ledger', () => {
       expect(result.error).toContain('tamper detected');
     });
 
-    it('DENIES when marker deleted but ledger exists (tamper)', () => {
+    it('DENIES when marker deleted but anchor+ledger exist (tamper)', () => {
       initializeLedger(ledgerPath, 0);
       unlinkSync(ledgerPath + '.installed');
+      const result = loadLedger(ledgerPath);
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('tamper detected');
+    });
+
+    it('DENIES when anchor deleted but ledger+marker exist (tamper)', () => {
+      initializeLedger(ledgerPath, 0);
+      unlinkSync(anchorFile);
       const result = loadLedger(ledgerPath);
       expect(result.loaded).toBe(false);
       expect(result.error).toContain('tamper detected');
@@ -99,6 +133,14 @@ describe('durable triage ledger', () => {
       expect(result.loaded).toBe(false);
       expect(result.error).toContain('malformed');
     });
+
+    it('DENIES when anchor path not configured (fail-closed)', () => {
+      initializeLedger(ledgerPath, 0);
+      resetAnchorPath();
+      const result = loadLedger(ledgerPath);
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('anchor path not configured');
+    });
   });
 
   describe('advanceVersion — monotonic, durable', () => {
@@ -118,7 +160,7 @@ describe('durable triage ledger', () => {
       expect(result.error).toContain('Stale version');
     });
 
-    it('survives restart: delete→restart→still-denied for version rollback', () => {
+    it('survives restart: version rollback still denied after fresh load', () => {
       initializeLedger(ledgerPath, 0);
       advanceVersion(ledgerPath, 10);
 
@@ -173,44 +215,92 @@ describe('durable triage ledger', () => {
     });
   });
 
-  describe('delete→restart→still-denied (structural)', () => {
-    it('deleted ledger cannot be re-bootstrapped to bypass rollback', () => {
+  describe('unconsumeNonce — proven-no-send release', () => {
+    it('unconsumes a previously consumed nonce', () => {
+      initializeLedger(ledgerPath, 0);
+      consumeNonce(ledgerPath, 'n-undo');
+      expect(isNonceConsumed(ledgerPath, 'n-undo')).toBe(true);
+
+      const result = unconsumeNonce(ledgerPath, 'n-undo');
+      expect(result.loaded).toBe(true);
+      expect(isNonceConsumed(ledgerPath, 'n-undo')).toBe(false);
+    });
+
+    it('unconsumed nonce can be re-consumed', () => {
+      initializeLedger(ledgerPath, 0);
+      consumeNonce(ledgerPath, 'n-retry');
+      unconsumeNonce(ledgerPath, 'n-retry');
+      const result = consumeNonce(ledgerPath, 'n-retry');
+      expect(result.loaded).toBe(true);
+      expect(isNonceConsumed(ledgerPath, 'n-retry')).toBe(true);
+    });
+  });
+
+  describe('both-deleted DENIES reinit — anchor survives', () => {
+    it('delete ledger+marker → load DENIED (anchor detects tamper)', () => {
       initializeLedger(ledgerPath, 0);
       advanceVersion(ledgerPath, 10);
       consumeNonce(ledgerPath, 'n-critical');
 
       unlinkSync(ledgerPath);
-      const reinit = initializeLedger(ledgerPath, 0);
-      expect(reinit.success).toBe(false);
-
-      const load = loadLedger(ledgerPath);
-      expect(load.loaded).toBe(false);
-      expect(load.error).toContain('tamper');
-    });
-
-    it('deleted marker cannot be re-bootstrapped', () => {
-      initializeLedger(ledgerPath, 0);
-      advanceVersion(ledgerPath, 5);
-
       unlinkSync(ledgerPath + '.installed');
-      const reinit = initializeLedger(ledgerPath, 0);
-      expect(reinit.success).toBe(false);
 
       const load = loadLedger(ledgerPath);
       expect(load.loaded).toBe(false);
       expect(load.error).toContain('tamper');
     });
 
-    it('both files deleted = not initialized, not re-bootstrappable via normal path', () => {
-      const init = initializeLedger(ledgerPath, 0);
-      expect(init.success).toBe(true);
+    it('delete ledger+marker → reinit DENIED (anchor blocks re-bootstrap)', () => {
+      initializeLedger(ledgerPath, 0);
+      advanceVersion(ledgerPath, 10);
+      consumeNonce(ledgerPath, 'n-critical');
 
       unlinkSync(ledgerPath);
       unlinkSync(ledgerPath + '.installed');
 
+      const reinit = initializeLedger(ledgerPath, 0);
+      expect(reinit.success).toBe(false);
+      expect(reinit.error).toContain('already exists');
+    });
+
+    it('delete all three → not initialized (full wipe requires re-provision)', () => {
+      initializeLedger(ledgerPath, 0);
+
+      unlinkSync(ledgerPath);
+      unlinkSync(ledgerPath + '.installed');
+      unlinkSync(anchorFile);
+
       const load = loadLedger(ledgerPath);
       expect(load.loaded).toBe(false);
       expect(load.error).toContain('Not initialized');
+    });
+  });
+
+  describe('concurrent access — lock serialization', () => {
+    it('locked operation fails-closed when lock file exists', () => {
+      initializeLedger(ledgerPath, 0);
+
+      const lockFile = ledgerPath + '.lock';
+      writeFileSync(lockFile, '99999', 'utf-8');
+
+      const result = advanceVersion(ledgerPath, 5);
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('concurrent access denied');
+
+      unlinkSync(lockFile);
+    });
+
+    it('sequential mutations serialize correctly', () => {
+      initializeLedger(ledgerPath, 0);
+
+      advanceVersion(ledgerPath, 1);
+      consumeNonce(ledgerPath, 'seq-a');
+      advanceVersion(ledgerPath, 2);
+      consumeNonce(ledgerPath, 'seq-b');
+
+      const state = loadLedger(ledgerPath);
+      expect(state.state!.version).toBe(2);
+      expect(state.state!.consumed_nonces).toEqual(['seq-a', 'seq-b']);
     });
   });
 });

@@ -10,7 +10,7 @@ import {
   resetPolicyState,
   setLedgerPath,
 } from '../../../../src/bus/triage/policy-config';
-import { initializeLedger } from '../../../../src/bus/triage/durable-ledger';
+import { initializeLedger, setInstallAnchorPath, resetAnchorPath } from '../../../../src/bus/triage/durable-ledger';
 
 describe('policy config', () => {
   let tmp: string;
@@ -22,11 +22,13 @@ describe('policy config', () => {
     configPath = join(tmp, 'triage-policy.json');
     ledgerPath = join(tmp, 'triage-ledger.json');
     resetPolicyState();
+    setInstallAnchorPath(join(tmp, 'anchor', 'triage.anchor'));
     initializeLedger(ledgerPath, 0);
     setLedgerPath(ledgerPath);
   });
 
   afterEach(() => {
+    resetAnchorPath();
     rmSync(tmp, { recursive: true, force: true });
   });
 
