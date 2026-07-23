@@ -117,7 +117,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       mkdirSync(join(ctxRoot, 'state', 'bot1'), { recursive: true });
 
       const today = new Date().toISOString().split('T')[0];
-      const eventDir = join(ctxRoot, 'analytics', 'events', 'bot1');
+      const eventDir = join(ctxRoot, 'orgs', 'testorg', 'analytics', 'events', 'bot1');
       mkdirSync(eventDir, { recursive: true });
       writeFileSync(join(eventDir, `${today}.jsonl`), [
         '{"category":"error","event":"crash","severity":"error"}',
@@ -125,7 +125,7 @@ describe('Sprint 5: Observability & Metrics', () => {
         '{"category":"error","event":"timeout","severity":"error"}',
       ].join('\n'), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.errors_today).toBe(2);
     });
 
@@ -134,7 +134,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       mkdirSync(join(ctxRoot, 'state', 'bot1'), { recursive: true });
 
       const today = new Date().toISOString().split('T')[0];
-      const eventDir = join(ctxRoot, 'analytics', 'events', 'bot1');
+      const eventDir = join(ctxRoot, 'orgs', 'testorg', 'analytics', 'events', 'bot1');
       mkdirSync(eventDir, { recursive: true });
       // The exact pattern that polluted Frank's metrics: 7 info-severity
       // gap_detector_false_positive events emitted under category=error.
@@ -146,7 +146,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       lines.push('{"category":"error","event":"actual_failure","severity":"error"}');
       writeFileSync(join(eventDir, `${today}.jsonl`), lines.join('\n'), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.errors_today).toBe(1);
     });
 
@@ -155,14 +155,14 @@ describe('Sprint 5: Observability & Metrics', () => {
       mkdirSync(join(ctxRoot, 'state', 'bot1'), { recursive: true });
 
       const today = new Date().toISOString().split('T')[0];
-      const eventDir = join(ctxRoot, 'analytics', 'events', 'bot1');
+      const eventDir = join(ctxRoot, 'orgs', 'testorg', 'analytics', 'events', 'bot1');
       mkdirSync(eventDir, { recursive: true });
       writeFileSync(join(eventDir, `${today}.jsonl`), [
         '{"category":"error","event":"oom","severity":"critical"}',
         '{"category":"error","event":"crash","severity":"error"}',
       ].join('\n'), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.errors_today).toBe(2);
     });
 
@@ -171,13 +171,13 @@ describe('Sprint 5: Observability & Metrics', () => {
       mkdirSync(join(ctxRoot, 'state', 'bot1'), { recursive: true });
 
       const today = new Date().toISOString().split('T')[0];
-      const eventDir = join(ctxRoot, 'analytics', 'events', 'bot1');
+      const eventDir = join(ctxRoot, 'orgs', 'testorg', 'analytics', 'events', 'bot1');
       mkdirSync(eventDir, { recursive: true });
       writeFileSync(join(eventDir, `${today}.jsonl`), [
         '{"category":"error","event":"degraded","severity":"warning"}',
       ].join('\n'), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.errors_today).toBe(0);
     });
 
@@ -186,7 +186,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       mkdirSync(join(ctxRoot, 'state', 'bot1'), { recursive: true });
 
       const today = new Date().toISOString().split('T')[0];
-      const eventDir = join(ctxRoot, 'analytics', 'events', 'bot1');
+      const eventDir = join(ctxRoot, 'orgs', 'testorg', 'analytics', 'events', 'bot1');
       mkdirSync(eventDir, { recursive: true });
       // The substring `"category":"error"` is embedded in metadata, but the
       // actual top-level category is 'task'. The previous substring check
@@ -195,7 +195,7 @@ describe('Sprint 5: Observability & Metrics', () => {
         '{"category":"task","event":"taxonomy","severity":"info","metadata":{"taxonomy":"\\"category\\":\\"error\\""}}',
       ].join('\n'), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.errors_today).toBe(0);
     });
 
@@ -204,7 +204,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       mkdirSync(join(ctxRoot, 'state', 'bot1'), { recursive: true });
 
       const today = new Date().toISOString().split('T')[0];
-      const eventDir = join(ctxRoot, 'analytics', 'events', 'bot1');
+      const eventDir = join(ctxRoot, 'orgs', 'testorg', 'analytics', 'events', 'bot1');
       mkdirSync(eventDir, { recursive: true });
       writeFileSync(join(eventDir, `${today}.jsonl`), [
         '{"category":"error","event":"real","severity":"error"}',
@@ -212,7 +212,7 @@ describe('Sprint 5: Observability & Metrics', () => {
         '{broken json',
       ].join('\n'), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.errors_today).toBe(1);
     });
   });

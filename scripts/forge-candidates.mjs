@@ -74,7 +74,11 @@ consume — archive pending entries after a build pass
 
 function envDefaults() {
   const ctxRoot = process.env.CTX_ROOT || join(process.env.HOME || '', '.cortextos', 'default');
-  const org = process.env.CTX_ORG || 'ascendops';
+  const org = process.env.CTX_ORG;
+  if (!org) {
+    console.error('FATAL: CTX_ORG is not set. Forge reads org-nested events at orgs/${CTX_ORG}/analytics/events/. Without it, events resolve to the wrong path and return 0 despite real activity. Set CTX_ORG before running.');
+    process.exit(1);
+  }
   const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || process.cwd();
   return {
     org,

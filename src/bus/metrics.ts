@@ -162,9 +162,7 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
     // `"category":"error"` inside a metadata payload, and only count
     // events where severity is genuinely error-level.
     let errorsToday = 0;
-    const eventPaths = [
-      join(ctxRoot, 'analytics', 'events', agent, `${today}.jsonl`),
-    ];
+    const eventPaths: string[] = [];
     if (org) {
       eventPaths.push(join(ctxRoot, 'orgs', org, 'analytics', 'events', agent, `${today}.jsonl`));
     }
