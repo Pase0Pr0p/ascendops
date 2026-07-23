@@ -24,14 +24,16 @@ const E0_PATTERNS: RegExp[] = [
 ];
 
 export function checkTerminalInvariants(wo: TriageWO): TerminalCheckResult {
-  const scopeResult = checkScopeExcluded(wo);
-  if (scopeResult.terminal) return scopeResult;
-
+  // Mold is highest precedence — a mold WO on an excluded property MUST
+  // still escalate to both Albie AND Rob, not silently suppress the dual-route.
   const moldResult = checkMold(wo);
   if (moldResult.terminal) return moldResult;
 
   const e0Result = checkE0(wo);
   if (e0Result.terminal) return e0Result;
+
+  const scopeResult = checkScopeExcluded(wo);
+  if (scopeResult.terminal) return scopeResult;
 
   return { terminal: false };
 }

@@ -67,15 +67,34 @@ export function createTriageWO(woId: string, propertyAddress: string, conversati
   };
 }
 
+export interface ShadowRecordResult {
+  record: ShadowRecord | null;
+  escalated: boolean;
+  terminalCheck?: TerminalCheckResult;
+}
+
 export function createShadowRecord(
   wo: TriageWO,
   packet: ActionPacket,
   review: ReviewVerdict,
-): ShadowRecord {
+): ShadowRecordResult {
+  const terminalCheck = checkTerminalInvariants(wo);
+  if (terminalCheck.terminal) {
+    wo.state = 'ESCALATED';
+    wo.terminalFlag = terminalCheck.flag;
+    if (terminalCheck.flag && !wo.escalationFlags.includes(terminalCheck.flag)) {
+      wo.escalationFlags.push(terminalCheck.flag);
+    }
+    return { record: null, escalated: true, terminalCheck };
+  }
+
   return {
-    woId: wo.woId,
-    shadowVerdict: packet,
-    reviewResult: review,
-    timestamp: new Date().toISOString(),
+    record: {
+      woId: wo.woId,
+      shadowVerdict: packet,
+      reviewResult: review,
+      timestamp: new Date().toISOString(),
+    },
+    escalated: false,
   };
 }

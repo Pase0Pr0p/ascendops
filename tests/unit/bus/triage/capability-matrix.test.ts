@@ -78,7 +78,8 @@ describe('capability matrix — acceptance tests', () => {
     expect(check(4, 'N', 'CLOSE_REQUEST', 'COMPLETION_CLOSE').rule).toBe('permanent-deny');
   });
 
-  // Tests 6-12 are in policy-config.test.ts
+  // Tests 6-10, 12, 15: policy-config.test.ts
+  // Test 11 (killswitch drains queue): send-queue.test.ts
 
   // Test 13: Phase 2 DIY_OFFER does not grant anything outside its allowlist
   it('AT-13: Phase 2 allows DIY_OFFER for N/D but denies vendor dispatch', () => {
@@ -110,11 +111,8 @@ describe('capability matrix — acceptance tests', () => {
     expect(check(3, 'E1', 'ACK', 'SEND_TENANT').decision).toBe('DENY');
   });
 
-  // Test 15 is in policy-config.test.ts (new cards start disabled)
-
-  // Test 16: Rob receives fallback only with active explicit handoff
-  // (Routing logic is behavioral, not matrix — tested via integration. Matrix ensures
-  // mold reaches both regardless.)
+  // Test 15: policy-config.test.ts (new cards start disabled)
+  // Test 16 (Rob fallback routing): fallback-routing.test.ts
 
   // Test 17: Mold escalation reaches both Albie AND Rob regardless of fallback
   it('AT-17: MOLD_ESCALATE flag denies send in all phases (routing to albie+rob is terminal-invariant level)', () => {
@@ -144,10 +142,7 @@ describe('capability matrix — acceptance tests', () => {
     }
   });
 
-  // Test 20: Resident-manager auto-send denied
-  // (This is a lane constraint, not a matrix rule — enforced at the auto-send
-  // constraint level. The matrix does not model resident-manager properties
-  // because it operates on action types, not property attributes.)
+  // Test 20 (resident-manager auto-send denied): auto-send-constraints.test.ts
 
   // Test 21: Scope-excluded -> no triage
   it('AT-21: SCOPE_EXCLUDED flag denies all actions', () => {

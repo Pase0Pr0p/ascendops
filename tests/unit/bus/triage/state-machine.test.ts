@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { transition, createTriageWO } from '../../../../src/bus/triage/state-machine';
-import type { TriageWO, TriageState } from '../../../../src/bus/triage/types';
+import { transition, createTriageWO, createShadowRecord } from '../../../../src/bus/triage/state-machine';
+import type { TriageWO, TriageState, ActionPacket, ReviewVerdict } from '../../../../src/bus/triage/types';
 
 function makeWO(overrides: Partial<TriageWO> = {}): TriageWO {
   return {
@@ -104,6 +104,74 @@ describe('triage state machine', () => {
       expect(wo.state).toBe('INTAKE');
       expect(wo.escalationFlags).toEqual([]);
       expect(wo.facts).toEqual([]);
+    });
+  });
+
+  describe('createShadowRecord terminal check (fix #4)', () => {
+    const dummyPacket: ActionPacket = {
+      woId: 'WO-1000',
+      recipient: 'tenant@example.com',
+      recipientRole: 'tenant',
+      channel: 'email',
+      messageBytes: 'test',
+      purpose: 'ACK',
+      facts: [],
+      escalationFlags: [],
+      policyVersion: 1,
+      conversationFingerprint: 'abc',
+      issuedAt: '2026-07-23T00:00:00Z',
+      expiresAt: '2026-07-23T01:00:00Z',
+      nonce: 'n1',
+    };
+
+    const dummyReview: ReviewVerdict = {
+      result: 'PASS',
+      reasons: ['looks good'],
+      reviewedAt: '2026-07-23T00:00:00Z',
+    };
+
+    it('returns a shadow record for clean WO', () => {
+      const wo = makeWO({ state: 'REVIEW', conversationText: 'Faucet drips' });
+      const result = createShadowRecord(wo, dummyPacket, dummyReview);
+      expect(result.escalated).toBe(false);
+      expect(result.record).not.toBeNull();
+      expect(result.record!.woId).toBe('WO-1000');
+    });
+
+    it('catches mold at shadow-record time and escalates instead of recording', () => {
+      const wo = makeWO({
+        state: 'REVIEW',
+        conversationText: 'Faucet drips\nUpdate: I see mold behind the sink',
+      });
+      const result = createShadowRecord(wo, dummyPacket, dummyReview);
+      expect(result.escalated).toBe(true);
+      expect(result.record).toBeNull();
+      expect(result.terminalCheck?.flag).toBe('MOLD_ESCALATE');
+      expect(wo.state).toBe('ESCALATED');
+      expect(wo.terminalFlag).toBe('MOLD_ESCALATE');
+    });
+
+    it('catches E0 at shadow-record time and escalates', () => {
+      const wo = makeWO({
+        state: 'REVIEW',
+        conversationText: 'Faucet drips\nUpdate: now I smell gas leak',
+      });
+      const result = createShadowRecord(wo, dummyPacket, dummyReview);
+      expect(result.escalated).toBe(true);
+      expect(result.record).toBeNull();
+      expect(result.terminalCheck?.flag).toBe('LIFE_SAFETY_E0');
+    });
+
+    it('catches scope-excluded at shadow-record time', () => {
+      const wo = makeWO({
+        state: 'REVIEW',
+        propertyAddress: '100 Belvedere Ave',
+        conversationText: 'Faucet drips',
+      });
+      const result = createShadowRecord(wo, dummyPacket, dummyReview);
+      expect(result.escalated).toBe(true);
+      expect(result.record).toBeNull();
+      expect(result.terminalCheck?.flag).toBe('SCOPE_EXCLUDED');
     });
   });
 });

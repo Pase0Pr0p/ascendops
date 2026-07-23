@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 import type { PolicyConfig, CardConfig } from './types.js';
 
 export interface PolicyLoadResult {
@@ -37,9 +38,37 @@ function isValidPolicyConfig(obj: unknown): obj is PolicyConfig {
 }
 
 let lastSeenVersion = -1;
+let versionFilePath: string | null = null;
+
+export function setVersionFilePath(path: string): void {
+  versionFilePath = path;
+}
 
 export function resetLastSeenVersion(): void {
   lastSeenVersion = -1;
+  versionFilePath = null;
+}
+
+function loadPersistedVersion(): number {
+  if (!versionFilePath) return -1;
+  try {
+    if (!existsSync(versionFilePath)) return -1;
+    const raw = readFileSync(versionFilePath, 'utf-8').trim();
+    const v = parseInt(raw, 10);
+    return isNaN(v) ? -1 : v;
+  } catch {
+    return -1;
+  }
+}
+
+function persistVersion(version: number): void {
+  if (!versionFilePath) return;
+  try {
+    mkdirSync(dirname(versionFilePath), { recursive: true });
+    writeFileSync(versionFilePath, String(version), 'utf-8');
+  } catch {
+    // fail-open on write: version tracking degrades but doesn't block reads
+  }
 }
 
 export function loadPolicyConfig(configPath: string): PolicyLoadResult {
@@ -65,11 +94,16 @@ export function loadPolicyConfig(configPath: string): PolicyLoadResult {
     return { loaded: false, config: null, error: 'Config file malformed: schema violation' };
   }
 
+  if (lastSeenVersion < 0) {
+    lastSeenVersion = loadPersistedVersion();
+  }
+
   if (lastSeenVersion >= 0 && parsed.version < lastSeenVersion) {
     return { loaded: false, config: null, error: `Stale config version: ${parsed.version} < last seen ${lastSeenVersion}` };
   }
 
   lastSeenVersion = parsed.version;
+  persistVersion(parsed.version);
   return { loaded: true, config: parsed };
 }
 

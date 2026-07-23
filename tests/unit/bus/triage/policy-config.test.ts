@@ -8,6 +8,7 @@ import {
   isCardEnabled,
   checkVersionMatch,
   resetLastSeenVersion,
+  setVersionFilePath,
 } from '../../../../src/bus/triage/policy-config';
 
 describe('policy config', () => {
@@ -140,6 +141,53 @@ describe('policy config', () => {
     const result = loadPolicyConfig(configPath);
     expect(checkVersionMatch(result, 1)).toBe(true);
     expect(checkVersionMatch(result, 2)).toBe(false);
+  });
+
+  // Fix #5: Stale-version detection survives process restart via disk persistence
+  describe('durable version persistence (fix #5)', () => {
+    it('persists version to disk and recovers after resetLastSeenVersion', () => {
+      const versionFile = join(tmp, '.policy-version');
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 5 });
+      const r1 = loadPolicyConfig(configPath);
+      expect(r1.loaded).toBe(true);
+
+      resetLastSeenVersion();
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 3 });
+      const r2 = loadPolicyConfig(configPath);
+      expect(r2.loaded).toBe(false);
+      expect(r2.error).toContain('Stale config version');
+    });
+
+    it('allows forward version advance after restart', () => {
+      const versionFile = join(tmp, '.policy-version');
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 5 });
+      loadPolicyConfig(configPath);
+
+      resetLastSeenVersion();
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 6 });
+      const r2 = loadPolicyConfig(configPath);
+      expect(r2.loaded).toBe(true);
+    });
+
+    it('works without version file path (process-local only, backward compat)', () => {
+      writeConfig({ ...VALID_CONFIG, version: 5 });
+      const r1 = loadPolicyConfig(configPath);
+      expect(r1.loaded).toBe(true);
+
+      resetLastSeenVersion();
+
+      writeConfig({ ...VALID_CONFIG, version: 3 });
+      const r2 = loadPolicyConfig(configPath);
+      expect(r2.loaded).toBe(true);
+    });
   });
 
   // Test 15: New cards start disabled, cannot inherit

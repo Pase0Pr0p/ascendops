@@ -64,7 +64,8 @@ export type ActionType =
   | 'INTERNAL_NOTE_REVIEWED'
   | 'INTERNAL_NOTE_OTHER'
   | 'DIY_OFFER'
-  | 'CLOSE_REQUEST';
+  | 'CLOSE_REQUEST'
+  | 'SCHEDULE_PROMISE';
 
 export type Phase = 0 | 1 | 2 | 3 | 4;
 

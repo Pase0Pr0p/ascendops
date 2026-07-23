@@ -107,14 +107,15 @@ describe('terminal invariants', () => {
   });
 
   describe('precedence', () => {
-    it('scope exclusion takes precedence over mold', () => {
+    it('mold takes precedence over scope exclusion (mold ALWAYS escalates to both Albie+Rob)', () => {
       const wo = makeWO({
         propertyAddress: '100 Belvedere Ave',
         conversationText: 'There is mold on the wall',
       });
       const result = checkTerminalInvariants(wo);
       expect(result.terminal).toBe(true);
-      expect(result.flag).toBe('SCOPE_EXCLUDED');
+      expect(result.flag).toBe('MOLD_ESCALATE');
+      expect(result.recipients).toEqual(['albie', 'rob']);
     });
 
     it('mold takes precedence over E0', () => {

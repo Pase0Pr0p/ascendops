@@ -23,6 +23,7 @@ const PERMANENT_DENIES: PermanentDeny[] = [
   { action: 'LIFECYCLE_WRITE', reason: 'WO lifecycle writes are ALWAYS human-gated' },
   { action: 'COMPLETION_CLOSE', reason: 'WO completion/close is ALWAYS human-gated (even with tenant confirmation)' },
   { action: 'INTERNAL_NOTE_OTHER', reason: 'Automated internal notes outside reviewed additive path are denied' },
+  { action: 'SCHEDULE_PROMISE', reason: 'Schedule promises to tenants or vendors are ALWAYS human-gated' },
 ];
 
 interface PhaseAllow {
