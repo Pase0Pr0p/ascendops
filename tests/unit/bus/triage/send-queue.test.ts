@@ -12,6 +12,7 @@ import {
 } from '../../../../src/bus/triage/send-queue';
 import { resetPolicyState, setLedgerPath } from '../../../../src/bus/triage/policy-config';
 import { initializeLedger, isNonceConsumed, setInstallAnchorPath, resetAnchorPath } from '../../../../src/bus/triage/durable-ledger';
+import * as barrel from '../../../../src/bus/triage/index';
 import type { ActionPacket } from '../../../../src/bus/triage/types';
 
 function makePacket(overrides: Partial<ActionPacket> = {}): ActionPacket {
@@ -40,6 +41,7 @@ describe('send queue', () => {
 
   beforeEach(() => {
     clearQueue();
+    resetAnchorPath();
     tmp = mkdtempSync(join(tmpdir(), 'send-queue-'));
     ledgerPath = join(tmp, 'triage-ledger.json');
     anchorFile = join(tmp, 'anchor', 'triage.anchor');
@@ -51,6 +53,22 @@ describe('send queue', () => {
   afterEach(() => {
     resetAnchorPath();
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  describe('barrel access-surface audit — send queue', () => {
+    it('barrel exports prepareSend, confirmSend, releaseOnProvenNoSend (enforced paths)', () => {
+      expect('prepareSend' in barrel).toBe(true);
+      expect('confirmSend' in barrel).toBe(true);
+      expect('releaseOnProvenNoSend' in barrel).toBe(true);
+    });
+
+    it('barrel does NOT export unconsumeNonce — only reachable via releaseOnProvenNoSend', () => {
+      expect('unconsumeNonce' in barrel).toBe(false);
+    });
+
+    it('barrel does NOT export resetAnchorPath — test-only', () => {
+      expect('resetAnchorPath' in barrel).toBe(false);
+    });
   });
 
   describe('mandatory ledger — fail-closed without it', () => {

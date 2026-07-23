@@ -22,6 +22,7 @@ describe('policy config', () => {
     configPath = join(tmp, 'triage-policy.json');
     ledgerPath = join(tmp, 'triage-ledger.json');
     resetPolicyState();
+    resetAnchorPath();
     setInstallAnchorPath(join(tmp, 'anchor', 'triage.anchor'));
     initializeLedger(ledgerPath, 0);
     setLedgerPath(ledgerPath);

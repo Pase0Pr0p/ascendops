@@ -8,7 +8,7 @@ export { checkFallbackRouting } from './fallback-routing.js';
 export { checkAutoSendConstraints } from './auto-send-constraints.js';
 export { classifySchedulePromise, reclassifyIfSchedule } from './schedule-classifier.js';
 export { triageGate } from './triage-gate.js';
-export { initializeLedger, loadLedger, advanceVersion, consumeNonce, unconsumeNonce, isNonceConsumed, getLedgerVersion, setInstallAnchorPath, resetAnchorPath } from './durable-ledger.js';
+export { initializeLedger, loadLedger, advanceVersion, consumeNonce, isNonceConsumed, getLedgerVersion, setInstallAnchorPath } from './durable-ledger.js';
 export type {
   TriageState, TerminalFlag, EscalationFlag, Tier, ActionPurpose, ActionType,
   Phase, TriageWO, TerminalCheckResult, PolicyConfig, CardConfig,
