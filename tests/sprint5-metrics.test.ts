@@ -26,9 +26,15 @@ describe('Sprint 5: Observability & Metrics', () => {
   });
 
   describe('collectMetrics', () => {
+    it('throws when org is empty or undefined (silent false-zero guard)', () => {
+      writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), '{}', 'utf-8');
+      expect(() => collectMetrics(ctxRoot)).toThrow('collectMetrics: org is required');
+      expect(() => collectMetrics(ctxRoot, '')).toThrow('collectMetrics: org is required');
+    });
+
     it('returns empty report with no agents', () => {
       writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), '{}', 'utf-8');
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.timestamp).toBeTruthy();
       expect(report.system.agents_total).toBe(0);
       expect(report.system.agents_healthy).toBe(0);
@@ -46,7 +52,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       writeFileSync(join(ctxRoot, 'tasks', 'task3.json'), JSON.stringify({ assigned_to: 'bot1', status: 'in_progress' }), 'utf-8');
       writeFileSync(join(ctxRoot, 'tasks', 'task4.json'), JSON.stringify({ assigned_to: 'other', status: 'completed' }), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.tasks_completed).toBe(1);
       expect(report.agents.bot1.tasks_pending).toBe(1);
       expect(report.agents.bot1.tasks_in_progress).toBe(1);
@@ -63,7 +69,7 @@ describe('Sprint 5: Observability & Metrics', () => {
         last_heartbeat: new Date().toISOString(),
       }), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.heartbeat_stale).toBe(false);
       expect(report.system.agents_healthy).toBe(1);
     });
@@ -79,7 +85,7 @@ describe('Sprint 5: Observability & Metrics', () => {
         last_heartbeat: oldTime,
       }), 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.agents.bot1.heartbeat_stale).toBe(true);
       expect(report.system.agents_healthy).toBe(0);
     });
@@ -89,13 +95,13 @@ describe('Sprint 5: Observability & Metrics', () => {
       writeFileSync(join(ctxRoot, 'approvals', 'pending', 'ap1.json'), '{}', 'utf-8');
       writeFileSync(join(ctxRoot, 'approvals', 'pending', 'ap2.json'), '{}', 'utf-8');
 
-      const report = collectMetrics(ctxRoot);
+      const report = collectMetrics(ctxRoot, 'testorg');
       expect(report.system.approvals_pending).toBe(2);
     });
 
     it('writes report to analytics/reports/latest.json', () => {
       writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), '{}', 'utf-8');
-      collectMetrics(ctxRoot);
+      collectMetrics(ctxRoot, 'testorg');
       const reportPath = join(ctxRoot, 'analytics', 'reports', 'latest.json');
       expect(existsSync(reportPath)).toBe(true);
       const report = JSON.parse(readFileSync(reportPath, 'utf-8'));

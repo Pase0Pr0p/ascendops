@@ -7,11 +7,12 @@ import { tmpdir } from 'os';
 const repoRoot = join(__dirname, '../../..');
 const scriptPath = join(repoRoot, 'scripts', 'forge-candidates.mjs');
 
-function run(args: string[]) {
+function run(args: string[], opts?: { env?: Record<string, string | undefined> }) {
   try {
     const stdout = execFileSync(process.execPath, [scriptPath, ...args], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: opts?.env,
     });
     return { status: 0, stdout, stderr: '' };
   } catch (err: any) {
@@ -482,6 +483,15 @@ describe('forge-candidates', () => {
     expect(run(['consume', '--runs-dir', runsDir, '--events-root', eventsRoot, '--build-id', 'build-dual']).status).toBe(0);
     const q2 = JSON.parse(run(['queue', '--runs-dir', runsDir, '--events-root', eventsRoot, '--format', 'json']).stdout);
     expect(q2.total).toBe(0); // not re-queued — no straddle duplicate
+  });
+
+  it('exits with FATAL when CTX_ORG is unset (silent wrong-path regression)', () => {
+    const envWithoutOrg = { ...process.env } as Record<string, string | undefined>;
+    delete envWithoutOrg.CTX_ORG;
+    const res = run(['queue', '--runs-dir', runsDir, '--events-root', eventsRoot], { env: envWithoutOrg });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('FATAL');
+    expect(res.stderr).toContain('CTX_ORG');
   });
 
   it('back-compat: a no-emitted_at candidate in BOTH stores (legacy) resolves consistently, no split-duplicate', () => {

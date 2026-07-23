@@ -98,6 +98,9 @@ function isErrorEvent(line: string): boolean {
 }
 
 export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
+  if (!org) {
+    throw new Error('collectMetrics: org is required. Without it, eventPaths is empty and errors_today silently returns 0 despite real activity.');
+  }
   const timestamp = new Date().toISOString();
   const today = timestamp.split('T')[0];
 
