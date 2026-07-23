@@ -32,11 +32,39 @@ describe('AT-16: Rob receives fallback only with active explicit handoff', () =>
     expect(result.reason).toContain('No active fallback');
   });
 
-  it('allows Rob routing when handoff is active and within time window', () => {
+  it('allows Rob routing when handoff is set by albie and within time window', () => {
     const now = new Date('2026-07-25T12:00:00Z');
-    const result = checkFallbackRouting(makeHandoff(), now);
+    const result = checkFallbackRouting(makeHandoff({ set_by: 'albie' }), now);
     expect(result.robReceives).toBe(true);
     expect(result.reason).toContain('Active fallback handoff');
+  });
+
+  it('allows Rob routing when handoff is set by chief', () => {
+    const now = new Date('2026-07-25T12:00:00Z');
+    const result = checkFallbackRouting(makeHandoff({ set_by: 'chief' }), now);
+    expect(result.robReceives).toBe(true);
+  });
+
+  it('denies Rob routing when handoff set by unauthorized actor (claudia)', () => {
+    const now = new Date('2026-07-25T12:00:00Z');
+    const result = checkFallbackRouting(makeHandoff({ set_by: 'claudia' }), now);
+    expect(result.robReceives).toBe(false);
+    expect(result.reason).toContain('unauthorized');
+    expect(result.reason).toContain('claudia');
+  });
+
+  it('denies Rob routing when handoff set by unauthorized actor (max)', () => {
+    const now = new Date('2026-07-25T12:00:00Z');
+    const result = checkFallbackRouting(makeHandoff({ set_by: 'max' }), now);
+    expect(result.robReceives).toBe(false);
+    expect(result.reason).toContain('unauthorized');
+  });
+
+  it('denies Rob routing when handoff set_by is empty', () => {
+    const now = new Date('2026-07-25T12:00:00Z');
+    const result = checkFallbackRouting(makeHandoff({ set_by: '' }), now);
+    expect(result.robReceives).toBe(false);
+    expect(result.reason).toContain('unauthorized');
   });
 
   it('denies Rob routing when handoff has expired', () => {

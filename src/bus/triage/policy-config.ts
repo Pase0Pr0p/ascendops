@@ -50,28 +50,36 @@ export function resetLastSeenVersion(): void {
 }
 
 function loadPersistedVersion(): number {
-  if (!versionFilePath) return -1;
+  if (!versionFilePath) {
+    return -2;
+  }
   try {
     if (!existsSync(versionFilePath)) return -1;
     const raw = readFileSync(versionFilePath, 'utf-8').trim();
     const v = parseInt(raw, 10);
-    return isNaN(v) ? -1 : v;
+    if (isNaN(v)) return -2;
+    return v;
   } catch {
-    return -1;
+    return -2;
   }
 }
 
-function persistVersion(version: number): void {
-  if (!versionFilePath) return;
+function persistVersion(version: number): boolean {
+  if (!versionFilePath) return false;
   try {
     mkdirSync(dirname(versionFilePath), { recursive: true });
     writeFileSync(versionFilePath, String(version), 'utf-8');
+    return true;
   } catch {
-    // fail-open on write: version tracking degrades but doesn't block reads
+    return false;
   }
 }
 
 export function loadPolicyConfig(configPath: string): PolicyLoadResult {
+  if (!versionFilePath) {
+    return { loaded: false, config: null, error: 'Version file path not configured — fail-closed' };
+  }
+
   if (!existsSync(configPath)) {
     return { loaded: false, config: null, error: 'Config file missing' };
   }
@@ -95,7 +103,11 @@ export function loadPolicyConfig(configPath: string): PolicyLoadResult {
   }
 
   if (lastSeenVersion < 0) {
-    lastSeenVersion = loadPersistedVersion();
+    const persisted = loadPersistedVersion();
+    if (persisted === -2) {
+      return { loaded: false, config: null, error: 'Version file unreadable or corrupt — fail-closed' };
+    }
+    lastSeenVersion = persisted;
   }
 
   if (lastSeenVersion >= 0 && parsed.version < lastSeenVersion) {
@@ -103,7 +115,9 @@ export function loadPolicyConfig(configPath: string): PolicyLoadResult {
   }
 
   lastSeenVersion = parsed.version;
-  persistVersion(parsed.version);
+  if (!persistVersion(parsed.version)) {
+    return { loaded: false, config: null, error: 'Failed to persist version — fail-closed' };
+  }
   return { loaded: true, config: parsed };
 }
 

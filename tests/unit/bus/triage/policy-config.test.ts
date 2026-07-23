@@ -14,11 +14,14 @@ import {
 describe('policy config', () => {
   let tmp: string;
   let configPath: string;
+  let versionFile: string;
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'triage-config-'));
     configPath = join(tmp, 'triage-policy.json');
+    versionFile = join(tmp, '.policy-version');
     resetLastSeenVersion();
+    setVersionFilePath(versionFile);
   });
 
   afterEach(() => {
@@ -143,12 +146,8 @@ describe('policy config', () => {
     expect(checkVersionMatch(result, 2)).toBe(false);
   });
 
-  // Fix #5: Stale-version detection survives process restart via disk persistence
-  describe('durable version persistence (fix #5)', () => {
+  describe('durable version persistence + fail-closed rollback', () => {
     it('persists version to disk and recovers after resetLastSeenVersion', () => {
-      const versionFile = join(tmp, '.policy-version');
-      setVersionFilePath(versionFile);
-
       writeConfig({ ...VALID_CONFIG, version: 5 });
       const r1 = loadPolicyConfig(configPath);
       expect(r1.loaded).toBe(true);
@@ -163,9 +162,6 @@ describe('policy config', () => {
     });
 
     it('allows forward version advance after restart', () => {
-      const versionFile = join(tmp, '.policy-version');
-      setVersionFilePath(versionFile);
-
       writeConfig({ ...VALID_CONFIG, version: 5 });
       loadPolicyConfig(configPath);
 
@@ -177,16 +173,31 @@ describe('policy config', () => {
       expect(r2.loaded).toBe(true);
     });
 
-    it('works without version file path (process-local only, backward compat)', () => {
-      writeConfig({ ...VALID_CONFIG, version: 5 });
-      const r1 = loadPolicyConfig(configPath);
-      expect(r1.loaded).toBe(true);
-
+    it('DENIES when version file path is not set (fail-closed, not accept)', () => {
       resetLastSeenVersion();
+      writeConfig({ ...VALID_CONFIG, version: 5 });
+      const result = loadPolicyConfig(configPath);
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('Version file path not configured');
+    });
 
-      writeConfig({ ...VALID_CONFIG, version: 3 });
-      const r2 = loadPolicyConfig(configPath);
-      expect(r2.loaded).toBe(true);
+    it('DENIES when version file contains garbage (fail-closed)', () => {
+      writeFileSync(versionFile, 'not-a-number', 'utf-8');
+      resetLastSeenVersion();
+      setVersionFilePath(versionFile);
+
+      writeConfig({ ...VALID_CONFIG, version: 5 });
+      const result = loadPolicyConfig(configPath);
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('unreadable or corrupt');
+    });
+
+    it('DENIES when version file write fails (fail-closed)', () => {
+      setVersionFilePath(join(tmp, '\0bad-path', '.policy-version'));
+      writeConfig({ ...VALID_CONFIG, version: 1 });
+      const result = loadPolicyConfig(configPath);
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('Failed to persist version');
     });
   });
 
