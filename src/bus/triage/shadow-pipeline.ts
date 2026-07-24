@@ -22,7 +22,6 @@ export interface PipelineInput {
   channel?: string;
   cardId?: string;
   policyVersion?: number;
-  auditPath?: string;
   reviewer?: ReviewerFn;
 }
 
@@ -125,7 +124,6 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
     packet: packetResult.packet,
     phase: input.phase,
     actionType: input.actionType,
-    auditPath: input.auditPath,
     reviewer: input.reviewer,
   });
 

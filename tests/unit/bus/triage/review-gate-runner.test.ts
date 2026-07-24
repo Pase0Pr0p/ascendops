@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { runReviewGate, REVIEWER_VERSION } from '../../../../src/bus/triage/review-gate-runner';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { runReviewGate, getAuditPath, REVIEWER_VERSION } from '../../../../src/bus/triage/review-gate-runner';
 import { buildPacket } from '../../../../src/bus/triage/packet-builder';
+import { readAuditRecords } from '../../../../src/bus/triage/shadow-audit';
 import type { TriageWO, ActionPacket } from '../../../../src/bus/triage/types';
 
 function makeWO(overrides: Partial<TriageWO> = {}): TriageWO {
@@ -410,6 +414,126 @@ describe('review-gate-runner', () => {
 
       expect(output.independentReview).toBeDefined();
       expect(output.independentReview!.result).toBe('FAIL');
+    });
+  });
+
+  describe('audit authority (private, framework-owned)', () => {
+    it('writes audit to framework-owned path, not caller-supplied path', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const output = runReviewGate({
+        wo, packet, phase: 1, actionType: 'SEND_TENANT',
+        auditPath: '/tmp/attacker-controlled/audit.jsonl',
+      } as any);
+
+      expect(output.verdict.result).toBe('PASS');
+      expect(output.auditResult?.acknowledged).toBe(true);
+      expect(existsSync('/tmp/attacker-controlled/audit.jsonl')).toBe(false);
+    });
+
+    it('getAuditPath returns durable non-tmp path under HOME', () => {
+      const path = getAuditPath('WO-1234');
+      expect(path).toContain('.cortextos');
+      expect(path).toContain('shadow-audit');
+      expect(path).not.toContain('/tmp');
+      expect(path).toContain('WO-1234');
+    });
+
+    it('getAuditPath sanitizes path-traversal WO IDs', () => {
+      const path = getAuditPath('WO/../../etc/passwd');
+      expect(path).not.toContain('..');
+      expect(path).not.toContain('/etc/passwd');
+      expect(path).toMatch(/WO_+etc_passwd/);
+    });
+  });
+
+  describe('audit on all outcomes', () => {
+    it('audits terminal escalation (mold)', () => {
+      const wo = makeWO({ conversationText: 'There is mold in the bathroom' });
+      const safeWO = makeWO();
+      const packet = makeValidPacket(safeWO);
+      packet.woId = wo.woId;
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.escalated).toBe(true);
+      expect(output.auditResult?.acknowledged).toBe(true);
+    });
+
+    it('audits packet-authority denial', () => {
+      const wo = makeWO({ tenantName: 'Real Tenant' });
+      const packet = makeValidPacket(wo);
+      packet.recipient = 'Wrong Person';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.gateResult.rule).toBe('packet-authority');
+      expect(output.auditResult?.acknowledged).toBe(true);
+    });
+
+    it('audits source-freshness denial', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      wo.conversationText = 'Completely different text now about a new issue.';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).not.toBe('PASS');
+      expect(output.gateResult.rule).toBe('source-freshness');
+      expect(output.auditResult?.acknowledged).toBe(true);
+    });
+
+    it('audits content-validation denial', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo, 'This damage is your fault.');
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.gateResult.rule).toBe('content-validation');
+      expect(output.auditResult?.acknowledged).toBe(true);
+    });
+
+    it('audits capability-matrix gate denial', () => {
+      const wo = makeWO({ tier: 'N' });
+      const packet = makeValidPacket(wo);
+      const output = runReviewGate({ wo, packet, phase: 0, actionType: 'SEND_TENANT' });
+
+      expect(output.gateResult.decision).toBe('DENY');
+      expect(output.auditResult?.acknowledged).toBe(true);
+    });
+
+    it('audits independent reviewer FAIL', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const rejectingReviewer = () => ({
+        result: 'FAIL' as const,
+        violations: ['Reviewer rejects'],
+        reviewerVersion: 'test-v1',
+        reviewedAt: new Date().toISOString(),
+      });
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT', reviewer: rejectingReviewer });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.auditResult?.acknowledged).toBe(true);
+    });
+
+    it('audits PASS outcome', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('PASS');
+      expect(output.auditResult?.acknowledged).toBe(true);
+    });
+
+    it('audit records are at the internal path derived from WO ID', () => {
+      const wo = makeWO({ woId: 'WO-audit-check-7777' });
+      const packet = makeValidPacket(wo);
+      runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      const auditPath = getAuditPath('WO-audit-check-7777');
+      expect(existsSync(auditPath)).toBe(true);
+      const records = readAuditRecords(auditPath);
+      expect(records.length).toBeGreaterThanOrEqual(1);
+      expect(records[records.length - 1].shadowRecord.woId).toBe('WO-audit-check-7777');
     });
   });
 });

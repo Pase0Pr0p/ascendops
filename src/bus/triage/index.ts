@@ -6,7 +6,7 @@ export { classifySchedulePromise, reclassifyIfSchedule } from './schedule-classi
 export { triageGate } from './triage-gate.js';
 export { classify, applyClassification } from './classifier.js';
 export { buildPacket, computeFingerprint, computeCanonicalHash } from './packet-builder.js';
-export { runReviewGate, REVIEWER_VERSION } from './review-gate-runner.js';
+export { runReviewGate, getAuditPath, REVIEWER_VERSION } from './review-gate-runner.js';
 export { runShadowPipeline } from './shadow-pipeline.js';
 export { validateContent } from './content-validator.js';
 export { independentReview, INDEPENDENT_REVIEWER_VERSION } from './independent-reviewer.js';
