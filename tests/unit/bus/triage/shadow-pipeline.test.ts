@@ -7,6 +7,7 @@ function makeInput(overrides: Partial<PipelineInput> = {}): PipelineInput {
     woId: 'WO-5000',
     propertyAddress: '321 Pine St',
     conversationText: 'The kitchen faucet is dripping slowly.',
+    tenantName: 'Test Tenant',
     phase: 1,
     actionType: 'SEND_TENANT',
     purpose: 'ACK',
@@ -26,6 +27,7 @@ describe('shadow-pipeline', () => {
       expect(result.classification!.tier).toBe('N');
       expect(result.gateOutput).not.toBeNull();
       expect(result.escalated).toBe(false);
+      expect(result.rejected).toBe(false);
       expect(result.finalState).toBe('READY_FOR_HUMAN');
     });
 
@@ -131,6 +133,76 @@ describe('shadow-pipeline', () => {
     });
   });
 
+  describe('fail-closed: packet rejection', () => {
+    it('rejects when tenant identity is unknown', () => {
+      const input = makeInput({
+        conversationText: 'Door handle is loose',
+        tenantName: undefined,
+        phase: 1,
+        actionType: 'SEND_TENANT',
+        purpose: 'ACK',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.rejected).toBe(true);
+      expect(result.rejectReason).toContain('Unknown tenant identity');
+      expect(result.gateOutput).toBeNull();
+    });
+
+    it('rejects unauthorized channel override', () => {
+      const input = makeInput({
+        conversationText: 'Door handle is loose',
+        channel: 'email',
+        phase: 1,
+        actionType: 'SEND_TENANT',
+        purpose: 'ACK',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.rejected).toBe(true);
+      expect(result.rejectReason).toContain('not authorized');
+    });
+  });
+
+  describe('fail-closed: content validation through pipeline', () => {
+    it('denies internal classification labels', () => {
+      const input = makeInput({
+        messageBytes: 'We classified your request as tier N with trade PLUMBING and low priority.',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.gateOutput).not.toBeNull();
+      expect(result.gateOutput!.verdict.result).toBe('FAIL');
+    });
+
+    it('denies responsibility/chargeback language', () => {
+      const input = makeInput({
+        messageBytes: 'This damage is your fault and you will be charged for the repair.',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.gateOutput!.verdict.result).toBe('FAIL');
+    });
+
+    it('denies entry/access authority claims', () => {
+      const input = makeInput({
+        messageBytes: 'We have permission and will enter your unit even if you are away.',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.gateOutput!.verdict.result).toBe('FAIL');
+    });
+
+    it('denies schedule promises', () => {
+      const input = makeInput({
+        messageBytes: 'Your appointment is Friday.',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.gateOutput!.verdict.result).toBe('FAIL');
+    });
+  });
+
   describe('gate decisions through pipeline', () => {
     it('gate allows SEND_TENANT ACK at Phase 1 for N-tier', () => {
       const input = makeInput({
@@ -198,10 +270,7 @@ describe('shadow-pipeline', () => {
       const result = runShadowPipeline(input);
 
       expect(result.gateOutput).not.toBeNull();
-      if (result.gateOutput!.gateResult.reclassified) {
-        expect(result.gateOutput!.gateResult.finalActionType).toBe('SCHEDULE_PROMISE');
-        expect(result.gateOutput!.gateResult.decision).toBe('DENY');
-      }
+      expect(result.gateOutput!.verdict.result).toBe('FAIL');
     });
   });
 
@@ -238,6 +307,33 @@ describe('shadow-pipeline', () => {
       expect(result.wo.facts.length).toBeGreaterThan(0);
       const systemFacts = result.wo.facts.filter(f => f.type === 'system_fact');
       expect(systemFacts.some(f => f.value.includes('WO-5000'))).toBe(true);
+    });
+  });
+
+  describe('shadow record auditability', () => {
+    it('shadow record has canonical packet hash', () => {
+      const input = makeInput({
+        conversationText: 'Door handle is loose',
+        phase: 0,
+        actionType: 'WO_ASSIGNMENT',
+        purpose: 'ACK',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.gateOutput!.shadowRecord).not.toBeNull();
+      expect(result.gateOutput!.shadowRecord!.packetHash).toHaveLength(64);
+    });
+
+    it('shadow record has reviewer version', () => {
+      const input = makeInput({
+        conversationText: 'Door handle is loose',
+        phase: 0,
+        actionType: 'WO_ASSIGNMENT',
+        purpose: 'ACK',
+      });
+      const result = runShadowPipeline(input);
+
+      expect(result.gateOutput!.shadowRecord!.reviewResult.reviewerVersion).toBeTruthy();
     });
   });
 });

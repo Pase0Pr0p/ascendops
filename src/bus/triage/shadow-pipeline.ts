@@ -1,4 +1,4 @@
-import type { TriageWO, Phase, ActionType, ActionPurpose } from './types.js';
+import type { TriageWO, Phase, ActionType, ActionPurpose, ShadowRecord } from './types.js';
 import type { ClassificationResult } from './classifier.js';
 import type { ReviewGateOutput } from './review-gate-runner.js';
 import { createTriageWO, transition } from './state-machine.js';
@@ -30,6 +30,8 @@ export interface PipelineResult {
   gateOutput: ReviewGateOutput | null;
   escalated: boolean;
   escalationReason?: string;
+  rejected: boolean;
+  rejectReason?: string;
   finalState: string;
 }
 
@@ -41,7 +43,6 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
   if (input.photoUrls) wo.photoUrls = input.photoUrls;
   if (input.visionAnalysis) wo.visionAnalysis = input.visionAnalysis;
 
-  // INTAKE → READING
   const readTransition = transition(wo, 'READING');
   if (!readTransition.success) {
     return {
@@ -50,11 +51,11 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
       gateOutput: null,
       escalated: wo.state === 'ESCALATED',
       escalationReason: readTransition.reason,
+      rejected: false,
       finalState: wo.state,
     };
   }
 
-  // READING → CLASSIFYING
   const classifyTransition = transition(wo, 'CLASSIFYING');
   if (!classifyTransition.success) {
     return {
@@ -63,6 +64,7 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
       gateOutput: null,
       escalated: wo.state === 'ESCALATED',
       escalationReason: classifyTransition.reason,
+      rejected: false,
       finalState: wo.state,
     };
   }
@@ -70,7 +72,6 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
   const classification = classify(wo);
   applyClassification(wo, classification);
 
-  // CLASSIFYING → DRAFTING
   const draftTransition = transition(wo, 'DRAFTING');
   if (!draftTransition.success) {
     return {
@@ -79,11 +80,12 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
       gateOutput: null,
       escalated: wo.state === 'ESCALATED',
       escalationReason: draftTransition.reason,
+      rejected: false,
       finalState: wo.state,
     };
   }
 
-  const packet = buildPacket(wo, {
+  const packetResult = buildPacket(wo, {
     purpose: input.purpose,
     messageBytes: input.messageBytes,
     channel: input.channel,
@@ -91,7 +93,18 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
     policyVersion: input.policyVersion,
   });
 
-  // DRAFTING → REVIEW
+  if (packetResult.rejected || !packetResult.packet) {
+    return {
+      wo,
+      classification,
+      gateOutput: null,
+      escalated: false,
+      rejected: true,
+      rejectReason: packetResult.rejectReason,
+      finalState: wo.state,
+    };
+  }
+
   const reviewTransition = transition(wo, 'REVIEW');
   if (!reviewTransition.success) {
     return {
@@ -100,29 +113,30 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
       gateOutput: null,
       escalated: wo.state === 'ESCALATED',
       escalationReason: reviewTransition.reason,
+      rejected: false,
       finalState: wo.state,
     };
   }
 
   const gateOutput = runReviewGate({
     wo,
-    packet,
+    packet: packetResult.packet,
     phase: input.phase,
     actionType: input.actionType,
   });
 
-  if (gateOutput.shadowResult.escalated) {
+  if (gateOutput.escalated) {
     return {
       wo,
       classification,
       gateOutput,
       escalated: true,
-      escalationReason: gateOutput.shadowResult.terminalCheck?.reason,
+      escalationReason: gateOutput.escalationReason,
+      rejected: false,
       finalState: wo.state,
     };
   }
 
-  // REVIEW → READY_FOR_HUMAN
   const readyTransition = transition(wo, 'READY_FOR_HUMAN');
   if (!readyTransition.success) {
     return {
@@ -131,6 +145,7 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
       gateOutput,
       escalated: wo.state === 'ESCALATED',
       escalationReason: readyTransition.reason,
+      rejected: false,
       finalState: wo.state,
     };
   }
@@ -140,6 +155,7 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
     classification,
     gateOutput,
     escalated: false,
+    rejected: false,
     finalState: wo.state,
   };
 }

@@ -291,15 +291,22 @@ function extractFacts(wo: TriageWO): Fact[] {
 
   const text = wo.conversationText || '';
   if (text.length > 0) {
-    const locationMatch = text.match(
-      /\b(kitchen|bathroom|bedroom|living\s*room|hallway|garage|basement|laundry|closet|balcony|patio|lobby|stairwell|roof|attic|unit\s*\S+)\b/i,
-    );
+    const locationPattern = /\b(kitchen|bathroom|bedroom|living\s*room|hallway|garage|basement|laundry|closet|balcony|patio|lobby|stairwell|roof|attic|unit\s*\S+)\b/i;
+    const locationMatch = text.match(locationPattern);
     if (locationMatch) {
+      const matchIndex = locationMatch.index ?? 0;
+      const preceding = text.slice(Math.max(0, matchIndex - 30), matchIndex).toLowerCase();
+      const negated = /\bnot\s+(in\s+)?(the\s+)?$/.test(preceding)
+        || /\bisn'?t\s+(in\s+)?(the\s+)?$/.test(preceding)
+        || /\bno\s+(in\s+)?(the\s+)?$/.test(preceding);
+
       facts.push({
-        type: 'tenant_fact' as FactType,
+        type: 'inference' as FactType,
         source: 'conversation_text',
-        value: `Issue location: ${locationMatch[0]}`,
-        confidence: 0.8,
+        value: negated
+          ? `Inferred NOT location: ${locationMatch[0]}`
+          : `Inferred location: ${locationMatch[0]}`,
+        confidence: negated ? 0.3 : 0.6,
         timestamp: now,
       });
     }

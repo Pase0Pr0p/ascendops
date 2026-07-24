@@ -152,12 +152,14 @@ export interface ActionPacket {
   issuedAt: string;
   expiresAt: string;
   nonce: string;
+  canonicalHash: string;
 }
 
 export interface ReviewVerdict {
   result: 'PASS' | 'FAIL' | 'ESCALATE';
   reasons: string[];
   reviewedAt: string;
+  reviewerVersion: string;
 }
 
 export interface ShadowRecord {
@@ -165,6 +167,7 @@ export interface ShadowRecord {
   shadowVerdict: ActionPacket;
   reviewResult: ReviewVerdict;
   timestamp: string;
+  packetHash: string;
 }
 
 export type CapabilityDecision = 'ALLOW' | 'DENY';

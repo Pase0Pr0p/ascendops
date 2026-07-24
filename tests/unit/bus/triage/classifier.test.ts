@@ -234,12 +234,22 @@ describe('classifier', () => {
       expect(systemFacts.some(f => f.value.includes('Unit 4B'))).toBe(true);
     });
 
-    it('extracts location fact from text', () => {
+    it('extracts location as inference from text', () => {
       const wo = makeWO({ conversationText: 'The kitchen sink is leaking under the counter' });
       const result = classify(wo);
-      const locationFacts = result.facts.filter(f => f.value.includes('Issue location'));
-      expect(locationFacts.length).toBe(1);
-      expect(locationFacts[0].value).toContain('kitchen');
+      const inferences = result.facts.filter(f => f.type === 'inference' && f.value.includes('location'));
+      expect(inferences.length).toBe(1);
+      expect(inferences[0].value).toContain('kitchen');
+      expect(inferences[0].confidence).toBeLessThan(1.0);
+    });
+
+    it('labels negated location as NOT location with low confidence', () => {
+      const wo = makeWO({ conversationText: 'The leak is not in the kitchen; it may be upstairs' });
+      const result = classify(wo);
+      const inferences = result.facts.filter(f => f.type === 'inference' && f.value.includes('location'));
+      expect(inferences.length).toBe(1);
+      expect(inferences[0].value).toContain('NOT location');
+      expect(inferences[0].confidence).toBeLessThanOrEqual(0.3);
     });
 
     it('extracts vision observation', () => {
