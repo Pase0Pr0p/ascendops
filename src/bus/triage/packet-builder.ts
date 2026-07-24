@@ -15,6 +15,7 @@ export interface PacketBuildResult {
   packet: ActionPacket | null;
   rejected: boolean;
   rejectReason?: string;
+  conversationFingerprint?: string;
 }
 
 const TIER_EXPIRY_HOURS: Record<Tier, number> = {
@@ -67,6 +68,10 @@ function resolveChannel(purpose: ActionPurpose, explicitChannel?: string): strin
 }
 
 export function computeFingerprint(wo: TriageWO): string {
+  const factsSerialized = wo.facts
+    .map(f => `${f.type}:${f.source}:${f.value}:${f.confidence}`)
+    .sort()
+    .join('|');
   const parts = [
     wo.woId,
     wo.propertyAddress,
@@ -76,6 +81,7 @@ export function computeFingerprint(wo: TriageWO): string {
     wo.unitId || '',
     wo.photoUrls.join(','),
     wo.visionAnalysis || '',
+    factsSerialized,
   ];
   return createHash('sha256').update(parts.join('\x00')).digest('hex').slice(0, 16);
 }
@@ -113,12 +119,15 @@ export function computeCanonicalHash(packet: Omit<ActionPacket, 'canonicalHash'>
 }
 
 export function buildPacket(wo: TriageWO, options: PacketBuildOptions): PacketBuildResult {
+  const fingerprint = computeFingerprint(wo);
+
   const resolved = resolveRecipient(wo, options.purpose);
   if (!resolved) {
     return {
       packet: null,
       rejected: true,
       rejectReason: 'Unknown tenant identity — cannot build tenant-facing packet',
+      conversationFingerprint: fingerprint,
     };
   }
 
@@ -128,6 +137,7 @@ export function buildPacket(wo: TriageWO, options: PacketBuildOptions): PacketBu
       packet: null,
       rejected: true,
       rejectReason: `Channel '${options.channel}' not authorized for purpose '${options.purpose}'`,
+      conversationFingerprint: fingerprint,
     };
   }
 
@@ -145,7 +155,7 @@ export function buildPacket(wo: TriageWO, options: PacketBuildOptions): PacketBu
     tier: wo.tier,
     policyVersion: options.policyVersion ?? 0,
     cardId: options.cardId,
-    conversationFingerprint: computeFingerprint(wo),
+    conversationFingerprint: fingerprint,
     issuedAt,
     expiresAt: computeExpiry(wo.tier, issuedAt),
     nonce: generateNonce(),
@@ -154,5 +164,6 @@ export function buildPacket(wo: TriageWO, options: PacketBuildOptions): PacketBu
   return {
     packet: { ...partial, canonicalHash: computeCanonicalHash(partial) },
     rejected: false,
+    conversationFingerprint: fingerprint,
   };
 }

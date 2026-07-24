@@ -3,10 +3,14 @@ import type {
   ShadowRecord,
 } from './types.js';
 import type { GateResult } from './triage-gate.js';
+import type { IndependentReviewResult } from './independent-reviewer.js';
+import type { AppendResult } from './shadow-audit.js';
 import { triageGate } from './triage-gate.js';
 import { validateContent } from './content-validator.js';
 import { checkTerminalInvariants } from './terminal-invariants.js';
 import { computeFingerprint, computeCanonicalHash } from './packet-builder.js';
+import { independentReview } from './independent-reviewer.js';
+import { appendShadowAudit } from './shadow-audit.js';
 
 export const REVIEWER_VERSION = 'review-gate-runner-v3';
 
@@ -15,6 +19,7 @@ export interface ReviewGateInput {
   packet: ActionPacket;
   phase: Phase;
   actionType: ActionType;
+  auditPath?: string;
 }
 
 export interface ReviewGateOutput {
@@ -23,6 +28,8 @@ export interface ReviewGateOutput {
   shadowRecord: ShadowRecord | null;
   escalated: boolean;
   escalationReason?: string;
+  independentReview?: IndependentReviewResult;
+  auditResult?: AppendResult;
 }
 
 const ALLOWED_TENANT_CHANNELS: Set<string> = new Set(['appfolio_wo_message']);
@@ -150,7 +157,7 @@ function denyOutput(actionType: ActionType, reasons: string[], rule: string): Re
 }
 
 export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
-  const { wo, packet, phase, actionType } = input;
+  const { wo, packet, phase, actionType, auditPath } = input;
 
   const terminalCheck = checkTerminalInvariants(wo);
   if (terminalCheck.terminal) {
@@ -198,9 +205,13 @@ export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
     return { gateResult, verdict: buildVerdict('FAIL', reasons), shadowRecord: null, escalated: false };
   }
 
+  const irResult = independentReview(wo, packet);
+  if (!irResult.approved) {
+    const irReasons = irResult.violations.map(v => `Independent review: ${v}`);
+    return denyOutput(actionType, irReasons, 'independent-review');
+  }
+
   const verdict = buildVerdict('PASS', reasons);
-  const frozenPacket = makeImmutable(packet);
-  const frozenVerdict = makeImmutable(verdict);
   const packetClone = JSON.parse(JSON.stringify(packet));
   const shadowRecord = makeImmutable<ShadowRecord>({
     woId: wo.woId,
@@ -210,5 +221,10 @@ export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
     packetHash: packetClone.canonicalHash,
   });
 
-  return { gateResult, verdict, shadowRecord, escalated: false };
+  let auditResult: AppendResult | undefined;
+  if (auditPath) {
+    auditResult = appendShadowAudit(auditPath, JSON.parse(JSON.stringify(shadowRecord)), gateResult, irResult);
+  }
+
+  return { gateResult, verdict, shadowRecord, escalated: false, independentReview: irResult, auditResult };
 }

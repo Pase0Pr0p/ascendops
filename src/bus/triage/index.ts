@@ -9,6 +9,8 @@ export { buildPacket, computeFingerprint, computeCanonicalHash } from './packet-
 export { runReviewGate, REVIEWER_VERSION } from './review-gate-runner.js';
 export { runShadowPipeline } from './shadow-pipeline.js';
 export { validateContent } from './content-validator.js';
+export { independentReview, INDEPENDENT_REVIEWER_VERSION } from './independent-reviewer.js';
+export { appendShadowAudit, readAuditRecords, replayFromRecord } from './shadow-audit.js';
 export type {
   TriageState, TerminalFlag, EscalationFlag, Tier, ActionPurpose, ActionType,
   Phase, TriageWO, TerminalCheckResult,
@@ -24,3 +26,5 @@ export type { PacketBuildOptions, PacketBuildResult } from './packet-builder.js'
 export type { ReviewGateInput, ReviewGateOutput } from './review-gate-runner.js';
 export type { PipelineInput, PipelineResult } from './shadow-pipeline.js';
 export type { ContentValidationResult } from './content-validator.js';
+export type { IndependentReviewResult } from './independent-reviewer.js';
+export type { DurableAuditRecord, AppendResult, ReplayResult } from './shadow-audit.js';

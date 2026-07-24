@@ -141,7 +141,7 @@ describe('content-validator', () => {
     it('rejects free-form ACK content not in allowlist', () => {
       const result = validateContent('Sounds good, we are on it.', 'ACK');
       expect(result.valid).toBe(false);
-      expect(result.violations[0]).toContain('content-not-in-allowlist');
+      expect(result.violations[0]).toContain('content-not-in-template');
     });
   });
 
@@ -164,7 +164,7 @@ describe('content-validator', () => {
     it('rejects free-form INFO_REQUEST not in allowlist', () => {
       const result = validateContent('Tell me more about it.', 'INFO_REQUEST');
       expect(result.valid).toBe(false);
-      expect(result.violations[0]).toContain('content-not-in-allowlist');
+      expect(result.violations[0]).toContain('content-not-in-template');
     });
   });
 
@@ -182,7 +182,7 @@ describe('content-validator', () => {
     it('rejects free-form DIY_OFFER not in allowlist', () => {
       const result = validateContent('Just fix it yourself.', 'DIY_OFFER');
       expect(result.valid).toBe(false);
-      expect(result.violations[0]).toContain('content-not-in-allowlist');
+      expect(result.violations[0]).toContain('content-not-in-template');
     });
   });
 
