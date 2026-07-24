@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type {
   TriageWO, ActionPacket, ReviewVerdict, Phase, ActionType, ActionPurpose,
   ShadowRecord,
@@ -48,6 +50,11 @@ const PURPOSE_ROLE_MAP: Record<string, string> = {
   VENDOR_DISPATCH: 'operations_manager',
   CONTAINMENT: 'operations_manager',
 };
+
+function internalAuditPath(woId: string): string {
+  const safeId = woId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return join(tmpdir(), 'cortextos-shadow-audit', `${safeId}.jsonl`);
+}
 
 function isValidFiniteDate(value: string): boolean {
   const d = new Date(value);
@@ -150,22 +157,15 @@ function buildVerdict(
   };
 }
 
-function denyOutput(actionType: ActionType, reasons: string[], rule: string): ReviewGateOutput {
-  return {
-    gateResult: { decision: 'DENY', finalActionType: actionType, reclassified: false, reason: reasons.join('; '), rule },
-    verdict: buildVerdict('FAIL', reasons),
-    shadowRecord: null,
-    escalated: false,
-  };
-}
-
 function isValidReviewerResult(value: unknown): value is IndependentReviewResult {
   if (value === null || typeof value !== 'object') return false;
   const obj = value as Record<string, unknown>;
   if (obj.result !== 'PASS' && obj.result !== 'FAIL' && obj.result !== 'ESCALATE') return false;
   if (!Array.isArray(obj.violations)) return false;
+  if (!(obj.violations as unknown[]).every(v => typeof v === 'string')) return false;
   if (typeof obj.reviewerVersion !== 'string' || obj.reviewerVersion.length === 0) return false;
-  if (typeof obj.reviewedAt !== 'string' || obj.reviewedAt.length === 0) return false;
+  if (typeof obj.reviewedAt !== 'string') return false;
+  if (!isValidFiniteDate(obj.reviewedAt as string)) return false;
   return true;
 }
 
@@ -203,8 +203,28 @@ function invokeReviewer(reviewerFn: ReviewerFn | undefined, wo: TriageWO, packet
   return raw;
 }
 
+function appendAuditForOutcome(
+  auditPath: string,
+  wo: TriageWO,
+  packet: ActionPacket,
+  gateResult: GateResult,
+  verdict: ReviewVerdict,
+  irResult: IndependentReviewResult,
+): AppendResult {
+  const packetClone = JSON.parse(JSON.stringify(packet));
+  const shadowForAudit: ShadowRecord = {
+    woId: wo.woId,
+    shadowVerdict: packetClone,
+    reviewResult: JSON.parse(JSON.stringify(verdict)),
+    timestamp: new Date().toISOString(),
+    packetHash: packetClone.canonicalHash,
+  };
+  return appendShadowAudit(auditPath, shadowForAudit, gateResult, irResult);
+}
+
 export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
-  const { wo, packet, phase, actionType, auditPath, reviewer } = input;
+  const { wo, packet, phase, actionType, reviewer } = input;
+  const effectiveAuditPath = input.auditPath || internalAuditPath(wo.woId);
 
   const terminalCheck = checkTerminalInvariants(wo);
   if (terminalCheck.terminal) {
@@ -219,17 +239,25 @@ export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
 
   const authorityViolations = validatePacketAuthority(wo, packet);
   if (authorityViolations.length > 0) {
-    return denyOutput(actionType, authorityViolations, 'packet-authority');
+    const reasons = authorityViolations;
+    const gateResult: GateResult = { decision: 'DENY', finalActionType: actionType, reclassified: false, reason: reasons.join('; '), rule: 'packet-authority' };
+    const verdict = buildVerdict('FAIL', reasons);
+    return { gateResult, verdict, shadowRecord: null, escalated: false };
   }
 
   const freshnessViolations = validateSourceFreshness(wo, packet);
   if (freshnessViolations.length > 0) {
-    return denyOutput(actionType, freshnessViolations, 'source-freshness');
+    const reasons = freshnessViolations;
+    const gateResult: GateResult = { decision: 'DENY', finalActionType: actionType, reclassified: false, reason: reasons.join('; '), rule: 'source-freshness' };
+    const verdict = buildVerdict('FAIL', reasons);
+    return { gateResult, verdict, shadowRecord: null, escalated: false };
   }
 
   const contentCheck = validateContent(packet.messageBytes, packet.purpose);
   if (!contentCheck.valid) {
-    return denyOutput(actionType, contentCheck.violations, 'content-validation');
+    const gateResult: GateResult = { decision: 'DENY', finalActionType: actionType, reclassified: false, reason: contentCheck.violations.join('; '), rule: 'content-validation' };
+    const verdict = buildVerdict('FAIL', contentCheck.violations);
+    return { gateResult, verdict, shadowRecord: null, escalated: false };
   }
 
   const gateResult = triageGate(
@@ -254,12 +282,13 @@ export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
 
   const reviewerFn = reviewer !== undefined ? reviewer : independentReview;
   const irResult = invokeReviewer(reviewerFn, wo, packet);
+
   if (irResult.result !== 'PASS') {
     const irReasons = irResult.violations.map(v => `Independent review: ${v}`);
-    return {
-      ...denyOutput(actionType, irReasons, 'independent-review'),
-      independentReview: irResult,
-    };
+    const denyGateResult: GateResult = { decision: 'DENY', finalActionType: actionType, reclassified: false, reason: irReasons.join('; '), rule: 'independent-review' };
+    const verdict = buildVerdict('FAIL', irReasons);
+    const auditResult = appendAuditForOutcome(effectiveAuditPath, wo, packet, denyGateResult, verdict, irResult);
+    return { gateResult: denyGateResult, verdict, shadowRecord: null, escalated: false, independentReview: irResult, auditResult };
   }
 
   const verdict = buildVerdict('PASS', reasons);
@@ -272,10 +301,7 @@ export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
     packetHash: packetClone.canonicalHash,
   });
 
-  let auditResult: AppendResult | undefined;
-  if (auditPath) {
-    auditResult = appendShadowAudit(auditPath, JSON.parse(JSON.stringify(shadowRecord)), gateResult, irResult);
-  }
+  const auditResult = appendAuditForOutcome(effectiveAuditPath, wo, packet, gateResult, verdict, irResult);
 
   return { gateResult, verdict, shadowRecord, escalated: false, independentReview: irResult, auditResult };
 }

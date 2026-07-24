@@ -1,8 +1,6 @@
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import type { TriageWO, Phase, ActionType, ActionPurpose, ShadowRecord } from './types.js';
 import type { ClassificationResult } from './classifier.js';
-import type { ReviewGateOutput } from './review-gate-runner.js';
+import type { ReviewGateOutput, ReviewerFn } from './review-gate-runner.js';
 import { createTriageWO, transition } from './state-machine.js';
 import { classify, applyClassification } from './classifier.js';
 import { buildPacket } from './packet-builder.js';
@@ -25,10 +23,7 @@ export interface PipelineInput {
   cardId?: string;
   policyVersion?: number;
   auditPath?: string;
-}
-
-function defaultAuditPath(woId: string): string {
-  return join(tmpdir(), 'cortextos-shadow-audit', `${woId}.jsonl`);
+  reviewer?: ReviewerFn;
 }
 
 export interface PipelineResult {
@@ -125,14 +120,13 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
     };
   }
 
-  const auditPath = input.auditPath || defaultAuditPath(input.woId);
-
   const gateOutput = runReviewGate({
     wo,
     packet: packetResult.packet,
     phase: input.phase,
     actionType: input.actionType,
-    auditPath,
+    auditPath: input.auditPath,
+    reviewer: input.reviewer,
   });
 
   if (gateOutput.escalated) {
