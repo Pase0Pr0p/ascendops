@@ -215,6 +215,37 @@ describe('shadow-audit', () => {
       expect(replay.drifts.some(d => d.includes('Gate/review disagreement'))).toBe(true);
     });
 
+    it('replays terminal DENY + ESCALATE without drift', () => {
+      const sr = makeShadowRecord();
+      sr.reviewResult = {
+        result: 'ESCALATE',
+        reasons: ['Terminal invariant active'],
+        reviewedAt: new Date().toISOString(),
+        reviewerVersion: 'review-gate-runner-v3',
+      };
+      const gr: GateResult = {
+        decision: 'DENY',
+        finalActionType: 'SEND_TENANT',
+        reclassified: false,
+        reason: 'Terminal invariant active',
+        rule: 'terminal-invariant',
+      };
+      const ir: IndependentReviewResult = {
+        result: 'FAIL',
+        violations: ['Reviewer not reached: early deterministic denial'],
+        reviewerVersion: 'not-reached',
+        reviewedAt: new Date().toISOString(),
+      };
+      appendShadowAudit(AUDIT_PATH, sr, gr, ir);
+      const records = readAuditRecords(AUDIT_PATH);
+      const replay = replayFromRecord(records[0]);
+
+      expect(replay.matches).toBe(true);
+      expect(replay.drifts).toHaveLength(0);
+      expect(replay.originalVerdict).toBe('ESCALATE');
+      expect(replay.replayedVerdict).toBe('ESCALATE');
+    });
+
     it('detects independent reviewer rejection on PASS record', () => {
       const ir = makeIndependentReview();
       ir.result = 'FAIL';

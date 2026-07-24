@@ -118,7 +118,11 @@ export function replayFromRecord(record: DurableAuditRecord): ReplayResult {
     drifts.push(`Shadow record packetHash does not match recomputed canonical: stored='${record.shadowRecord.packetHash}' recomputed='${recomputedCanonical}'`);
   }
 
-  const gateVerdict = record.gateResult.decision === 'ALLOW' ? 'PASS' : 'FAIL';
+  const gateVerdict = record.gateResult.decision === 'ALLOW'
+    ? 'PASS'
+    : record.gateResult.rule === 'terminal-invariant'
+      ? 'ESCALATE'
+      : 'FAIL';
   const reviewVerdict = record.shadowRecord.reviewResult.result;
 
   if (gateVerdict !== reviewVerdict) {
