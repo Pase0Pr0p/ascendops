@@ -91,7 +91,7 @@ function computeExpiry(tier: Tier | undefined, issuedAt: string): string {
   return issued.toISOString();
 }
 
-export function computeCanonicalHash(packet: Omit<ActionPacket, 'canonicalHash'>): string {
+export function computeCanonicalHash(packet: Omit<ActionPacket, 'canonicalHash'> & { canonicalHash?: string }): string {
   const canonical = JSON.stringify({
     woId: packet.woId,
     recipient: packet.recipient,
@@ -104,6 +104,7 @@ export function computeCanonicalHash(packet: Omit<ActionPacket, 'canonicalHash'>
     cardId: packet.cardId,
     conversationFingerprint: packet.conversationFingerprint,
     escalationFlags: packet.escalationFlags,
+    facts: packet.facts,
     issuedAt: packet.issuedAt,
     expiresAt: packet.expiresAt,
     nonce: packet.nonce,

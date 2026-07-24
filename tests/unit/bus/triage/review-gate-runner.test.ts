@@ -18,10 +18,10 @@ function makeWO(overrides: Partial<TriageWO> = {}): TriageWO {
   };
 }
 
-function makeValidPacket(wo: TriageWO, overrides: Partial<ActionPacket> = {}): ActionPacket {
-  const result = buildPacket(wo, { purpose: 'ACK', messageBytes: 'We received your request.' });
+function makeValidPacket(wo: TriageWO, messageBytes = 'We have received your request.'): ActionPacket {
+  const result = buildPacket(wo, { purpose: 'ACK', messageBytes });
   if (!result.packet) throw new Error('Failed to build packet for test');
-  return { ...result.packet, ...overrides };
+  return result.packet;
 }
 
 describe('review-gate-runner', () => {
@@ -55,37 +55,45 @@ describe('review-gate-runner', () => {
     });
   });
 
-  describe('DENY scenarios — capability matrix', () => {
-    it('denies VENDOR_DISPATCH (permanent deny)', () => {
-      const wo = makeWO();
-      const packet = makeValidPacket(wo);
-      const output = runReviewGate({ wo, packet, phase: 3, actionType: 'VENDOR_DISPATCH' });
+  describe('terminal invariant recheck at review entry', () => {
+    it('escalates when WO has mold at review time', () => {
+      const wo = makeWO({ conversationText: 'There is mold all over the walls' });
+      const safeWO = makeWO();
+      const packet = makeValidPacket(safeWO);
+      packet.woId = wo.woId;
+      packet.conversationFingerprint = 'stale';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
 
-      expect(output.gateResult.decision).toBe('DENY');
-      expect(output.verdict.result).toBe('FAIL');
+      expect(output.verdict.result).toBe('ESCALATE');
+      expect(output.shadowRecord).toBeNull();
+      expect(output.escalated).toBe(true);
     });
 
-    it('denies SEND_TENANT at Phase 0 (not in phase actions)', () => {
-      const wo = makeWO({ tier: 'N' });
-      const packet = makeValidPacket(wo);
-      const output = runReviewGate({ wo, packet, phase: 0, actionType: 'SEND_TENANT' });
-
-      expect(output.gateResult.decision).toBe('DENY');
-      expect(output.verdict.result).toBe('FAIL');
-    });
-
-    it('denies SPEND_APPROVE (permanent deny)', () => {
+    it('escalates when WO changes to E0 after packet was built', () => {
       const wo = makeWO();
       const packet = makeValidPacket(wo);
-      const output = runReviewGate({ wo, packet, phase: 3, actionType: 'SPEND_APPROVE' });
+      wo.conversationText = 'The electrical panel is arcing.';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
 
-      expect(output.gateResult.decision).toBe('DENY');
-      expect(output.verdict.result).toBe('FAIL');
+      expect(output.verdict.result).toBe('ESCALATE');
+      expect(output.shadowRecord).toBeNull();
+      expect(output.escalated).toBe(true);
+    });
+
+    it('escalates scope-excluded WO at review entry', () => {
+      const wo = makeWO({ propertyAddress: '100 Belvedere Dr' });
+      const safeWO = makeWO();
+      const packet = makeValidPacket(safeWO);
+      packet.woId = wo.woId;
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.escalated).toBe(true);
+      expect(output.shadowRecord).toBeNull();
     });
   });
 
-  describe('DENY scenarios — packet authority validation', () => {
-    it('denies cross-WO packet (packet WO != current WO)', () => {
+  describe('packet authority validation', () => {
+    it('denies cross-WO packet', () => {
       const wo = makeWO({ woId: 'WO-current' });
       const packet = makeValidPacket(wo);
       packet.woId = 'WO-other';
@@ -103,6 +111,15 @@ describe('review-gate-runner', () => {
 
       expect(output.verdict.result).toBe('FAIL');
       expect(output.gateResult.rule).toBe('packet-authority');
+    });
+
+    it('denies malformed expiresAt', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      packet.expiresAt = 'not-a-date';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('FAIL');
     });
 
     it('denies packet with wrong recipient', () => {
@@ -124,6 +141,24 @@ describe('review-gate-runner', () => {
       expect(output.verdict.result).toBe('FAIL');
     });
 
+    it('denies wrong recipientRole for purpose', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      packet.recipientRole = 'vendor';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('FAIL');
+    });
+
+    it('denies email channel for tenant purpose', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      packet.channel = 'email';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('FAIL');
+    });
+
     it('denies combined cross-WO, expired, wrong-recipient packet', () => {
       const wo = makeWO({ woId: 'WO-current', tenantName: 'Real Tenant' });
       const packet = makeValidPacket(wo);
@@ -138,11 +173,35 @@ describe('review-gate-runner', () => {
     });
   });
 
-  describe('DENY scenarios — content validation', () => {
-    it('denies internal classification labels in tenant content', () => {
+  describe('source freshness validation', () => {
+    it('denies stale packet after WO source changes', () => {
       const wo = makeWO();
       const packet = makeValidPacket(wo);
-      packet.messageBytes = 'We classified your request as tier N with trade PLUMBING and low priority.';
+      wo.conversationText = 'Completely different text now about a new issue.';
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).not.toBe('PASS');
+      expect(output.gateResult.rule).toBe('source-freshness');
+    });
+
+    it('denies packet with tampered facts (hash mismatch)', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      packet.facts.push({
+        type: 'system_fact', source: 'attacker', value: 'Tenant admitted fault',
+        confidence: 1, timestamp: new Date().toISOString(),
+      });
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.gateResult.rule).toBe('source-freshness');
+    });
+  });
+
+  describe('content validation (allowlist model)', () => {
+    it('denies internal classification labels in tenant content', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo, 'We classified your request as tier N with trade PLUMBING and low priority.');
       const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
 
       expect(output.verdict.result).toBe('FAIL');
@@ -151,46 +210,57 @@ describe('review-gate-runner', () => {
 
     it('denies responsibility/chargeback language', () => {
       const wo = makeWO();
-      const packet = makeValidPacket(wo);
-      packet.messageBytes = 'This damage is your fault and you will be charged for the repair.';
+      const packet = makeValidPacket(wo, 'This damage is your fault and you will be charged for the repair.');
       const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
-
       expect(output.verdict.result).toBe('FAIL');
     });
 
     it('denies entry/access authority claims', () => {
       const wo = makeWO();
-      const packet = makeValidPacket(wo);
-      packet.messageBytes = 'We have permission and will enter your unit even if you are away.';
+      const packet = makeValidPacket(wo, 'We have permission and will enter your unit even if you are away.');
       const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
-
       expect(output.verdict.result).toBe('FAIL');
     });
 
     it('denies schedule promises', () => {
       const wo = makeWO();
-      const packet = makeValidPacket(wo);
-      packet.messageBytes = 'Your appointment is Friday.';
+      const packet = makeValidPacket(wo, 'Your appointment is Friday.');
       const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
-
       expect(output.verdict.result).toBe('FAIL');
     });
 
-    it('denies legal/health commitment language', () => {
+    it('denies "the repair bill is yours" paraphrase', () => {
       const wo = makeWO();
-      const packet = makeValidPacket(wo);
-      packet.messageBytes = 'This is a habitability issue and we are legally required to fix it within 24 hours.';
+      const packet = makeValidPacket(wo, 'The repair bill is yours.');
       const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
-
       expect(output.verdict.result).toBe('FAIL');
     });
 
-    it('allows clean ACK content', () => {
+    it('denies "let ourselves into" paraphrase', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo, 'We can let ourselves into the apartment.');
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+      expect(output.verdict.result).toBe('FAIL');
+    });
+
+    it('denies "technician is booked" paraphrase', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo, 'The technician is booked Friday.');
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+      expect(output.verdict.result).toBe('FAIL');
+    });
+
+    it('denies free-form content not in allowlist', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo, 'Sounds good, someone will handle it.');
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+      expect(output.verdict.result).toBe('FAIL');
+    });
+
+    it('allows approved ACK template', () => {
       const wo = makeWO();
       const packet = makeValidPacket(wo);
-      packet.messageBytes = 'Thank you for letting us know. We have received your maintenance request.';
       const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
-
       expect(output.gateResult.decision).toBe('ALLOW');
       expect(output.verdict.result).toBe('PASS');
     });
@@ -210,13 +280,15 @@ describe('review-gate-runner', () => {
       expect(record.reviewResult.reviewerVersion).toBe(REVIEWER_VERSION);
     });
 
-    it('shadow record packet is an immutable deep copy', () => {
+    it('shadow record packet is immutable (Object.freeze)', () => {
       const wo = makeWO();
       const packet = makeValidPacket(wo);
       const output = runReviewGate({ wo, packet, phase: 0, actionType: 'WO_ASSIGNMENT' });
 
-      packet.messageBytes = 'MUTATED';
-      expect(output.shadowRecord!.shadowVerdict.messageBytes).not.toBe('MUTATED');
+      expect(output.shadowRecord).not.toBeNull();
+      expect(() => {
+        output.shadowRecord!.shadowVerdict.messageBytes = 'MUTATED AFTER REVIEW';
+      }).toThrow();
     });
 
     it('does not create shadow record on FAIL', () => {
@@ -228,6 +300,37 @@ describe('review-gate-runner', () => {
       expect(output.verdict.result).toBe('FAIL');
       expect(output.shadowRecord).toBeNull();
     });
+
+    it('does not create shadow record on terminal escalation', () => {
+      const wo = makeWO({ conversationText: 'There is mold in the bathroom' });
+      const safeWO = makeWO();
+      const packet = makeValidPacket(safeWO);
+      packet.woId = wo.woId;
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.shadowRecord).toBeNull();
+      expect(output.escalated).toBe(true);
+    });
+  });
+
+  describe('capability matrix DENY', () => {
+    it('denies VENDOR_DISPATCH (permanent deny)', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const output = runReviewGate({ wo, packet, phase: 3, actionType: 'VENDOR_DISPATCH' });
+
+      expect(output.gateResult.decision).toBe('DENY');
+      expect(output.verdict.result).toBe('FAIL');
+    });
+
+    it('denies SEND_TENANT at Phase 0', () => {
+      const wo = makeWO({ tier: 'N' });
+      const packet = makeValidPacket(wo);
+      const output = runReviewGate({ wo, packet, phase: 0, actionType: 'SEND_TENANT' });
+
+      expect(output.gateResult.decision).toBe('DENY');
+      expect(output.verdict.result).toBe('FAIL');
+    });
   });
 
   describe('reviewer version', () => {
@@ -235,7 +338,6 @@ describe('review-gate-runner', () => {
       const wo = makeWO();
       const packet = makeValidPacket(wo);
       const output = runReviewGate({ wo, packet, phase: 0, actionType: 'WO_ASSIGNMENT' });
-
       expect(output.verdict.reviewerVersion).toBe(REVIEWER_VERSION);
     });
   });

@@ -11,7 +11,7 @@ function makeInput(overrides: Partial<PipelineInput> = {}): PipelineInput {
     phase: 1,
     actionType: 'SEND_TENANT',
     purpose: 'ACK',
-    messageBytes: 'We received your maintenance request and will look into it shortly.',
+    messageBytes: 'We have received your maintenance request and will look into it shortly.',
     ...overrides,
   };
 }
