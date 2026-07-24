@@ -24,6 +24,8 @@ const originalEnv = {
   HOME: process.env.HOME,
   USERPROFILE: process.env.USERPROFILE,
   CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  CTX_INSTANCE_ID: process.env.CTX_INSTANCE_ID,
+  CTX_ORG: process.env.CTX_ORG,
 };
 const realHome = homedir();
 const realClaudePaths = [
@@ -74,6 +76,8 @@ export function setup(): void {
   process.env.USERPROFILE = sandboxHome;
   process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   process.env.CORTEXTOS_TEST_SANDBOX_HOME = sandboxHome;
+  process.env.CTX_INSTANCE_ID = 'test';
+  process.env.CTX_ORG = 'test-org';
   console.log(`[test-sandbox] HOME isolated at ${sandboxHome}`);
 }
 
@@ -92,6 +96,8 @@ export function teardown(): void {
     restoreEnv('USERPROFILE');
     restoreEnv('CLAUDE_CONFIG_DIR');
     delete process.env.CORTEXTOS_TEST_SANDBOX_HOME;
+    restoreEnv('CTX_INSTANCE_ID');
+    restoreEnv('CTX_ORG');
     if (sandboxHome) rmSync(sandboxHome, { recursive: true, force: true });
   }
 }
