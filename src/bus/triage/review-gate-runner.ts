@@ -50,11 +50,23 @@ const PURPOSE_ROLE_MAP: Record<string, string> = {
   CONTAINMENT: 'operations_manager',
 };
 
-const SHADOW_AUDIT_ROOT = join(homedir(), '.cortextos', 'shadow-audit');
+function resolveAuditRoot(): string {
+  const instanceId = process.env.CTX_INSTANCE_ID;
+  const org = process.env.CTX_ORG;
+  if (!instanceId || !org) {
+    throw new Error(
+      `Audit scope unresolvable: CTX_INSTANCE_ID=${instanceId ?? 'unset'}, CTX_ORG=${org ?? 'unset'}. ` +
+      'Cannot resolve authoritative audit root without instance and org scope.',
+    );
+  }
+  const safeInstance = instanceId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeOrg = org.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return join(homedir(), '.cortextos', safeInstance, 'orgs', safeOrg, 'shadow-audit');
+}
 
 function internalAuditPath(woId: string): string {
   const safeId = woId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return join(SHADOW_AUDIT_ROOT, `${safeId}.jsonl`);
+  return join(resolveAuditRoot(), `${safeId}.jsonl`);
 }
 
 export function getAuditPath(woId: string): string {

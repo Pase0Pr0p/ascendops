@@ -431,12 +431,57 @@ describe('review-gate-runner', () => {
       expect(existsSync('/tmp/attacker-controlled/audit.jsonl')).toBe(false);
     });
 
-    it('getAuditPath returns durable non-tmp path under HOME', () => {
+    it('getAuditPath returns durable non-tmp path under HOME scoped by instance and org', () => {
       const path = getAuditPath('WO-1234');
       expect(path).toContain('.cortextos');
       expect(path).toContain('shadow-audit');
       expect(path).not.toContain('/tmp');
       expect(path).toContain('WO-1234');
+      expect(path).toContain(process.env.CTX_INSTANCE_ID!);
+      expect(path).toContain(process.env.CTX_ORG!);
+    });
+
+    it('different CTX_INSTANCE_ID or CTX_ORG produces different paths for same WO', () => {
+      const origInstance = process.env.CTX_INSTANCE_ID;
+      const origOrg = process.env.CTX_ORG;
+      try {
+        process.env.CTX_INSTANCE_ID = 'instance-a';
+        process.env.CTX_ORG = 'org-a';
+        const pathA = getAuditPath('WO-shared');
+
+        process.env.CTX_INSTANCE_ID = 'instance-b';
+        process.env.CTX_ORG = 'org-b';
+        const pathB = getAuditPath('WO-shared');
+
+        expect(pathA).not.toBe(pathB);
+        expect(pathA).toContain('instance-a');
+        expect(pathA).toContain('org-a');
+        expect(pathB).toContain('instance-b');
+        expect(pathB).toContain('org-b');
+      } finally {
+        process.env.CTX_INSTANCE_ID = origInstance;
+        process.env.CTX_ORG = origOrg;
+      }
+    });
+
+    it('fails closed when CTX_INSTANCE_ID is unset', () => {
+      const orig = process.env.CTX_INSTANCE_ID;
+      try {
+        delete process.env.CTX_INSTANCE_ID;
+        expect(() => getAuditPath('WO-1234')).toThrow('Audit scope unresolvable');
+      } finally {
+        process.env.CTX_INSTANCE_ID = orig;
+      }
+    });
+
+    it('fails closed when CTX_ORG is unset', () => {
+      const orig = process.env.CTX_ORG;
+      try {
+        delete process.env.CTX_ORG;
+        expect(() => getAuditPath('WO-1234')).toThrow('Audit scope unresolvable');
+      } finally {
+        process.env.CTX_ORG = orig;
+      }
     });
 
     it('getAuditPath sanitizes path-traversal WO IDs', () => {

@@ -1,4 +1,7 @@
-import { appendFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import {
+  readFileSync, mkdirSync, existsSync, statSync, chmodSync,
+  openSync, writeSync, closeSync, constants,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { ShadowRecord, ReviewVerdict, ActionPacket, TriageWO } from './types.js';
@@ -63,11 +66,24 @@ export function appendShadowAudit(
 
   const dir = dirname(auditPath);
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  const dirMode = statSync(dir).mode & 0o777;
+  if (dirMode !== 0o700) {
+    chmodSync(dir, 0o700);
   }
 
   const line = JSON.stringify(auditRecord) + '\n';
-  appendFileSync(auditPath, line, 'utf-8');
+  const fd = openSync(auditPath, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
+  try {
+    writeSync(fd, line);
+  } finally {
+    closeSync(fd);
+  }
+  const fileMode = statSync(auditPath).mode & 0o777;
+  if (fileMode !== 0o600) {
+    chmodSync(auditPath, 0o600);
+  }
 
   return { acknowledged: true, recordId, appendedAt };
 }

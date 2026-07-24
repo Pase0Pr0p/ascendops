@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, unlinkSync, mkdirSync, rmSync, statSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendShadowAudit, readAuditRecords, replayFromRecord } from '../../../../src/bus/triage/shadow-audit';
 import { computeCanonicalHash } from '../../../../src/bus/triage/packet-builder';
@@ -118,6 +118,44 @@ describe('shadow-audit', () => {
       const result = appendShadowAudit(deepPath, makeShadowRecord(), makeGateResult(), makeIndependentReview());
       expect(result.acknowledged).toBe(true);
       expect(existsSync(deepPath)).toBe(true);
+    });
+
+    it('creates directory with 0700 permissions', () => {
+      const dirPath = join(TEST_DIR, 'perms-test');
+      const filePath = join(dirPath, 'audit.jsonl');
+      appendShadowAudit(filePath, makeShadowRecord(), makeGateResult(), makeIndependentReview());
+
+      const dirMode = statSync(dirPath).mode & 0o777;
+      expect(dirMode).toBe(0o700);
+    });
+
+    it('creates file with 0600 permissions', () => {
+      appendShadowAudit(AUDIT_PATH, makeShadowRecord(), makeGateResult(), makeIndependentReview());
+
+      const fileMode = statSync(AUDIT_PATH).mode & 0o777;
+      expect(fileMode).toBe(0o600);
+    });
+
+    it('repairs existing directory with wrong permissions', () => {
+      mkdirSync(TEST_DIR, { recursive: true });
+      chmodSync(TEST_DIR, 0o755);
+      expect(statSync(TEST_DIR).mode & 0o777).toBe(0o755);
+
+      appendShadowAudit(AUDIT_PATH, makeShadowRecord(), makeGateResult(), makeIndependentReview());
+
+      const dirMode = statSync(TEST_DIR).mode & 0o777;
+      expect(dirMode).toBe(0o700);
+    });
+
+    it('repairs existing file with wrong permissions', () => {
+      appendShadowAudit(AUDIT_PATH, makeShadowRecord(), makeGateResult(), makeIndependentReview());
+      chmodSync(AUDIT_PATH, 0o644);
+      expect(statSync(AUDIT_PATH).mode & 0o777).toBe(0o644);
+
+      appendShadowAudit(AUDIT_PATH, makeShadowRecord(), makeGateResult(), makeIndependentReview());
+
+      const fileMode = statSync(AUDIT_PATH).mode & 0o777;
+      expect(fileMode).toBe(0o600);
     });
   });
 
