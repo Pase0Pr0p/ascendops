@@ -94,6 +94,7 @@ export function createShadowRecord(
       shadowVerdict: packet,
       reviewResult: review,
       timestamp: new Date().toISOString(),
+      packetHash: packet.canonicalHash,
     },
     escalated: false,
   };
