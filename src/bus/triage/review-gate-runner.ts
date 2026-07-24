@@ -14,12 +14,15 @@ import { appendShadowAudit } from './shadow-audit.js';
 
 export const REVIEWER_VERSION = 'review-gate-runner-v3';
 
+export type ReviewerFn = (wo: TriageWO, packet: ActionPacket) => IndependentReviewResult;
+
 export interface ReviewGateInput {
   wo: TriageWO;
   packet: ActionPacket;
   phase: Phase;
   actionType: ActionType;
   auditPath?: string;
+  reviewer?: ReviewerFn;
 }
 
 export interface ReviewGateOutput {
@@ -156,8 +159,52 @@ function denyOutput(actionType: ActionType, reasons: string[], rule: string): Re
   };
 }
 
+function isValidReviewerResult(value: unknown): value is IndependentReviewResult {
+  if (value === null || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  if (obj.result !== 'PASS' && obj.result !== 'FAIL' && obj.result !== 'ESCALATE') return false;
+  if (!Array.isArray(obj.violations)) return false;
+  if (typeof obj.reviewerVersion !== 'string' || obj.reviewerVersion.length === 0) return false;
+  if (typeof obj.reviewedAt !== 'string' || obj.reviewedAt.length === 0) return false;
+  return true;
+}
+
+function invokeReviewer(reviewerFn: ReviewerFn | undefined, wo: TriageWO, packet: ActionPacket): IndependentReviewResult {
+  if (!reviewerFn) {
+    return {
+      result: 'FAIL',
+      violations: ['Reviewer unavailable: no reviewer function provided'],
+      reviewerVersion: 'unavailable',
+      reviewedAt: new Date().toISOString(),
+    };
+  }
+
+  let raw: unknown;
+  try {
+    raw = reviewerFn(wo, packet);
+  } catch (err) {
+    return {
+      result: 'FAIL',
+      violations: [`Reviewer threw: ${err instanceof Error ? err.message : String(err)}`],
+      reviewerVersion: 'error',
+      reviewedAt: new Date().toISOString(),
+    };
+  }
+
+  if (!isValidReviewerResult(raw)) {
+    return {
+      result: 'FAIL',
+      violations: ['Reviewer returned malformed result: missing or invalid result/violations/reviewerVersion/reviewedAt'],
+      reviewerVersion: 'malformed',
+      reviewedAt: new Date().toISOString(),
+    };
+  }
+
+  return raw;
+}
+
 export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
-  const { wo, packet, phase, actionType, auditPath } = input;
+  const { wo, packet, phase, actionType, auditPath, reviewer } = input;
 
   const terminalCheck = checkTerminalInvariants(wo);
   if (terminalCheck.terminal) {
@@ -205,10 +252,14 @@ export function runReviewGate(input: ReviewGateInput): ReviewGateOutput {
     return { gateResult, verdict: buildVerdict('FAIL', reasons), shadowRecord: null, escalated: false };
   }
 
-  const irResult = independentReview(wo, packet);
-  if (!irResult.approved) {
+  const reviewerFn = reviewer !== undefined ? reviewer : independentReview;
+  const irResult = invokeReviewer(reviewerFn, wo, packet);
+  if (irResult.result !== 'PASS') {
     const irReasons = irResult.violations.map(v => `Independent review: ${v}`);
-    return denyOutput(actionType, irReasons, 'independent-review');
+    return {
+      ...denyOutput(actionType, irReasons, 'independent-review'),
+      independentReview: irResult,
+    };
   }
 
   const verdict = buildVerdict('PASS', reasons);

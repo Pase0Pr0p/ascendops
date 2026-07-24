@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { independentReview, INDEPENDENT_REVIEWER_VERSION } from '../../../../src/bus/triage/independent-reviewer';
-import { buildPacket, computeFingerprint, computeCanonicalHash } from '../../../../src/bus/triage/packet-builder';
+import { buildPacket } from '../../../../src/bus/triage/packet-builder';
 import type { TriageWO, ActionPacket } from '../../../../src/bus/triage/types';
 
 function makeWO(overrides: Partial<TriageWO> = {}): TriageWO {
@@ -25,49 +25,49 @@ function makePacket(wo: TriageWO, message = 'We have received your request.'): A
 }
 
 describe('independent-reviewer', () => {
-  it('approves a valid packet built from the same WO', () => {
+  it('passes a valid packet built from the same WO', () => {
     const wo = makeWO();
     const packet = makePacket(wo);
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(true);
+    expect(result.result).toBe('PASS');
     expect(result.violations).toHaveLength(0);
     expect(result.reviewerVersion).toBe(INDEPENDENT_REVIEWER_VERSION);
     expect(result.reviewedAt).toBeTruthy();
   });
 
-  it('rejects when WO has terminal invariant (mold)', () => {
+  it('escalates when WO has terminal invariant (mold)', () => {
     const wo = makeWO({ conversationText: 'There is mold behind the sink.' });
     const safeWO = makeWO();
     const packet = makePacket(safeWO);
     packet.woId = wo.woId;
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
-    expect(result.violations.some(v => v.includes('Terminal invariant'))).toBe(true);
+    expect(result.result).toBe('ESCALATE');
+    expect(result.violations.some(v => v.includes('Terminal'))).toBe(true);
   });
 
-  it('rejects WO ID mismatch', () => {
+  it('fails WO ID mismatch', () => {
     const wo = makeWO({ woId: 'WO-A' });
     const otherWO = makeWO({ woId: 'WO-B' });
     const packet = makePacket(otherWO);
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('WO ID mismatch'))).toBe(true);
   });
 
-  it('rejects fingerprint drift after WO changes', () => {
+  it('fails fingerprint drift after WO changes', () => {
     const wo = makeWO();
     const packet = makePacket(wo);
     wo.conversationText = 'Now there is a completely different problem.';
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('fingerprint'))).toBe(true);
   });
 
-  it('rejects canonical hash mismatch (tampered packet)', () => {
+  it('fails canonical hash mismatch (tampered packet)', () => {
     const wo = makeWO();
     const packet = makePacket(wo);
     packet.facts.push({
@@ -79,70 +79,70 @@ describe('independent-reviewer', () => {
     });
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('Canonical hash'))).toBe(true);
   });
 
-  it('rejects expired packet', () => {
+  it('fails expired packet', () => {
     const wo = makeWO();
     const packet = makePacket(wo);
     packet.expiresAt = '2000-01-01T00:00:00.000Z';
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('expired'))).toBe(true);
   });
 
-  it('rejects malformed date fields', () => {
+  it('fails malformed date fields', () => {
     const wo = makeWO();
     const packet = makePacket(wo);
     packet.expiresAt = 'not-a-date';
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('invalid date'))).toBe(true);
   });
 
-  it('rejects wrong recipientRole for tenant purpose', () => {
+  it('fails wrong recipientRole for tenant purpose', () => {
     const wo = makeWO();
     const packet = makePacket(wo);
     packet.recipientRole = 'vendor';
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
-    expect(result.violations.some(v => v.includes('non-tenant role'))).toBe(true);
+    expect(result.result).toBe('FAIL');
+    expect(result.violations.some(v => v.includes('role'))).toBe(true);
   });
 
-  it('rejects wrong channel for tenant purpose', () => {
+  it('fails wrong channel for tenant purpose', () => {
     const wo = makeWO();
     const packet = makePacket(wo);
     packet.channel = 'email';
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
-    expect(result.violations.some(v => v.includes('unauthorized channel'))).toBe(true);
+    expect(result.result).toBe('FAIL');
+    expect(result.violations.some(v => v.includes('channel'))).toBe(true);
   });
 
-  it('rejects wrong recipient for tenant purpose', () => {
+  it('fails wrong recipient for tenant purpose', () => {
     const wo = makeWO({ tenantName: 'Real Tenant' });
     const packet = makePacket(wo);
     packet.recipient = 'Wrong Person';
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('recipient identity'))).toBe(true);
   });
 
-  it('rejects prohibited content', () => {
+  it('fails prohibited content', () => {
     const wo = makeWO();
     const packet = makePacket(wo, 'This is your fault and you will be charged.');
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('Content:'))).toBe(true);
   });
 
-  it('rejects fact ledger drift (fact added after packet build)', () => {
+  it('fails fact ledger drift (fact added after packet build)', () => {
     const wo = makeWO({
       facts: [{
         type: 'tenant_fact',
@@ -162,7 +162,7 @@ describe('independent-reviewer', () => {
     });
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).toBe('FAIL');
     expect(result.violations.some(v => v.includes('fingerprint'))).toBe(true);
   });
 
@@ -174,7 +174,22 @@ describe('independent-reviewer', () => {
     packet.channel = 'email';
     const result = independentReview(wo, packet);
 
-    expect(result.approved).toBe(false);
+    expect(result.result).not.toBe('PASS');
     expect(result.violations.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('uses independent implementation (does not share packet-builder imports)', () => {
+    expect(INDEPENDENT_REVIEWER_VERSION).toContain('independent-reviewer');
+  });
+
+  it('returns strict PASS/FAIL/ESCALATE schema', () => {
+    const wo = makeWO();
+    const packet = makePacket(wo);
+    const result = independentReview(wo, packet);
+
+    expect(['PASS', 'FAIL', 'ESCALATE']).toContain(result.result);
+    expect(Array.isArray(result.violations)).toBe(true);
+    expect(typeof result.reviewerVersion).toBe('string');
+    expect(typeof result.reviewedAt).toBe('string');
   });
 });

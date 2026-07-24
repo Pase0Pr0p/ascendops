@@ -341,4 +341,75 @@ describe('review-gate-runner', () => {
       expect(output.verdict.reviewerVersion).toBe(REVIEWER_VERSION);
     });
   });
+
+  describe('injectable reviewer boundary', () => {
+    it('uses injected reviewer when provided', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const customReviewer = () => ({
+        result: 'FAIL' as const,
+        violations: ['Custom reviewer rejects'],
+        reviewerVersion: 'custom-v1',
+        reviewedAt: new Date().toISOString(),
+      });
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT', reviewer: customReviewer });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.gateResult.rule).toBe('independent-review');
+    });
+
+    it('fails closed when reviewer throws', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const throwingReviewer = () => { throw new Error('reviewer crashed'); };
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT', reviewer: throwingReviewer });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.gateResult.rule).toBe('independent-review');
+    });
+
+    it('fails closed when reviewer returns malformed result', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const malformedReviewer = (() => ({ bad: 'data' })) as any;
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT', reviewer: malformedReviewer });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.gateResult.rule).toBe('independent-review');
+    });
+
+    it('fails closed when reviewer is explicitly null (unavailable)', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT', reviewer: null as any });
+
+      expect(output.verdict.result).toBe('FAIL');
+      expect(output.gateResult.rule).toBe('independent-review');
+    });
+
+    it('records independent review result on PASS', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT' });
+
+      expect(output.verdict.result).toBe('PASS');
+      expect(output.independentReview).toBeDefined();
+      expect(output.independentReview!.result).toBe('PASS');
+    });
+
+    it('records independent review result on FAIL', () => {
+      const wo = makeWO();
+      const packet = makeValidPacket(wo);
+      const rejectingReviewer = () => ({
+        result: 'FAIL' as const,
+        violations: ['Reviewer says no'],
+        reviewerVersion: 'test-v1',
+        reviewedAt: new Date().toISOString(),
+      });
+      const output = runReviewGate({ wo, packet, phase: 1, actionType: 'SEND_TENANT', reviewer: rejectingReviewer });
+
+      expect(output.independentReview).toBeDefined();
+      expect(output.independentReview!.result).toBe('FAIL');
+    });
+  });
 });

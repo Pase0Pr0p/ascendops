@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendShadowAudit, readAuditRecords, replayFromRecord } from '../../../../src/bus/triage/shadow-audit';
+import { computeCanonicalHash } from '../../../../src/bus/triage/packet-builder';
 import type { ShadowRecord, ReviewVerdict, ActionPacket } from '../../../../src/bus/triage/types';
 import type { GateResult } from '../../../../src/bus/triage/triage-gate';
 import type { IndependentReviewResult } from '../../../../src/bus/triage/independent-reviewer';
@@ -10,23 +11,24 @@ const TEST_DIR = join(process.cwd(), 'tests', 'unit', 'bus', 'triage', '.test-au
 const AUDIT_PATH = join(TEST_DIR, 'shadow-audit.jsonl');
 
 function makePacket(): ActionPacket {
-  return {
+  const partial = {
     woId: 'WO-6000',
     recipient: 'Test Tenant',
     recipientRole: 'tenant',
     channel: 'appfolio_wo_message',
     messageBytes: 'We have received your request.',
-    purpose: 'ACK',
-    facts: [],
-    escalationFlags: [],
-    tier: 'N',
+    purpose: 'ACK' as const,
+    facts: [] as any[],
+    escalationFlags: [] as any[],
+    tier: 'N' as const,
     policyVersion: 1,
     conversationFingerprint: 'abc123',
-    issuedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 72 * 3600 * 1000).toISOString(),
+    issuedAt: '2026-07-24T01:00:00.000Z',
+    expiresAt: '2026-07-27T01:00:00.000Z',
     nonce: 'test-nonce',
-    canonicalHash: 'hash123',
   };
+  const canonicalHash = computeCanonicalHash(partial);
+  return { ...partial, canonicalHash };
 }
 
 function makeVerdict(): ReviewVerdict {
@@ -39,12 +41,13 @@ function makeVerdict(): ReviewVerdict {
 }
 
 function makeShadowRecord(): ShadowRecord {
+  const packet = makePacket();
   return {
     woId: 'WO-6000',
-    shadowVerdict: makePacket(),
+    shadowVerdict: packet,
     reviewResult: makeVerdict(),
     timestamp: new Date().toISOString(),
-    packetHash: 'hash123',
+    packetHash: packet.canonicalHash,
   };
 }
 
@@ -60,7 +63,7 @@ function makeGateResult(): GateResult {
 
 function makeIndependentReview(): IndependentReviewResult {
   return {
-    approved: true,
+    result: 'PASS',
     violations: [],
     reviewerVersion: 'independent-reviewer-v1',
     reviewedAt: new Date().toISOString(),
@@ -133,7 +136,7 @@ describe('shadow-audit', () => {
       expect(record.recordId).toMatch(/^sr-/);
       expect(record.shadowRecord.woId).toBe('WO-6000');
       expect(record.gateResult.decision).toBe('ALLOW');
-      expect(record.independentReview.approved).toBe(true);
+      expect(record.independentReview.result).toBe('PASS');
       expect(record.appendedAt).toBeTruthy();
       expect(record.contentHash).toHaveLength(64);
     });
@@ -176,14 +179,14 @@ describe('shadow-audit', () => {
 
     it('detects independent reviewer rejection on PASS record', () => {
       const ir = makeIndependentReview();
-      ir.approved = false;
+      ir.result = 'FAIL';
       ir.violations = ['WO ID mismatch'];
       appendShadowAudit(AUDIT_PATH, makeShadowRecord(), makeGateResult(), ir);
       const records = readAuditRecords(AUDIT_PATH);
       const replay = replayFromRecord(records[0]);
 
       expect(replay.matches).toBe(false);
-      expect(replay.drifts.some(d => d.includes('Independent reviewer rejected'))).toBe(true);
+      expect(replay.drifts.some(d => d.includes('Independent reviewer FAIL'))).toBe(true);
     });
   });
 });

@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { TriageWO, Phase, ActionType, ActionPurpose, ShadowRecord } from './types.js';
 import type { ClassificationResult } from './classifier.js';
 import type { ReviewGateOutput } from './review-gate-runner.js';
@@ -22,6 +24,11 @@ export interface PipelineInput {
   channel?: string;
   cardId?: string;
   policyVersion?: number;
+  auditPath?: string;
+}
+
+function defaultAuditPath(woId: string): string {
+  return join(tmpdir(), 'cortextos-shadow-audit', `${woId}.jsonl`);
 }
 
 export interface PipelineResult {
@@ -118,11 +125,14 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
     };
   }
 
+  const auditPath = input.auditPath || defaultAuditPath(input.woId);
+
   const gateOutput = runReviewGate({
     wo,
     packet: packetResult.packet,
     phase: input.phase,
     actionType: input.actionType,
+    auditPath,
   });
 
   if (gateOutput.escalated) {
@@ -132,6 +142,22 @@ export function runShadowPipeline(input: PipelineInput): PipelineResult {
       gateOutput,
       escalated: true,
       escalationReason: gateOutput.escalationReason,
+      rejected: false,
+      finalState: wo.state,
+    };
+  }
+
+  if (gateOutput.verdict.result === 'PASS' && !gateOutput.auditResult?.acknowledged) {
+    return {
+      wo,
+      classification,
+      gateOutput: {
+        ...gateOutput,
+        gateResult: { decision: 'DENY', finalActionType: input.actionType, reclassified: false, reason: 'Durable audit append failed or not acknowledged', rule: 'audit-required' },
+        verdict: { result: 'FAIL', reasons: ['PASS denied: durable audit not acknowledged'], reviewedAt: new Date().toISOString(), reviewerVersion: gateOutput.verdict.reviewerVersion },
+        shadowRecord: null,
+      },
+      escalated: false,
       rejected: false,
       finalState: wo.state,
     };

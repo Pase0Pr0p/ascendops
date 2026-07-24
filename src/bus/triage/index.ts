@@ -23,7 +23,7 @@ export type { ScheduleClassifyResult } from './schedule-classifier.js';
 export type { GateResult } from './triage-gate.js';
 export type { ClassificationResult } from './classifier.js';
 export type { PacketBuildOptions, PacketBuildResult } from './packet-builder.js';
-export type { ReviewGateInput, ReviewGateOutput } from './review-gate-runner.js';
+export type { ReviewGateInput, ReviewGateOutput, ReviewerFn } from './review-gate-runner.js';
 export type { PipelineInput, PipelineResult } from './shadow-pipeline.js';
 export type { ContentValidationResult } from './content-validator.js';
 export type { IndependentReviewResult } from './independent-reviewer.js';

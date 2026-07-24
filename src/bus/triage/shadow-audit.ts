@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { ShadowRecord, ReviewVerdict, ActionPacket, TriageWO } from './types.js';
 import type { IndependentReviewResult } from './independent-reviewer.js';
 import type { GateResult } from './triage-gate.js';
+import { computeCanonicalHash } from './packet-builder.js';
 
 export interface DurableAuditRecord {
   recordId: string;
@@ -91,6 +92,16 @@ export function replayFromRecord(record: DurableAuditRecord): ReplayResult {
     drifts.push(`Content hash drift: stored='${record.contentHash}' recomputed='${recomputedHash}'`);
   }
 
+  const packet = record.shadowRecord.shadowVerdict;
+  const recomputedCanonical = computeCanonicalHash(packet);
+  if (recomputedCanonical !== packet.canonicalHash) {
+    drifts.push(`Packet canonical hash invalid: stored='${packet.canonicalHash}' recomputed='${recomputedCanonical}'`);
+  }
+
+  if (record.shadowRecord.packetHash !== recomputedCanonical) {
+    drifts.push(`Shadow record packetHash does not match recomputed canonical: stored='${record.shadowRecord.packetHash}' recomputed='${recomputedCanonical}'`);
+  }
+
   const gateVerdict = record.gateResult.decision === 'ALLOW' ? 'PASS' : 'FAIL';
   const reviewVerdict = record.shadowRecord.reviewResult.result;
 
@@ -98,8 +109,8 @@ export function replayFromRecord(record: DurableAuditRecord): ReplayResult {
     drifts.push(`Gate/review disagreement: gate='${gateVerdict}' review='${reviewVerdict}'`);
   }
 
-  if (!record.independentReview.approved && reviewVerdict === 'PASS') {
-    drifts.push('Independent reviewer rejected but review passed');
+  if (record.independentReview.result !== 'PASS' && reviewVerdict === 'PASS') {
+    drifts.push(`Independent reviewer ${record.independentReview.result} but review passed`);
   }
 
   return {
