@@ -9,6 +9,7 @@ import type { IndependentReviewResult } from './independent-reviewer.js';
 import type { AppendResult } from './shadow-audit.js';
 import { triageGate } from './triage-gate.js';
 import { validateContent } from './content-validator.js';
+import { validateInstanceId, validateOrgName } from '../../utils/validate.js';
 import { checkTerminalInvariants } from './terminal-invariants.js';
 import { computeFingerprint, computeCanonicalHash } from './packet-builder.js';
 import { independentReview } from './independent-reviewer.js';
@@ -59,9 +60,9 @@ function resolveAuditRoot(): string {
       'Cannot resolve authoritative audit root without instance and org scope.',
     );
   }
-  const safeInstance = instanceId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const safeOrg = org.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return join(homedir(), '.cortextos', safeInstance, 'orgs', safeOrg, 'shadow-audit');
+  validateInstanceId(instanceId);
+  validateOrgName(org);
+  return join(homedir(), '.cortextos', instanceId, 'orgs', org, 'shadow-audit');
 }
 
 function internalAuditPath(woId: string): string {

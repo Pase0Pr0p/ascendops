@@ -431,11 +431,12 @@ describe('review-gate-runner', () => {
       expect(existsSync('/tmp/attacker-controlled/audit.jsonl')).toBe(false);
     });
 
-    it('getAuditPath returns durable non-tmp path under HOME scoped by instance and org', () => {
+    it('getAuditPath returns path under HOME/.cortextos scoped by instance and org', () => {
       const path = getAuditPath('WO-1234');
+      const home = process.env.HOME || process.env.USERPROFILE || '';
+      expect(path.startsWith(home)).toBe(true);
       expect(path).toContain('.cortextos');
       expect(path).toContain('shadow-audit');
-      expect(path).not.toContain('/tmp');
       expect(path).toContain('WO-1234');
       expect(path).toContain(process.env.CTX_INSTANCE_ID!);
       expect(path).toContain(process.env.CTX_ORG!);
@@ -481,6 +482,32 @@ describe('review-gate-runner', () => {
         expect(() => getAuditPath('WO-1234')).toThrow('Audit scope unresolvable');
       } finally {
         process.env.CTX_ORG = orig;
+      }
+    });
+
+    it('fails closed on malformed CTX_INSTANCE_ID (rejects, does not normalize)', () => {
+      const origInstance = process.env.CTX_INSTANCE_ID;
+      const origOrg = process.env.CTX_ORG;
+      try {
+        process.env.CTX_INSTANCE_ID = 'instance/a';
+        process.env.CTX_ORG = 'org-safe';
+        expect(() => getAuditPath('WO-1234')).toThrow('Invalid instance ID');
+      } finally {
+        process.env.CTX_INSTANCE_ID = origInstance;
+        process.env.CTX_ORG = origOrg;
+      }
+    });
+
+    it('fails closed on malformed CTX_ORG (rejects, does not normalize)', () => {
+      const origInstance = process.env.CTX_INSTANCE_ID;
+      const origOrg = process.env.CTX_ORG;
+      try {
+        process.env.CTX_INSTANCE_ID = 'instance-safe';
+        process.env.CTX_ORG = 'org/a';
+        expect(() => getAuditPath('WO-1234')).toThrow('Invalid org name');
+      } finally {
+        process.env.CTX_INSTANCE_ID = origInstance;
+        process.env.CTX_ORG = origOrg;
       }
     });
 
