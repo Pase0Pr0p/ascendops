@@ -6,6 +6,7 @@
  *
  * Routes (David playbook Step 12):
  *   GET  /health                         — liveness check, no auth
+ *   GET  /privacy                        — privacy policy (public, no auth)
  *   POST /voice/call-status              — Telnyx call-status events (Ed25519)
  *   POST /voice/conversation-insights    — Telnyx post-call AI summary (Ed25519)
  *   POST /webhook/telnyx/transcript      — Telnyx real-time transcript (Ed25519)
@@ -43,6 +44,109 @@ const pool = new pg.Pool({
   connectionString: _dsn,
   ssl: _caCert ? { ca: _caCert, rejectUnauthorized: true } : { rejectUnauthorized: false },
 });
+
+const PRIVACY_POLICY_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy — Paseo Property Management</title>
+  <style>
+    :root { --ink:#1a1a1a; --muted:#555; --accent:#1f4e5f; --rule:#e2e2e2; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--ink); line-height: 1.6; margin: 0; background: #fff;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 48px 24px 80px; }
+    header { border-bottom: 2px solid var(--accent); padding-bottom: 20px; margin-bottom: 32px; }
+    h1 { font-size: 1.9rem; margin: 0 0 6px; color: var(--accent); }
+    .updated { color: var(--muted); font-size: 0.9rem; }
+    h2 { font-size: 1.2rem; margin: 36px 0 10px; color: var(--accent); }
+    p, li { color: var(--ink); }
+    a { color: var(--accent); }
+    .highlight {
+      background: #f4f8f9; border-left: 4px solid var(--accent);
+      padding: 16px 20px; border-radius: 0 6px 6px 0; margin: 20px 0;
+    }
+    footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.88rem; }
+    ul { padding-left: 22px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Privacy Policy</h1>
+      <div class="updated">Paseo Property Management &middot; Last updated: July 15, 2026</div>
+    </header>
+
+    <p>Paseo Property Management (“Paseo,” “we,” “us,” or “our”) respects your privacy. This Privacy Policy explains what information we collect from tenants, property owners, and website visitors, how we use it, and the choices you have. By providing your information to us or using our services, you agree to the practices described here.</p>
+
+    <h2 id="sms-optin">SMS Text Message Opt-In &amp; Consent</h2>
+    <p>Tenants and property owners provide their mobile number and give written SMS consent at the start of their tenancy by initialing an SMS opt-in disclosure and signing their lease or move-in form, as part of an existing business relationship. The signed form includes the phone-number field, the opt-in disclosure, and a signature line. The opt-in disclosure that appears on that form reads as follows:</p>
+    <div class="highlight">
+      <p><strong>Text Message Consent (optional).</strong> By providing my mobile number and initialing here, I agree to receive text messages from Paseo Property Management about my tenancy: maintenance updates, emergency property alerts, rent reminders, and account communications. Message frequency varies. Message and data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of renting. Paseo does not sell, rent, or share mobile phone numbers or SMS opt-in consent with third parties.</p>
+      <p style="margin-top:14px;">Mobile number: <span style="border-bottom:1px solid #999; display:inline-block; width:220px;">&nbsp;</span></p>
+      <p>Initials: <span style="border-bottom:1px solid #999; display:inline-block; width:90px;">&nbsp;</span>&nbsp;&nbsp;&nbsp;Date: <span style="border-bottom:1px solid #999; display:inline-block; width:120px;">&nbsp;</span></p>
+      <p>Signature: <span style="border-bottom:1px solid #999; display:inline-block; width:260px;">&nbsp;</span></p>
+    </div>
+    <p>When a subscriber opts in, they receive this confirmation text message:</p>
+    <div class="highlight">
+      <p>Paseo Property Management: You are subscribed to tenancy text alerts (maintenance, emergencies, rent reminders, account info). Msg freq varies. Msg &amp; data rates may apply. Reply STOP to cancel, HELP for help.</p>
+    </div>
+    <p>All text messages relate to the recipient’s own tenancy or account and include opt-out instructions. You may reply STOP at any time to unsubscribe, or HELP for assistance.</p>
+
+    <h2>Information We Collect</h2>
+    <p>We collect information you provide directly to us, including:</p>
+    <ul>
+      <li>Contact details such as your name, mailing address, email address, and mobile phone number;</li>
+      <li>Information you provide when signing a lease, completing a move-in form, or communicating with us about your tenancy or property;</li>
+      <li>Payment and account information necessary to administer rent, deposits, and owner disbursements;</li>
+      <li>Maintenance requests and related communications.</li>
+    </ul>
+
+    <h2>How We Use Your Information</h2>
+    <p>We use the information we collect to:</p>
+    <ul>
+      <li>Manage your tenancy or ownership relationship, including leasing, rent, maintenance, and account communications;</li>
+      <li>Send you service messages you have requested or consented to, such as maintenance updates, emergency property alerts, rent reminders, and account communications;</li>
+      <li>Respond to your inquiries and provide customer support;</li>
+      <li>Comply with legal, regulatory, and contractual obligations.</li>
+    </ul>
+
+    <h2>Mobile Information &amp; SMS</h2>
+    <div class="highlight">
+      <p><strong>We do not sell, rent, or share mobile phone numbers or SMS opt-in consent with any third parties or affiliates for marketing or promotional purposes.</strong> Text-messaging originator opt-in data and consent are not shared with any third parties.</p>
+      <p>We use your mobile number only to send tenancy-related messages you have consented to receive — maintenance updates, emergency property alerts, rent reminders, and account communications. Message frequency varies. Message and data rates may apply.</p>
+      <p>You may opt out of text messages at any time by replying <strong>STOP</strong> to any message. For help, reply <strong>HELP</strong>, or contact us using the details below. Consent to receive text messages is not a condition of renting or of any service.</p>
+    </div>
+
+    <h2>How We Share Information</h2>
+    <p>We may share your information with service providers who perform services on our behalf (such as payment processing, accounting, and maintenance vendors), with property owners as necessary to administer their properties, and where required by law or to protect our legal rights. As stated above, we never sell or share mobile numbers or SMS consent for marketing purposes.</p>
+
+    <h2>Data Retention &amp; Security</h2>
+    <p>We retain personal information for as long as necessary to fulfill the purposes described in this policy and to comply with our legal obligations. We use reasonable administrative, technical, and physical safeguards to protect your information.</p>
+
+    <h2>Your Choices</h2>
+    <p>You may update your contact information or opt out of non-essential communications by contacting us. You may opt out of text messages at any time by replying STOP.</p>
+
+    <h2>Changes to This Policy</h2>
+    <p>We may update this Privacy Policy from time to time. The “Last updated” date at the top of this page reflects the most recent revision.</p>
+
+    <h2>Contact Us</h2>
+    <p>If you have questions about this Privacy Policy or our privacy practices, contact us:</p>
+    <ul>
+      <li>Phone: (415) 384-8503</li>
+      <li>Email: <a href="mailto:info@paseopropertymanagement.com">info@paseopropertymanagement.com</a></li>
+      <li>Web: <a href="https://paseopropertiessf.com">paseopropertiessf.com</a></li>
+    </ul>
+
+    <footer>
+      &copy; 2026 Paseo Property Management. All rights reserved.
+    </footer>
+  </div>
+</body>
+</html>`;
 
 async function verifyTelnyxSig(
   sig: string,
@@ -848,6 +952,12 @@ const server = http.createServer(async (req, res) => {
   if (method === 'GET' && url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, service: 'voice-gateway', version: 'v0' }));
+    return;
+  }
+
+  if (method === 'GET' && url === '/privacy') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(PRIVACY_POLICY_HTML);
     return;
   }
 
